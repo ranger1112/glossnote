@@ -1,0 +1,125 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [4 0 R 6 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>
+endobj
+5 0 obj
+<< /Length 1014 >>
+stream
+BT
+/F1 12 Tf
+18 TL
+72 720 Td
+(GlossNote sample document) Tj
+T*
+(This page exists so the anchoring prototype has something to select.) Tj
+T*
+() Tj
+T*
+(Reading is not moving words from paper into your head.) Tj
+T*
+(It is carrying questions back into your own life.) Tj
+T*
+() Tj
+T*
+(Anchoring is the heart of annotation.) Tj
+T*
+(A highlight that cannot survive a restart is only a decoration.) Tj
+T*
+() Tj
+T*
+(The next paragraph repeats a sentence on purpose.) Tj
+T*
+(Anchoring is the heart of annotation.) Tj
+T*
+(The second occurrence sits in a different context,) Tj
+T*
+(so the resolver has to use the surrounding words to pick the right one.) Tj
+T*
+() Tj
+T*
+(Zoom in, zoom out, reload the page.) Tj
+T*
+(The highlight should return to the same line every time.) Tj
+T*
+() Tj
+T*
+(A good anchor stores four things:) Tj
+T*
+(the quoted text, its neighbours, its position, and the page fingerprint.) Tj
+T*
+() Tj
+T*
+(Coordinates are normalized to the page,) Tj
+T*
+(so changing the window size never moves the mark.) Tj
+ET
+endstream
+endobj
+6 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R >>
+endobj
+7 0 obj
+<< /Length 678 >>
+stream
+BT
+/F1 12 Tf
+18 TL
+72 720 Td
+(Second page) Tj
+T*
+() Tj
+T*
+(Try selecting across two lines.) Tj
+T*
+(The highlight should cover each line separately.) Tj
+T*
+() Tj
+T*
+(Try selecting a single word.) Tj
+T*
+(Then try selecting a sentence that wraps onto another line.) Tj
+T*
+() Tj
+T*
+(If the PDF changes, the resolver falls back:) Tj
+T*
+(exact fingerprint, then text search, then similarity, then position.) Tj
+T*
+() Tj
+T*
+(That fallback chain is the part worth testing) Tj
+T*
+(before building the library, the database, or the sync layer.) Tj
+T*
+() Tj
+T*
+(The rest of the product is ordinary engineering.) Tj
+T*
+(The anchor is the part that decides whether the notes survive.) Tj
+ET
+endstream
+endobj
+xref
+0 8
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000121 00000 n 
+0000000191 00000 n 
+0000000317 00000 n 
+0000001382 00000 n 
+0000001508 00000 n 
+trailer
+<< /Size 8 /Root 1 0 R >>
+startxref
+2236
+%%EOF
