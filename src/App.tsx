@@ -199,6 +199,7 @@ export default function App() {
   } | null>(null);
   const progressTimer = useRef<number | null>(null);
   const scrollFrame = useRef<number | null>(null);
+  const pinnedPage = useRef<number | null>(null);
   const openingRef = useRef(false);
   const closingRef = useRef(false);
   annotationsRef.current = annotations;
@@ -400,6 +401,7 @@ export default function App() {
       scrollFrame.current = null;
     }
     pendingAnchor.current = null;
+    pinnedPage.current = null;
     docRef.current?.dispose();
 
     const opened: OpenedDoc = {
@@ -548,6 +550,7 @@ export default function App() {
       recordRef.current = null;
       currentPageRef.current = 0;
       pendingAnchor.current = null;
+      pinnedPage.current = null;
       setDoc(null);
       setAnnotations([]);
       setToolbar(null);
@@ -577,10 +580,15 @@ export default function App() {
       const viewer = viewerRef.current;
       if (!viewer || !docRef.current) return;
 
-      const visible = visiblePage(viewer);
-      if (visible && visible.index !== currentPageRef.current) {
-        currentPageRef.current = visible.index;
-        setCurrentPage(visible.index);
+      // 标注跳转后的第一次滚动来自代码本身，不要把页码改回页边界所在的上一页。
+      if (pinnedPage.current !== null) {
+        pinnedPage.current = null;
+      } else {
+        const visible = visiblePage(viewer);
+        if (visible && visible.index !== currentPageRef.current) {
+          currentPageRef.current = visible.index;
+          setCurrentPage(visible.index);
+        }
       }
 
       if (progressTimer.current !== null) window.clearTimeout(progressTimer.current);
@@ -701,13 +709,37 @@ export default function App() {
 
   const jumpTo = useCallback(
     (annotation: Annotation) => {
-      goToPage(annotation.page);
+      const viewer = viewerRef.current;
+      const rect = annotation.anchor.rects[0];
+      currentPageRef.current = annotation.page;
+      pinnedPage.current = annotation.page;
+      setCurrentPage(annotation.page);
+
+      if (viewer && rect) {
+        const page = viewer.querySelector<HTMLElement>(
+          `[data-page-index="${annotation.page}"]`,
+        );
+        if (page) {
+          // 不只跳到页首：把标注的第一行滚到阅读区中间，长页面也能看到原句。
+          const pageRect = page.getBoundingClientRect();
+          const viewerRect = viewer.getBoundingClientRect();
+          const anchorCenter = pageRect.top + (rect.y + rect.h / 2) * pageRect.height;
+          const delta = anchorCenter - (viewerRect.top + viewer.clientHeight / 2);
+          viewer.scrollTo({
+            top: Math.max(0, viewer.scrollTop + delta),
+            behavior: 'instant',
+          });
+        }
+      } else {
+        scrollToPage(annotation.page);
+      }
+
       setFocusId(annotation.id);
       window.setTimeout(() => {
         setFocusId((current) => (current === annotation.id ? null : current));
-      }, 1600);
+      }, 2400);
     },
-    [goToPage],
+    [],
   );
 
   const handleSelect = useCallback((anchor: Anchor, box: { x: number; y: number }) => {
