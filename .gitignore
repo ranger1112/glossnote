@@ -4,3 +4,6 @@ dist/
 *.local
 *.log
 .omc/
+src-tauri/target/
+src-tauri/gen/
+scripts/_env.local.cmd

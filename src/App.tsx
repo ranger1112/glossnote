@@ -5,6 +5,7 @@ import { PdfPage } from './PdfPage';
 import type { Anchor } from './anchoring';
 import type { Annotation, DocRecord, HighlightColor } from './types';
 import { loadDoc, saveDoc, sha256Hex } from './storage';
+import { isTauri, pickPdf } from './platform';
 
 interface OpenedDoc {
   id: string;
@@ -69,31 +70,31 @@ export default function App() {
     saveDoc(record);
   }, []);
 
-  const openFile = useCallback(async (file: File) => {
-    setBusy(true);
-    setMessage('正在读取 PDF…');
-    try {
-      const bytes = await file.arrayBuffer();
-      const docId = await sha256Hex(bytes);
-      const existing = loadDoc(docId);
-      const loadingTask = pdfjsLib.getDocument({ data: bytes.slice(0) });
+  const loadDocument = useCallback(
+    async (
+      loadingTask: ReturnType<typeof pdfjsLib.getDocument>,
+      docId: string,
+      name: string,
+      size: number,
+    ) => {
       const pdf = await loadingTask.promise;
+      const existing = loadDoc(docId);
 
       const record: DocRecord = existing ?? {
         schemaVersion: 1,
         docId,
-        name: file.name,
-        size: file.size,
+        name,
+        size,
         annotations: [],
       };
-      record.name = file.name;
-      record.size = file.size;
+      record.name = name;
+      record.size = size;
       saveDoc(record);
       recordRef.current = record;
 
       const opened: OpenedDoc = {
         id: docId,
-        name: file.name,
+        name,
         pageCount: pdf.numPages,
         pdf,
         dispose: () => {
@@ -109,12 +110,54 @@ export default function App() {
       setFocusId(null);
       setMessage('');
       requestAnimationFrame(() => document.querySelector('.viewer')?.scrollTo({ top: 0 }));
+    },
+    [],
+  );
+
+  const openFile = useCallback(
+    async (file: File) => {
+      setBusy(true);
+      setMessage('正在读取 PDF…');
+      try {
+        const bytes = await file.arrayBuffer();
+        const docId = await sha256Hex(bytes);
+        await loadDocument(pdfjsLib.getDocument({ data: bytes.slice(0) }), docId, file.name, file.size);
+      } catch (error) {
+        setMessage(`打开失败：${error instanceof Error ? error.message : String(error)}`);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [loadDocument],
+  );
+
+  const choosePdf = useCallback(async () => {
+    if (!isTauri()) {
+      fileRef.current?.click();
+      return;
+    }
+
+    setBusy(true);
+    setMessage('正在选择 PDF…');
+    try {
+      const meta = await pickPdf();
+      if (!meta) {
+        setMessage('');
+        return;
+      }
+      setMessage('正在打开 PDF…');
+      await loadDocument(
+        pdfjsLib.getDocument({ url: meta.url }),
+        meta.sha256,
+        meta.name,
+        meta.size,
+      );
     } catch (error) {
       setMessage(`打开失败：${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setBusy(false);
     }
-  }, []);
+  }, [loadDocument]);
 
   const openSample = useCallback(async () => {
     try {
@@ -244,7 +287,7 @@ export default function App() {
           type="button"
           className="primary"
           disabled={busy}
-          onClick={() => fileRef.current?.click()}
+          onClick={() => void choosePdf()}
         >
           {doc ? '换一份' : '打开 PDF'}
         </button>
@@ -325,7 +368,7 @@ export default function App() {
                 type="button"
                 className="primary large"
                 disabled={busy}
-                onClick={() => fileRef.current?.click()}
+                onClick={() => void choosePdf()}
               >
                 打开 PDF
               </button>

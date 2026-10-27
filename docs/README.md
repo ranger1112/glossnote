@@ -7,6 +7,7 @@
 | [product-design.md](product-design.md) | 为谁做、做什么、不做什么 | 讨论需求与范围时 |
 | [architecture.md](architecture.md) | 系统怎么搭、数据怎么存、锚定怎么保证 | 动手前、改结构前 |
 | [implementation-plan.md](implementation-plan.md) | 先做什么、验收标准、现在到哪 | 每次开工前 |
+| [build.md](build.md) | 怎么装、怎么跑、怎么自动验证 | 换机器或构建失败时 |
 | [decisions.md](decisions.md) | 为什么这样选、放弃了什么 | 想推翻某个决定时 |
 
 维护约定：

@@ -3,16 +3,16 @@
 ## 状态快照
 
 - 日期：2026-10-27
-- 版本：0.1.0
-- 提交：`42215bf`（已推送 `origin/master`）
-- 阶段：浏览器锚定原型完成，等待 Rust 工具链以进入 0.2
+- 版本：0.1.0（0.2 尚未发版）
+- 提交：`d10f3e7`（文档）+ 0.2 工作区变更
+- 阶段：0.2 Tauri 桌面壳完成并通过自动验证，下一步 0.3 持久化与导入
 
 ## 里程碑
 
 | 阶段 | 目标 | 状态 |
 | --- | --- | --- |
 | 0.1 | PDF 阅读、高亮、批注、重开复原（浏览器） | 已完成 |
-| 0.2 | Tauri 2 桌面外壳、原生打开文件 | 待开始（阻塞于 Rust） |
+| 0.2 | Tauri 2 桌面外壳、原生打开文件 | 已完成 |
 | 0.3 | 书库导入、SQLite、sidecar、内容哈希 | 未开始 |
 | 0.4 | 书库列表、封面、搜索、标签、导出 | 未开始 |
 | 0.5 | 云同步 | 未开始 |
@@ -39,9 +39,9 @@
 - 批注失焦保存、刷新后恢复；删除后墓碑生效。
 - `npm run build` 通过；`npm test` 7/7 通过。
 
-## 0.2 Tauri 桌面外壳
+## 0.2 Tauri 桌面外壳（已完成）
 
-前置：本机可用 `cargo` / `rustc`（当前 Git Bash 中未找到，见「阻塞」）。
+工具链：Rust 1.94.1 在 `D:\Rust`，MSVC 在 `D:\BuildTools`，由 `scripts\_env.cmd` 加载。细节见 [build.md](build.md)。
 
 任务：
 
@@ -63,6 +63,16 @@
 - 断开网络不影响任何功能。
 
 非目标：书库、SQLite、sidecar、同步。
+
+验收证据（2026-10-27，WebView2 CDP + 桌面截图）：
+
+- `scripts\check-env.cmd` 找到 cargo 1.94.1 与 MSVC，`cargo check` 通过。
+- `scripts\dev.cmd` 成功启动 `target\debug\glossnote.exe`，窗口 1280×860。
+- 原生「打开 PDF」对话框正常弹出，选择示例 PDF 后渲染 2 页。
+- `read_pdf_meta` 返回 sha256 `c665d327…`，与浏览器计算的内容哈希一致。
+- asset protocol 返回 200、2460 字节、开头 `%PDF-`；pdf.js 从 asset URL 读到 2 页、16 个文本 item。
+- 重启应用后，之前的高亮与批注卡片自动恢复。
+- 未自动验证：文件对话框的完整键盘/鼠标交互（只验证了弹出与选择路径），后续手工回归即可。
 
 ## 0.3 本地持久化与导入
 
@@ -141,7 +151,7 @@ EPUB（CFI）、HTML（Readability + SingleFile 冻存快照）、TXT。锚定�
 
 | 项 | 影响 | 处理 |
 | --- | --- | --- |
-| 当前 shell 找不到 `cargo` / `rustc` | 0.2 无法开始 | 确认 flashnote 的构建环境（PowerShell / WSL / CI），或安装 Rust 1.94+ |
+| Rust 不在系统 PATH | 直接跑 npm/tauri 会找不到 cargo | 网关脚本先加载 `_env.cmd`，并直接调用 `.bin\tauri.cmd`；见 [build.md](build.md) |
 | Tauri CSP 与 pdf.js worker/WASM | 桌面端渲染失败 | 0.2 第一件事就验证，不凭记忆写 CSP |
 | 大 PDF 经 IPC 传输 | 内存与卡顿 | 先限 50 MB，后续 asset protocol |
 | 扫描件无文本层 | 无法高亮 | 明确提示；OCR 推迟 |
