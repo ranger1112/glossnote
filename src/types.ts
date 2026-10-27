@@ -54,6 +54,19 @@ export interface LibraryInfo {
   annotations: number;
 }
 
+export interface ScanReport {
+  root: string;
+  documents: number;
+  annotations: number;
+  /** 从 sidecar（含冲突副本）合并进索引的标注条数 */
+  merged: number;
+  /** 合并后归档到 .glossnote/conflicts/ 的冲突副本数量 */
+  archived: number;
+  duplicatePdfs: number;
+  ignoredSidecars: number;
+  scannedAt: number;
+}
+
 /** 浏览器原型用的 localStorage 记录；桌面端以 SQLite + sidecar 为准。 */
 export interface DocRecord {
   schemaVersion: 1;

@@ -111,6 +111,24 @@ pub struct LibraryInfo {
     pub annotations: usize,
 }
 
+/// 每次扫描书库的结果，用来在界面上显示合并与冲突处理情况。
+#[derive(Serialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanReport {
+    pub root: String,
+    pub documents: usize,
+    pub annotations: usize,
+    /// 从 sidecar（含冲突副本）合并进数据库的标注条数。
+    pub merged: usize,
+    /// 合并后归档到 .glossnote/conflicts/ 的冲突副本数量。
+    pub archived: usize,
+    /// 内容重复、未重复索引的 PDF 数量。
+    pub duplicate_pdfs: usize,
+    /// 无法解析或版本不认识的 sidecar 数量。
+    pub ignored_sidecars: usize,
+    pub scanned_at: i64,
+}
+
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchHit {

@@ -8,10 +8,11 @@ import {
   saveCover,
   scanLibrary,
   searchAnnotations,
+  setLibraryRoot,
   updateDocumentMeta,
 } from './desktop';
-import { pickMarkdownPath, pickPdfPath } from './platform';
-import type { DocumentMeta, SearchHit } from './types';
+import { pickDirectory, pickMarkdownPath, pickPdfPath } from './platform';
+import type { DocumentMeta, ScanReport, SearchHit } from './types';
 
 interface LibraryProps {
   onOpen: (docId: string, page?: number) => void;
@@ -63,9 +64,12 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
   const [docs, setDocs] = useState<DocumentMeta[]>([]);
   const [loading, setLoading] = useState(true);
   const [importing, setImporting] = useState(false);
+  const [scanning, setScanning] = useState(false);
+  const [switching, setSwitching] = useState(false);
   const [query, setQuery] = useState('');
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [searching, setSearching] = useState(false);
+  const [sync, setSync] = useState<ScanReport | null>(null);
   const coverRun = useRef(0);
 
   const ensureCovers = useCallback(async (list: DocumentMeta[]) => {
@@ -101,18 +105,41 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
     }
   }, []);
 
-  const refresh = useCallback(async () => {
-    try {
-      await scanLibrary();
-      const list = await listDocuments();
-      setDocs(list);
-      setLoading(false);
-      void ensureCovers(list);
-    } catch (error) {
-      setLoading(false);
-      onMessage(`读取书库失败：${errorText(error)}`);
-    }
-  }, [ensureCovers, onMessage]);
+  const loadDocs = useCallback(async () => {
+    const list = await listDocuments();
+    setDocs(list);
+    void ensureCovers(list);
+  }, [ensureCovers]);
+
+  const refresh = useCallback(
+    async (announce = false) => {
+      if (announce) {
+        setScanning(true);
+        onMessage('正在重新扫描书库…');
+      }
+      try {
+        const report = await scanLibrary();
+        setSync(report);
+        await loadDocs();
+        setLoading(false);
+
+        if (announce) {
+          const parts = [
+            report.merged > 0 ? `合并 ${report.merged} 条` : '',
+            report.archived > 0 ? `归档 ${report.archived} 个冲突副本` : '',
+            report.duplicatePdfs > 0 ? `${report.duplicatePdfs} 份重复 PDF 已忽略` : '',
+          ].filter(Boolean);
+          onMessage(parts.length > 0 ? `扫描完成：${parts.join('，')}` : '扫描完成，没有需要合并的变更');
+        }
+      } catch (error) {
+        setLoading(false);
+        onMessage(`读取书库失败：${errorText(error)}`);
+      } finally {
+        if (announce) setScanning(false);
+      }
+    },
+    [loadDocs, onMessage],
+  );
 
   useEffect(() => {
     void refresh();
@@ -185,7 +212,41 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
     }
   }, [onMessage]);
 
+  const handleChangeRoot = useCallback(async () => {
+    try {
+      const path = await pickDirectory('选择书库目录');
+      if (!path) return;
+      if (sync?.root === path) {
+        onMessage('这个目录已经是当前书库');
+        return;
+      }
+
+      setSwitching(true);
+      onMessage('正在切换书库并重建索引…');
+      const report = await setLibraryRoot(path);
+      setSync(report);
+      setQuery('');
+      setHits([]);
+      await loadDocs();
+      setLoading(false);
+      onMessage(`书库已切换到 ${report.root}`);
+    } catch (error) {
+      onMessage(`切换书库失败：${errorText(error)}`);
+    } finally {
+      setSwitching(false);
+    }
+  }, [loadDocs, onMessage, sync?.root]);
+
   const searchingNow = query.trim().length > 0;
+  const syncNote = sync
+    ? [
+        sync.merged > 0 ? `合并 ${sync.merged} 条` : '',
+        sync.archived > 0 ? `归档 ${sync.archived} 个冲突副本` : '',
+        sync.duplicatePdfs > 0 ? `${sync.duplicatePdfs} 份重复 PDF` : '',
+      ]
+        .filter(Boolean)
+        .join(' · ')
+    : '';
 
   return (
     <main className="library">
@@ -197,6 +258,15 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
               ? `${docs.length} 份文档 · 标注同时写入 SQLite 与 sidecar`
               : '导入的 PDF 会复制进书库，标注随文件夹一起同步'}
           </p>
+          {sync && (
+            <p className="library-path" title={sync.root}>
+              <span className="path-text">书库：{sync.root}</span>
+              {syncNote && <span className="sync-note">{syncNote}</span>}
+              <span className="sync-time">
+                上次扫描 {new Date(sync.scannedAt).toLocaleTimeString()}
+              </span>
+            </p>
+          )}
         </div>
 
         <div className="library-actions">
@@ -207,6 +277,22 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
             placeholder="搜索标注、批注、标签…"
             onChange={(event) => setQuery(event.target.value)}
           />
+          <button
+            type="button"
+            className="ghost"
+            disabled={scanning || switching}
+            onClick={() => void refresh(true)}
+          >
+            {scanning ? '扫描中…' : '重新扫描'}
+          </button>
+          <button
+            type="button"
+            className="ghost"
+            disabled={switching}
+            onClick={() => void handleChangeRoot()}
+          >
+            {switching ? '切换中…' : '书库位置'}
+          </button>
           <button
             type="button"
             className="ghost"

@@ -17,6 +17,20 @@ export async function pickPdfPath(): Promise<string | null> {
   return typeof selected === 'string' ? selected : null;
 }
 
+/** 桌面端：选择目录，用于切换书库位置。 */
+export async function pickDirectory(title = '选择书库目录'): Promise<string | null> {
+  if (!isTauri()) return null;
+
+  const { open } = await import('@tauri-apps/plugin-dialog');
+  const selected = await open({
+    directory: true,
+    multiple: false,
+    title,
+  });
+
+  return typeof selected === 'string' ? selected : null;
+}
+
 /** 桌面端：选择 Markdown 导出位置。 */
 export async function pickMarkdownPath(): Promise<string | null> {
   if (!isTauri()) return null;

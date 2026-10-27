@@ -33,6 +33,7 @@ Rust 侧只做 WebView 做不了或做起来不划算的事：文件系统、哈
 └── .glossnote/
     ├── annotations/<sha256>.json     # 每份文档一份 sidecar，按内容哈希命名
     ├── thumbnails/<sha256>.jpg       # 首页封面，320px 宽，可重建
+    ├── conflicts/                    # 合并后的云盘冲突副本，保留原文
     └── manifest.json                 # 可选：标题、作者、页数、导入时间
 ```
 
@@ -41,13 +42,13 @@ Rust 侧只做 WebView 做不了或做起来不划算的事：文件系统、哈
 - 书库根目录可以由用户指到坚果云 / OneDrive / NAS 同步目录。
 - **sidecar 是可移植的真相源，SQLite 只是索引。** 删掉 `library.db` 后，扫描 `books/` + `.glossnote/annotations/` 必须能完整重建。
 
-默认位置是系统「文档」下的 `GlossNote`。要改到云盘目录，在 `%APPDATA%\com.phoebe.glossnote\settings.json` 写 `{"libraryDir": "D:\\GlossNote"}`；目录选择器尚未实现，推迟到同步阶段一起做。
+默认位置是系统「文档」下的 `GlossNote`。书库页的「书库位置」用原生目录选择器切换，写入 `%APPDATA%\com.phoebe.glossnote\settings.json` 的 `{"libraryDir": "D:\\GlossNote"}`。切换会清空 SQLite 索引并从新目录的 PDF + sidecar 重建；旧目录里的文件不会被删除。
 
 ## 本地数据库
 
 位置：`%APPDATA%\com.phoebe.glossnote\library.db`，不放在书库目录里，避免云盘多端同时写坏。
 
-0.3 起启动时扫描 `books/` 与 sidecars：命中 path + size + mtime 缓存就跳过哈希，未命中才计算 SHA-256；sidecar 按 `updated_at` 合并进 DB，再回写修复。删除 DB 后可完整重建。
+0.3 起启动时扫描 `books/` 与 sidecars：命中 path + size + mtime 缓存就跳过哈希，未命中才计算 SHA-256；sidecar 按 `updated_at` 合并进 DB，再回写修复。删除 DB 后可完整重建。0.5 起扫描还负责识别云盘冲突副本、归档冲突文件，并报告合并结果。
 
 ```sql
 documents(
@@ -160,15 +161,25 @@ cards(                        -- 0.6 才建
 
 ## 同步
 
-**0.5 之前不做应用内同步。** 书库目录交给用户的云盘（坚果云、OneDrive、Nextcloud），PDF 与 sidecar 自动随目录走；应用默认不联网。
+0.5 采用“零代码”同步：**不做账号与服务端**。书库目录交给用户的云盘（坚果云、OneDrive、Nextcloud、Syncthing），PDF、sidecar、封面自动随目录走；应用默认不联网。
 
-0.5 之后按记录同步，不按文件覆盖：
+扫描时的合并流程：
 
-- 同步单位是 `annotation`，每条带 `updated_at` 与 `deleted`。
-- 合并规则：按 `id` 对齐，`updated_at` 新者胜；删除用墓碑；两边同时删保持删除。
-- 云盘产生的 `xxx.conflict-*.json` 在启动扫描时按记录合并，不整文件覆盖。
+1. 读取 `.glossnote/annotations/` 下所有 `*.json`，解析失败或 `docId` 为空的计入 `ignoredSidecars`，文件保留不动。
+2. 按文件内的 `docId` 分组，而不是只认 `<sha256>.json`；云盘生成的 `xxx (conflicted copy).json`、`xxx (1).json` 等都会被纳入。
+3. 同一 `annotation.id` 按 `updatedAt` 新者胜；墓碑同样参与比较。规范文件先处理，时间戳相同时规范文件优先，结果确定。
+4. 合并结果回写规范 sidecar；非规范的冲突副本移到 `.glossnote/conflicts/`，文件名冲突时追加毫秒时间戳，不静默删除。
+5. 同一内容哈希的多个 PDF 只索引路径排序最靠前的一份，其余保留在磁盘上并计入 `duplicatePdfs`，不自动删除。
+6. 返回 `ScanReport`：`merged`、`archived`、`duplicatePdfs`、`ignoredSidecars`、`scannedAt`，书库页展示并提供手动重扫。
+
+约束与边界：
+
+- 同步单位是 `annotation`，每条带 `updatedAt` 与 `deleted`；不做整文件覆盖。
 - **不上 CRDT。** 标注是准不可变的小记录，LWW 足够；只有出现“两人同时编辑同一段笔记正文”时才重新评估。
-- 大文件 PDF 单独走 blob 同步，不塞进记录流。
+- 冲突副本只保留原始 JSON，不提供逐字段 diff 或人工选择；同时间戳的冲突按路径顺序取舍。
+- 书库索引是单库模型：切换根目录会清空 SQLite，再扫描新目录；不并行维护多个书库。
+- 阅读进度 `last_page` 是设备本地状态，不进入 sidecar，也不参与同步。
+- 大文件 PDF 仍随云盘目录整体同步，未做独立的 blob 通道。
 
 ## AI
 
@@ -206,7 +217,7 @@ Tauri 侧注意：pdf.js 的 worker 需要 `worker-src 'self'`；部分扫描件
 
 ## 原型与目标的差距
 
-0.1 原型先跑在浏览器里；0.2 套上 Tauri 2 桌面壳，接入原生文件对话框与 asset protocol；0.3 把持久化换成 SQLite + sidecar，并在启动时扫描书库重建索引；0.4 增加书库网格、封面、搜索、标签、阅读进度、Markdown 导出与深色模式。
+0.1 原型先跑在浏览器里；0.2 套上 Tauri 2 桌面壳，接入原生文件对话框与 asset protocol；0.3 把持久化换成 SQLite + sidecar，并在启动时扫描书库重建索引；0.4 增加书库网格、封面、搜索、标签、阅读进度、Markdown 导出与深色模式；0.5 增加书库目录切换与云盘冲突副本合并。
 
 | 能力 | 现状 |
 | --- | --- |
@@ -216,6 +227,6 @@ Tauri 侧注意：pdf.js 的 worker 需要 `worker-src 'self'`；部分扫描件
 | 搜索 | `LIKE` 子串匹配；FTS5 表已维护未接入 |
 | 封面 | 前端渲染首页，Rust 落盘 |
 | 导出 | 全库/单文档 Markdown |
-| 同步 | 未实现，0.5 |
+| 同步 | 云盘目录 + sidecar 冲突合并（0.5） |
 
 浏览器模式仍保留 `src/storage.ts` 作为 localStorage 适配器；桌面模式由 `src/desktop.ts` 直接调用 Tauri 命令，UI 不感知两者的差异。

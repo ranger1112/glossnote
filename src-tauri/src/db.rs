@@ -403,12 +403,19 @@ pub fn search_annotations(conn: &Connection, query: &str) -> Result<Vec<SearchHi
         .map_err(|error| format!("读取搜索结果失败：{error}"))
 }
 
-pub fn remove_document(conn: &Connection, id: &str) -> Result<(), String> {
-    conn.execute(
-        "DELETE FROM annotation_fts WHERE doc_id = ?1",
-        params![id],
+/// 切换书库时清空索引；书库目录里的 PDF 与 sidecar 不受影响。
+pub fn clear_library(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "DELETE FROM annotation_fts;
+         DELETE FROM annotations;
+         DELETE FROM documents;",
     )
-    .map_err(|error| format!("清理搜索索引失败：{error}"))?;
+    .map_err(|error| format!("清空书库索引失败：{error}"))
+}
+
+pub fn remove_document(conn: &Connection, id: &str) -> Result<(), String> {
+    conn.execute("DELETE FROM annotation_fts WHERE doc_id = ?1", params![id])
+        .map_err(|error| format!("清理搜索索引失败：{error}"))?;
     conn.execute("DELETE FROM annotations WHERE doc_id = ?1", params![id])
         .map_err(|error| format!("清理标注失败：{error}"))?;
     conn.execute("DELETE FROM documents WHERE id = ?1", params![id])

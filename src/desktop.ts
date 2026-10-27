@@ -4,6 +4,7 @@ import type {
   DocumentMeta,
   ImportResult,
   LibraryInfo,
+  ScanReport,
   SearchHit,
 } from './types';
 
@@ -11,8 +12,13 @@ export function assetUrl(path: string): string {
   return convertFileSrc(path);
 }
 
-export function scanLibrary(): Promise<LibraryInfo> {
+export function scanLibrary(): Promise<ScanReport> {
   return invoke('scan_library');
+}
+
+/** 切换书库目录；Rust 会清空旧索引并扫描新目录。 */
+export function setLibraryRoot(path: string): Promise<ScanReport> {
+  return invoke('set_library_root', { path });
 }
 
 export function importPdf(path: string): Promise<ImportResult> {

@@ -6,10 +6,15 @@ mod models;
 mod state;
 
 use crate::{
-    models::{Annotation, Document, DocumentMetaPatch, ImportResult, LibraryInfo, SearchHit},
+    models::{
+        Annotation, Document, DocumentMetaPatch, ImportResult, LibraryInfo, ScanReport, SearchHit,
+    },
     state::AppState,
 };
-use std::{fs, sync::Mutex};
+use std::{
+    fs,
+    sync::{Mutex, RwLock},
+};
 use tauri::{AppHandle, Manager};
 
 #[tauri::command]
@@ -18,10 +23,17 @@ fn library_info(app: AppHandle) -> Result<LibraryInfo, String> {
 }
 
 #[tauri::command]
-async fn scan_library(app: AppHandle) -> Result<LibraryInfo, String> {
+async fn scan_library(app: AppHandle) -> Result<ScanReport, String> {
     tauri::async_runtime::spawn_blocking(move || library::scan(&app))
         .await
         .map_err(|error| format!("书库扫描失败：{error}"))?
+}
+
+#[tauri::command]
+async fn set_library_root(app: AppHandle, path: String) -> Result<ScanReport, String> {
+    tauri::async_runtime::spawn_blocking(move || library::set_root(&app, &path))
+        .await
+        .map_err(|error| format!("切换书库失败：{error}"))?
 }
 
 #[tauri::command]
@@ -118,13 +130,14 @@ fn main() {
 
             handle.manage(AppState {
                 db: Mutex::new(connection),
-                library_root,
+                library_root: RwLock::new(library_root),
             });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             library_info,
             scan_library,
+            set_library_root,
             import_pdf,
             open_document,
             save_cover,
