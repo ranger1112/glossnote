@@ -24,9 +24,23 @@ export interface DocumentMeta {
   author: string;
   pageCount: number;
   path: string;
+  cover: string;
   size: number;
   addedAt: number;
   lastOpenedAt: number;
+  lastPage: number;
+  annotationCount: number;
+}
+
+export interface SearchHit {
+  annotationId: string;
+  docId: string;
+  docName: string;
+  page: number;
+  quote: string;
+  body: string;
+  color: HighlightColor;
+  tags: string[];
 }
 
 export interface ImportResult {

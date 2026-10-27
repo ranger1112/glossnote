@@ -4,6 +4,7 @@ import type {
   DocumentMeta,
   ImportResult,
   LibraryInfo,
+  SearchHit,
 } from './types';
 
 export function assetUrl(path: string): string {
@@ -16,6 +17,10 @@ export function scanLibrary(): Promise<LibraryInfo> {
 
 export function importPdf(path: string): Promise<ImportResult> {
   return invoke('import_pdf', { path });
+}
+
+export function openDocument(docId: string): Promise<ImportResult> {
+  return invoke('open_document', { docId });
 }
 
 export function getLastDocument(): Promise<ImportResult | null> {
@@ -43,6 +48,23 @@ export function updateDocumentMeta(
   patch: { pageCount?: number; title?: string; author?: string },
 ): Promise<DocumentMeta> {
   return invoke('update_document_meta', { docId, patch });
+}
+
+/** 前端把首页渲染成 JPEG，Rust 落到书库的 .glossnote/thumbnails 下。 */
+export function saveCover(docId: string, bytes: Uint8Array): Promise<DocumentMeta> {
+  return invoke('save_cover', { docId, bytes: Array.from(bytes) });
+}
+
+export function saveProgress(docId: string, lastPage: number): Promise<void> {
+  return invoke('save_progress', { docId, lastPage });
+}
+
+export function searchAnnotations(query: string): Promise<SearchHit[]> {
+  return invoke('search_annotations', { query });
+}
+
+export function exportMarkdown(path: string, docId?: string): Promise<string> {
+  return invoke('export_markdown', { path, docId: docId ?? null });
 }
 
 export function libraryInfo(): Promise<LibraryInfo> {

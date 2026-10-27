@@ -6,9 +6,9 @@
 
 ## 当前状态
 
-**0.1 锚定原型 + 0.2 桌面壳 + 0.3 本地持久化已完成**：导入 PDF，选中文字高亮或批注；缩放、刷新、重开文档后，标注回到同一行字上。
+**0.1 锚定原型 + 0.2 桌面壳 + 0.3 本地持久化 + 0.4 书库体验已完成**：导入 PDF 后进入书库，以封面网格浏览；打开文档可高亮、批注、打标签，搜索标注与原句，导出 Markdown；缩放、刷新、重开文档后，标注回到同一行字上，阅读进度也会恢复。
 
-导入的 PDF 会复制到 `文档/GlossNote/books/`，标注写入 SQLite 并镜像到 `.glossnote/annotations/<sha256>.json`；删掉数据库也能从 sidecar 重建。下一步是 0.4 书库列表、封面与搜索。阶段进度与验收证据见 [docs/implementation-plan.md](docs/implementation-plan.md)。
+导入的 PDF 会复制到 `文档/GlossNote/books/`，标注写入 SQLite 并镜像到 `.glossnote/annotations/<sha256>.json`；删掉数据库也能从 sidecar 重建。封面保存在 `.glossnote/thumbnails/`。下一步是 0.5 云同步。阶段进度与验收证据见 [docs/implementation-plan.md](docs/implementation-plan.md)。
 
 ## 快速开始
 

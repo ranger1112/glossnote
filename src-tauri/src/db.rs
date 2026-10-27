@@ -1,9 +1,8 @@
-use crate::models::{Annotation, DocumentRow};
+use crate::models::{Annotation, DocumentRow, SearchHit};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::path::Path;
 
-const DOCUMENT_COLUMNS: &str =
-    "id, name, title, author, page_count, rel_path, size, mtime, added_at, last_opened_at";
+const DOCUMENT_SELECT: &str = "SELECT d.id, d.name, d.title, d.author, d.page_count, d.rel_path, d.size, d.mtime, d.added_at, d.last_opened_at, d.cover, d.last_page, (SELECT COUNT(*) FROM annotations a WHERE a.doc_id = d.id AND a.deleted = 0) FROM documents d";
 
 pub fn open(path: &Path) -> Result<Connection, String> {
     let conn = Connection::open(path).map_err(|error| format!("打开数据库失败：{error}"))?;
@@ -28,7 +27,9 @@ fn migrate(conn: &Connection) -> Result<(), String> {
           size INTEGER NOT NULL,
           mtime INTEGER NOT NULL,
           added_at INTEGER NOT NULL,
-          last_opened_at INTEGER NOT NULL DEFAULT 0
+          last_opened_at INTEGER NOT NULL DEFAULT 0,
+          cover TEXT NOT NULL DEFAULT '',
+          last_page INTEGER NOT NULL DEFAULT 0
         );
         CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_rel_path ON documents(rel_path);
 
@@ -55,7 +56,43 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         );
         "#,
     )
-    .map_err(|error| format!("初始化数据库失败：{error}"))
+    .map_err(|error| format!("初始化数据库失败：{error}"))?;
+
+    // 0.3 的库没有 cover / last_page，升级时补列。
+    ensure_column(conn, "documents", "cover", "TEXT NOT NULL DEFAULT ''")?;
+    ensure_column(conn, "documents", "last_page", "INTEGER NOT NULL DEFAULT 0")?;
+    Ok(())
+}
+
+fn ensure_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), String> {
+    let mut statement = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|error| format!("读取表结构失败：{error}"))?;
+    let mut rows = statement
+        .query([])
+        .map_err(|error| format!("读取表结构失败：{error}"))?;
+
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| format!("读取表结构失败：{error}"))?
+    {
+        let name: String = row.get(1).map_err(|error| error.to_string())?;
+        if name == column {
+            return Ok(());
+        }
+    }
+
+    conn.execute(
+        &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+        [],
+    )
+    .map_err(|error| format!("升级表 {table} 失败：{error}"))?;
+    Ok(())
 }
 
 fn row_to_document(row: &Row<'_>) -> rusqlite::Result<DocumentRow> {
@@ -70,12 +107,15 @@ fn row_to_document(row: &Row<'_>) -> rusqlite::Result<DocumentRow> {
         mtime: row.get(7)?,
         added_at: row.get(8)?,
         last_opened_at: row.get(9)?,
+        cover: row.get(10)?,
+        last_page: row.get::<_, i64>(11)? as u32,
+        annotation_count: row.get::<_, i64>(12)? as usize,
     })
 }
 
 pub fn find_by_id(conn: &Connection, id: &str) -> Result<Option<DocumentRow>, String> {
     conn.query_row(
-        &format!("SELECT {DOCUMENT_COLUMNS} FROM documents WHERE id = ?1"),
+        &format!("{DOCUMENT_SELECT} WHERE d.id = ?1"),
         params![id],
         row_to_document,
     )
@@ -85,7 +125,7 @@ pub fn find_by_id(conn: &Connection, id: &str) -> Result<Option<DocumentRow>, St
 
 pub fn find_by_rel_path(conn: &Connection, rel_path: &str) -> Result<Option<DocumentRow>, String> {
     conn.query_row(
-        &format!("SELECT {DOCUMENT_COLUMNS} FROM documents WHERE rel_path = ?1"),
+        &format!("{DOCUMENT_SELECT} WHERE d.rel_path = ?1"),
         params![rel_path],
         row_to_document,
     )
@@ -96,7 +136,7 @@ pub fn find_by_rel_path(conn: &Connection, rel_path: &str) -> Result<Option<Docu
 pub fn list_documents(conn: &Connection) -> Result<Vec<DocumentRow>, String> {
     let mut statement = conn
         .prepare(&format!(
-            "SELECT {DOCUMENT_COLUMNS} FROM documents ORDER BY last_opened_at DESC, added_at DESC"
+            "{DOCUMENT_SELECT} ORDER BY d.last_opened_at DESC, d.added_at DESC"
         ))
         .map_err(|error| format!("准备文档列表查询失败：{error}"))?;
 
@@ -111,8 +151,8 @@ pub fn list_documents(conn: &Connection) -> Result<Vec<DocumentRow>, String> {
 pub fn upsert_document(conn: &Connection, document: &DocumentRow) -> Result<(), String> {
     conn.execute(
         "INSERT INTO documents
-           (id, name, title, author, page_count, rel_path, size, mtime, added_at, last_opened_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+           (id, name, title, author, page_count, rel_path, size, mtime, added_at, last_opened_at, cover, last_page)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
          ON CONFLICT(id) DO UPDATE SET
            name = excluded.name,
            title = excluded.title,
@@ -120,7 +160,9 @@ pub fn upsert_document(conn: &Connection, document: &DocumentRow) -> Result<(), 
            page_count = excluded.page_count,
            rel_path = excluded.rel_path,
            size = excluded.size,
-           mtime = excluded.mtime",
+           mtime = excluded.mtime,
+           cover = excluded.cover,
+           last_page = excluded.last_page",
         params![
             document.id,
             document.name,
@@ -132,6 +174,8 @@ pub fn upsert_document(conn: &Connection, document: &DocumentRow) -> Result<(), 
             document.mtime,
             document.added_at,
             document.last_opened_at,
+            document.cover,
+            document.last_page as i64,
         ],
     )
     .map_err(|error| format!("写入文档失败：{error}"))?;
@@ -144,6 +188,24 @@ pub fn touch_document(conn: &Connection, id: &str, now: i64) -> Result<(), Strin
         params![now, id],
     )
     .map_err(|error| format!("更新最近打开时间失败：{error}"))?;
+    Ok(())
+}
+
+pub fn save_progress(conn: &Connection, id: &str, last_page: u32) -> Result<(), String> {
+    conn.execute(
+        "UPDATE documents SET last_page = ?1 WHERE id = ?2",
+        params![last_page as i64, id],
+    )
+    .map_err(|error| format!("保存阅读进度失败：{error}"))?;
+    Ok(())
+}
+
+pub fn set_cover(conn: &Connection, id: &str, cover: &str) -> Result<(), String> {
+    conn.execute(
+        "UPDATE documents SET cover = ?1 WHERE id = ?2",
+        params![cover, id],
+    )
+    .map_err(|error| format!("保存封面失败：{error}"))?;
     Ok(())
 }
 
@@ -178,6 +240,23 @@ pub fn update_meta(
     Ok(())
 }
 
+fn row_to_annotation(row: &Row<'_>) -> rusqlite::Result<Annotation> {
+    let anchor_text: String = row.get(2)?;
+    let tags_text: String = row.get(6)?;
+    Ok(Annotation {
+        id: row.get(0)?,
+        page: row.get::<_, i64>(1)? as u32,
+        anchor: serde_json::from_str(&anchor_text).unwrap_or(serde_json::Value::Null),
+        color: row.get(3)?,
+        kind: row.get(4)?,
+        body: row.get(5)?,
+        tags: serde_json::from_str(&tags_text).unwrap_or_default(),
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+        deleted: row.get::<_, i64>(9)? != 0,
+    })
+}
+
 pub fn list_annotations(conn: &Connection, doc_id: &str) -> Result<Vec<Annotation>, String> {
     let mut statement = conn
         .prepare(
@@ -187,22 +266,7 @@ pub fn list_annotations(conn: &Connection, doc_id: &str) -> Result<Vec<Annotatio
         .map_err(|error| format!("准备标注查询失败：{error}"))?;
 
     let rows = statement
-        .query_map(params![doc_id], |row| {
-            let anchor_text: String = row.get(2)?;
-            let tags_text: String = row.get(6)?;
-            Ok(Annotation {
-                id: row.get(0)?,
-                page: row.get::<_, i64>(1)? as u32,
-                anchor: serde_json::from_str(&anchor_text).unwrap_or(serde_json::Value::Null),
-                color: row.get(3)?,
-                kind: row.get(4)?,
-                body: row.get(5)?,
-                tags: serde_json::from_str(&tags_text).unwrap_or_default(),
-                created_at: row.get(7)?,
-                updated_at: row.get(8)?,
-                deleted: row.get::<_, i64>(9)? != 0,
-            })
-        })
+        .query_map(params![doc_id], row_to_annotation)
         .map_err(|error| format!("查询标注失败：{error}"))?;
 
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -210,32 +274,14 @@ pub fn list_annotations(conn: &Connection, doc_id: &str) -> Result<Vec<Annotatio
 }
 
 pub fn get_annotation(conn: &Connection, id: &str) -> Result<Option<Annotation>, String> {
-    let mut statement = conn
-        .prepare(
-            "SELECT id, page, anchor, color, kind, body, tags, created_at, updated_at, deleted
-             FROM annotations WHERE id = ?1",
-        )
-        .map_err(|error| format!("准备标注查询失败：{error}"))?;
-
-    statement
-        .query_row(params![id], |row| {
-            let anchor_text: String = row.get(2)?;
-            let tags_text: String = row.get(6)?;
-            Ok(Annotation {
-                id: row.get(0)?,
-                page: row.get::<_, i64>(1)? as u32,
-                anchor: serde_json::from_str(&anchor_text).unwrap_or(serde_json::Value::Null),
-                color: row.get(3)?,
-                kind: row.get(4)?,
-                body: row.get(5)?,
-                tags: serde_json::from_str(&tags_text).unwrap_or_default(),
-                created_at: row.get(7)?,
-                updated_at: row.get(8)?,
-                deleted: row.get::<_, i64>(9)? != 0,
-            })
-        })
-        .optional()
-        .map_err(|error| format!("查询标注失败：{error}"))
+    conn.query_row(
+        "SELECT id, page, anchor, color, kind, body, tags, created_at, updated_at, deleted
+         FROM annotations WHERE id = ?1",
+        params![id],
+        row_to_annotation,
+    )
+    .optional()
+    .map_err(|error| format!("查询标注失败：{error}"))
 }
 
 pub fn upsert_annotation(
@@ -301,9 +347,68 @@ pub fn upsert_annotation(
     Ok(())
 }
 
+pub fn search_annotations(conn: &Connection, query: &str) -> Result<Vec<SearchHit>, String> {
+    let term = query.trim();
+    if term.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let escaped = term
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    let pattern = format!("%{escaped}%");
+
+    let mut statement = conn
+        .prepare(
+            "SELECT a.id, a.doc_id, d.name, a.page, a.anchor, a.body, a.color, a.tags
+             FROM annotations a
+             JOIN documents d ON d.id = a.doc_id
+             WHERE a.deleted = 0 AND (
+               a.anchor LIKE ?1 ESCAPE '\\'
+               OR a.body LIKE ?1 ESCAPE '\\'
+               OR a.tags LIKE ?1 ESCAPE '\\'
+               OR d.name LIKE ?1 ESCAPE '\\'
+               OR d.title LIKE ?1 ESCAPE '\\'
+             )
+             ORDER BY a.updated_at DESC
+             LIMIT 100",
+        )
+        .map_err(|error| format!("准备搜索失败：{error}"))?;
+
+    let rows = statement
+        .query_map(params![pattern], |row| {
+            let anchor_text: String = row.get(4)?;
+            let tags_text: String = row.get(7)?;
+            let anchor: serde_json::Value =
+                serde_json::from_str(&anchor_text).unwrap_or(serde_json::Value::Null);
+            Ok(SearchHit {
+                annotation_id: row.get(0)?,
+                doc_id: row.get(1)?,
+                doc_name: row.get(2)?,
+                page: row.get::<_, i64>(3)? as u32,
+                quote: anchor
+                    .get("quote")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                body: row.get(5)?,
+                color: row.get(6)?,
+                tags: serde_json::from_str(&tags_text).unwrap_or_default(),
+            })
+        })
+        .map_err(|error| format!("搜索失败：{error}"))?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error| format!("读取搜索结果失败：{error}"))
+}
+
 pub fn remove_document(conn: &Connection, id: &str) -> Result<(), String> {
-    conn.execute("DELETE FROM annotation_fts WHERE doc_id = ?1", params![id])
-        .map_err(|error| format!("清理搜索索引失败：{error}"))?;
+    conn.execute(
+        "DELETE FROM annotation_fts WHERE doc_id = ?1",
+        params![id],
+    )
+    .map_err(|error| format!("清理搜索索引失败：{error}"))?;
     conn.execute("DELETE FROM annotations WHERE doc_id = ?1", params![id])
         .map_err(|error| format!("清理标注失败：{error}"))?;
     conn.execute("DELETE FROM documents WHERE id = ?1", params![id])

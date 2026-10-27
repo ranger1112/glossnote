@@ -1,10 +1,12 @@
 use crate::{
     db,
     models::{
-        Annotation, Document, DocumentMetaPatch, DocumentRow, ImportResult, LibraryInfo, Sidecar,
+        Annotation, Document, DocumentMetaPatch, DocumentRow, ImportResult, LibraryInfo, SearchHit,
+        Sidecar,
     },
     state::AppState,
 };
+use chrono::Local;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -296,6 +298,9 @@ pub fn import_pdf(app: &AppHandle, source: &str) -> Result<ImportResult, String>
         mtime: mtime_ms(&file_metadata),
         added_at: now,
         last_opened_at: now,
+        cover: String::new(),
+        last_page: 0,
+        annotation_count: 0,
     };
     db::upsert_document(&conn, &row)?;
 
@@ -364,6 +369,17 @@ pub fn scan(app: &AppHandle) -> Result<LibraryInfo, String> {
             .and_then(|value| value.to_str())
             .unwrap_or("document.pdf")
             .to_string();
+        let cover = prior
+            .as_ref()
+            .map(|row| row.cover.clone())
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                let relative = format!(".glossnote/thumbnails/{id}.jpg");
+                root.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR))
+                    .exists()
+                    .then_some(relative)
+            })
+            .unwrap_or_default();
         let row = DocumentRow {
             id: id.clone(),
             name,
@@ -381,6 +397,9 @@ pub fn scan(app: &AppHandle) -> Result<LibraryInfo, String> {
             mtime,
             added_at: prior.as_ref().map(|row| row.added_at).unwrap_or(now),
             last_opened_at: prior.as_ref().map(|row| row.last_opened_at).unwrap_or(0),
+            cover,
+            last_page: prior.as_ref().map(|row| row.last_page).unwrap_or(0),
+            annotation_count: 0,
         };
 
         db::upsert_document(&conn, &row)?;
@@ -434,6 +453,189 @@ pub fn list_documents(app: &AppHandle) -> Result<Vec<Document>, String> {
         .iter()
         .map(|row| row.to_document(&root))
         .collect())
+}
+
+pub fn open_document(app: &AppHandle, doc_id: &str) -> Result<ImportResult, String> {
+    let state = app.state::<AppState>();
+    let root = state.library_root.clone();
+    ensure_dirs(&root)?;
+    let conn = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let row = db::find_by_id(&conn, doc_id)?.ok_or_else(|| "文档不存在".to_string())?;
+    if !root
+        .join(row.rel_path.replace('/', std::path::MAIN_SEPARATOR_STR))
+        .exists()
+    {
+        return Err("文档文件不存在".to_string());
+    }
+
+    db::touch_document(&conn, doc_id, now_ms())?;
+    let annotations = merge_sidecar(&conn, &root, &row)?;
+    let document = db::find_by_id(&conn, doc_id)?.unwrap_or(row);
+    write_sidecar(&conn, &root, doc_id)?;
+
+    Ok(ImportResult {
+        document: document.to_document(&root),
+        annotations,
+    })
+}
+
+pub fn save_cover(app: &AppHandle, doc_id: &str, bytes: Vec<u8>) -> Result<Document, String> {
+    if bytes.len() > 2 * 1024 * 1024 {
+        return Err("封面文件过大".to_string());
+    }
+
+    let state = app.state::<AppState>();
+    let root = state.library_root.clone();
+    let conn = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    db::find_by_id(&conn, doc_id)?.ok_or_else(|| "文档不存在".to_string())?;
+
+    let relative = format!(".glossnote/thumbnails/{doc_id}.jpg");
+    let path = root.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| format!("创建封面目录失败：{error}"))?;
+    }
+
+    let temp = path.with_extension(format!("jpg.tmp-{}-{}", process::id(), now_ms()));
+    fs::write(&temp, &bytes).map_err(|error| format!("写入封面失败：{error}"))?;
+    if let Err(error) = fs::rename(&temp, &path) {
+        let _ = fs::remove_file(&path);
+        fs::rename(&temp, &path).map_err(|_| format!("保存封面失败：{error}"))?;
+    }
+
+    db::set_cover(&conn, doc_id, &relative)?;
+    let document = db::find_by_id(&conn, doc_id)?.ok_or_else(|| "文档不存在".to_string())?;
+    Ok(document.to_document(&root))
+}
+
+pub fn save_progress(app: &AppHandle, doc_id: &str, last_page: u32) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let conn = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if db::find_by_id(&conn, doc_id)?.is_none() {
+        return Err("文档不存在".to_string());
+    }
+    db::save_progress(&conn, doc_id, last_page)
+}
+
+pub fn search(app: &AppHandle, query: String) -> Result<Vec<SearchHit>, String> {
+    let state = app.state::<AppState>();
+    let conn = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    db::search_annotations(&conn, &query)
+}
+
+pub fn export_markdown(
+    app: &AppHandle,
+    path: String,
+    doc_id: Option<String>,
+) -> Result<String, String> {
+    use std::fmt::Write as _;
+
+    let state = app.state::<AppState>();
+    let conn = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let documents = match doc_id.as_deref() {
+        Some(id) => vec![db::find_by_id(&conn, id)?.ok_or_else(|| "文档不存在".to_string())?],
+        None => db::list_documents(&conn)?,
+    };
+    if documents.is_empty() {
+        return Err("书库里还没有文档".to_string());
+    }
+
+    let single = doc_id.is_some();
+    let mut out = String::new();
+    if !single {
+        writeln!(out, "# GlossNote 导出").unwrap();
+        writeln!(out).unwrap();
+        writeln!(
+            out,
+            "> 导出时间：{}",
+            Local::now().format("%Y-%m-%d %H:%M")
+        )
+        .unwrap();
+        writeln!(out).unwrap();
+    }
+
+    for (index, document) in documents.iter().enumerate() {
+        let title = if document.title.trim().is_empty() {
+            document.name.trim_end_matches(".pdf")
+        } else {
+            document.title.trim()
+        };
+        writeln!(out, "## {title}").unwrap();
+        writeln!(out).unwrap();
+        writeln!(out, "- 文件：`{}`", document.name).unwrap();
+        if !document.author.trim().is_empty() {
+            writeln!(out, "- 作者：{}", document.author.trim()).unwrap();
+        }
+        writeln!(out, "- 页数：{}", document.page_count).unwrap();
+        writeln!(out, "- 标注：{}", document.annotation_count).unwrap();
+        writeln!(out).unwrap();
+
+        let annotations = db::list_annotations(&conn, &document.id)?;
+        let visible: Vec<_> = annotations
+            .into_iter()
+            .filter(|annotation| !annotation.deleted)
+            .collect();
+
+        if visible.is_empty() {
+            writeln!(out, "（暂无标注）").unwrap();
+            writeln!(out).unwrap();
+        } else {
+            for annotation in visible {
+                let quote = annotation
+                    .anchor
+                    .get("quote")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                writeln!(out, "### 第 {} 页", annotation.page + 1).unwrap();
+                writeln!(out).unwrap();
+                for line in quote.lines() {
+                    writeln!(out, "> {line}").unwrap();
+                }
+                writeln!(out).unwrap();
+
+                if !annotation.body.trim().is_empty() {
+                    writeln!(out, "{}", annotation.body.trim()).unwrap();
+                    writeln!(out).unwrap();
+                }
+
+                if !annotation.tags.is_empty() {
+                    let tags = annotation
+                        .tags
+                        .iter()
+                        .map(|tag| format!("#{tag}"))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    writeln!(out, "{tags}").unwrap();
+                    writeln!(out).unwrap();
+                }
+            }
+        }
+
+        if index + 1 < documents.len() {
+            writeln!(out, "---").unwrap();
+            writeln!(out).unwrap();
+        }
+    }
+
+    fs::write(&path, out).map_err(|error| format!("写入 Markdown 失败：{error}"))?;
+    Ok(path)
 }
 
 pub fn list_annotations(app: &AppHandle, doc_id: &str) -> Result<Vec<Annotation>, String> {
@@ -543,6 +745,9 @@ mod tests {
             mtime: 1,
             added_at: 1,
             last_opened_at: 1,
+            cover: String::new(),
+            last_page: 0,
+            annotation_count: 0,
         }
     }
 

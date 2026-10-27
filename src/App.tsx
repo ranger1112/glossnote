@@ -2,19 +2,20 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { pdfjsLib } from './pdfjs';
 import { PdfPage } from './PdfPage';
+import { Library } from './Library';
 import type { Anchor } from './anchoring';
 import type { Annotation, DocRecord, DocumentMeta, HighlightColor } from './types';
 import { loadDoc, saveDoc, sha256Hex } from './storage';
-import { isTauri, pickPdfPath } from './platform';
+import { isTauri } from './platform';
 import {
   assetUrl,
   deleteAnnotation,
-  getLastDocument,
-  importPdf,
-  scanLibrary,
+  openDocument,
+  saveProgress,
   updateDocumentMeta,
   upsertAnnotation,
 } from './desktop';
+import { applyTheme, initialTheme, type Theme } from './theme';
 
 interface OpenedDoc {
   id: string;
@@ -39,6 +40,7 @@ interface Activation {
   task: ReturnType<typeof pdfjsLib.getDocument>;
   annotations: Annotation[];
   desktopMeta?: DocumentMeta;
+  initialPage?: number;
 }
 
 const COLORS: Array<{ key: HighlightColor; label: string }> = [
@@ -50,8 +52,27 @@ const COLORS: Array<{ key: HighlightColor; label: string }> = [
 
 const EMPTY: Annotation[] = [];
 
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * 页面是异步渲染的：占位 canvas 也有 150px 高，不能拿 offsetHeight 判断就绪。
+ * PdfPage 拿到 viewport 后才写入内联高度，等到那时再滚动。
+ */
+function scrollToPage(page: number, attempt = 0) {
+  const target = document.querySelector<HTMLElement>(`[data-page-index="${page}"]`);
+  if (target && target.style.height) {
+    target.scrollIntoView({ behavior: 'instant', block: 'start' });
+    return;
+  }
+  if (attempt < 60) window.setTimeout(() => scrollToPage(page, attempt + 1), 80);
+}
+
 export default function App() {
   const desktop = isTauri();
+  const [theme, setTheme] = useState<Theme>(initialTheme);
+
   const [doc, setDoc] = useState<OpenedDoc | null>(null);
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [scale, setScale] = useState(1.2);
@@ -60,12 +81,20 @@ export default function App() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
+  const [currentPage, setCurrentPage] = useState(0);
 
   const fileRef = useRef<HTMLInputElement>(null);
   const recordRef = useRef<DocRecord | null>(null);
   const docRef = useRef<OpenedDoc | null>(null);
   const annotationsRef = useRef<Annotation[]>([]);
+  const viewerRef = useRef<HTMLElement | null>(null);
+  const currentPageRef = useRef(0);
+  const progressTimer = useRef<number | null>(null);
+  const openingRef = useRef(false);
+  const closingRef = useRef(false);
   annotationsRef.current = annotations;
+
+  useEffect(() => applyTheme(theme), [theme]);
 
   const visible = useMemo(
     () =>
@@ -101,7 +130,7 @@ export default function App() {
     try {
       await upsertAnnotation(docId, annotation);
     } catch (error) {
-      setMessage(`保存标注失败：${error instanceof Error ? error.message : String(error)}`);
+      setMessage(`保存标注失败：${errorText(error)}`);
     }
   }, []);
 
@@ -109,11 +138,15 @@ export default function App() {
     try {
       await deleteAnnotation(docId, id);
     } catch (error) {
-      setMessage(`删除标注失败：${error instanceof Error ? error.message : String(error)}`);
+      setMessage(`删除标注失败：${errorText(error)}`);
     }
   }, []);
 
   const activate = useCallback(async (input: Activation) => {
+    if (progressTimer.current !== null) {
+      window.clearTimeout(progressTimer.current);
+      progressTimer.current = null;
+    }
     docRef.current?.dispose();
 
     const opened: OpenedDoc = {
@@ -128,13 +161,20 @@ export default function App() {
     docRef.current = opened;
     if (input.desktopMeta) recordRef.current = null;
 
+    const startPage = Math.max(0, Math.min(input.initialPage ?? 0, input.pageCount - 1));
+    currentPageRef.current = startPage;
+    setCurrentPage(startPage);
     annotationsRef.current = input.annotations;
     setDoc(opened);
     setAnnotations(input.annotations);
     setToolbar(null);
     setFocusId(null);
     setMessage('');
-    requestAnimationFrame(() => document.querySelector('.viewer')?.scrollTo({ top: 0 }));
+
+    requestAnimationFrame(() => {
+      if (startPage > 0) scrollToPage(startPage);
+      else viewerRef.current?.scrollTo({ top: 0 });
+    });
 
     if (input.desktopMeta) {
       try {
@@ -183,7 +223,7 @@ export default function App() {
           annotations: record.annotations,
         });
       } catch (error) {
-        setMessage(`打开失败：${error instanceof Error ? error.message : String(error)}`);
+        setMessage(`打开失败：${errorText(error)}`);
       } finally {
         setBusy(false);
       }
@@ -191,43 +231,95 @@ export default function App() {
     [activate],
   );
 
-  const choosePdf = useCallback(async () => {
-    if (!isTauri()) {
-      fileRef.current?.click();
-      return;
-    }
-
-    setBusy(true);
-    setMessage('正在选择 PDF…');
-    try {
-      const path = await pickPdfPath();
-      if (!path) {
-        setMessage('');
-        return;
+  const openById = useCallback(
+    async (docId: string, page?: number) => {
+      if (openingRef.current) return;
+      openingRef.current = true;
+      setBusy(true);
+      setMessage('正在打开文档…');
+      try {
+        const result = await openDocument(docId);
+        const task = pdfjsLib.getDocument({ url: assetUrl(result.document.path) });
+        const pdf = await task.promise;
+        await activate({
+          id: result.document.id,
+          name: result.document.name,
+          size: result.document.size,
+          pageCount: pdf.numPages,
+          pdf,
+          task,
+          annotations: result.annotations,
+          desktopMeta: result.document,
+          initialPage: page ?? result.document.lastPage,
+        });
+      } catch (error) {
+        setMessage(`打开失败：${errorText(error)}`);
+      } finally {
+        openingRef.current = false;
+        setBusy(false);
       }
+    },
+    [activate],
+  );
 
-      setMessage('正在导入 PDF…');
-      const result = await importPdf(path);
-      setMessage('正在打开 PDF…');
+  const closeDoc = useCallback(() => {
+    if (closingRef.current) return;
+    closingRef.current = true;
 
-      const task = pdfjsLib.getDocument({ url: assetUrl(result.document.path) });
-      const pdf = await task.promise;
-      await activate({
-        id: result.document.id,
-        name: result.document.name,
-        size: result.document.size,
-        pageCount: pdf.numPages,
-        pdf,
-        task,
-        annotations: result.annotations,
-        desktopMeta: result.document,
-      });
-    } catch (error) {
-      setMessage(`导入失败：${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      setBusy(false);
+    if (progressTimer.current !== null) {
+      window.clearTimeout(progressTimer.current);
+      progressTimer.current = null;
     }
-  }, [activate]);
+
+    const finish = () => {
+      docRef.current?.dispose();
+      docRef.current = null;
+      recordRef.current = null;
+      currentPageRef.current = 0;
+      setDoc(null);
+      setAnnotations([]);
+      setToolbar(null);
+      setFocusId(null);
+      setEditingId(null);
+      setCurrentPage(0);
+      setMessage('');
+      closingRef.current = false;
+    };
+
+    // 等进度落盘再回书库：书库挂载时会重新扫描，避免读到旧页码。
+    const id = docRef.current?.id;
+    if (id) {
+      saveProgress(id, currentPageRef.current).catch(() => undefined).finally(finish);
+    } else {
+      finish();
+    }
+  }, []);
+
+  const handleViewerScroll = useCallback(() => {
+    const viewer = viewerRef.current;
+    if (!viewer || !docRef.current) return;
+
+    const threshold = viewer.getBoundingClientRect().top + 60;
+    let page = currentPageRef.current;
+    for (const element of viewer.querySelectorAll<HTMLElement>('[data-page-index]')) {
+      if (element.getBoundingClientRect().bottom > threshold) {
+        page = Number(element.dataset.pageIndex);
+        break;
+      }
+    }
+
+    if (page !== currentPageRef.current) {
+      currentPageRef.current = page;
+      setCurrentPage(page);
+    }
+
+    if (progressTimer.current !== null) window.clearTimeout(progressTimer.current);
+    progressTimer.current = window.setTimeout(() => {
+      progressTimer.current = null;
+      const id = docRef.current?.id;
+      if (id) void saveProgress(id, currentPageRef.current).catch(() => undefined);
+    }, 700);
+  }, []);
 
   const openSample = useCallback(async () => {
     try {
@@ -236,7 +328,7 @@ export default function App() {
       const blob = await response.blob();
       await openFile(new File([blob], 'sample.pdf', { type: 'application/pdf' }));
     } catch (error) {
-      setMessage(`加载示例失败：${error instanceof Error ? error.message : String(error)}`);
+      setMessage(`加载示例失败：${errorText(error)}`);
     }
   }, [openFile]);
 
@@ -244,56 +336,6 @@ export default function App() {
     if (!import.meta.env.DEV || isTauri()) return;
     if (new URLSearchParams(window.location.search).has('sample')) void openSample();
   }, [openSample]);
-
-  useEffect(() => {
-    if (!isTauri()) return;
-
-    let cancelled = false;
-    void (async () => {
-      setBusy(true);
-      setMessage('正在整理书库…');
-      try {
-        await scanLibrary();
-        if (cancelled) return;
-
-        const last = await getLastDocument();
-        if (cancelled) return;
-        if (!last) {
-          setMessage('');
-          return;
-        }
-
-        setMessage('正在打开上次的文档…');
-        const task = pdfjsLib.getDocument({ url: assetUrl(last.document.path) });
-        const pdf = await task.promise;
-        if (cancelled) {
-          void task.destroy();
-          return;
-        }
-
-        await activate({
-          id: last.document.id,
-          name: last.document.name,
-          size: last.document.size,
-          pageCount: pdf.numPages,
-          pdf,
-          task,
-          annotations: last.annotations,
-          desktopMeta: last.document,
-        });
-      } catch (error) {
-        if (!cancelled) {
-          setMessage(`整理书库失败：${error instanceof Error ? error.message : String(error)}`);
-        }
-      } finally {
-        if (!cancelled) setBusy(false);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [activate]);
 
   const addHighlight = useCallback(
     (anchor: Anchor, color: HighlightColor, withNote: boolean) => {
@@ -325,6 +367,18 @@ export default function App() {
       if (!existing) return;
 
       const updated: Annotation = { ...existing, body, updatedAt: Date.now() };
+      commit(annotationsRef.current.map((annotation) => (annotation.id === id ? updated : annotation)));
+      if (isTauri()) void persistAnnotation(docId, updated);
+    },
+    [commit, persistAnnotation],
+  );
+
+  const updateTags = useCallback(
+    (docId: string, id: string, tags: string[]) => {
+      const existing = annotationsRef.current.find((annotation) => annotation.id === id);
+      if (!existing) return;
+
+      const updated: Annotation = { ...existing, tags, updatedAt: Date.now() };
       commit(annotationsRef.current.map((annotation) => (annotation.id === id ? updated : annotation)));
       if (isTauri()) void persistAnnotation(docId, updated);
     },
@@ -377,13 +431,17 @@ export default function App() {
       <header className="topbar">
         <div className="brand">
           <span className="brand-mark">G</span>
-          Gloss<span className="brand-accent">Note</span>
+          <span className="brand-text">
+            Gloss<span className="brand-accent">Note</span>
+          </span>
         </div>
 
         {doc && (
           <div className="doc-title" title={doc.name}>
             <span className="doc-name">{doc.name}</span>
-            <span className="doc-id">#{doc.id.slice(0, 8)}</span>
+            <span className="doc-id">
+              第 {currentPage + 1} / {doc.pageCount} 页
+            </span>
           </div>
         )}
 
@@ -411,12 +469,29 @@ export default function App() {
 
         <button
           type="button"
-          className="primary"
-          disabled={busy}
-          onClick={() => void choosePdf()}
+          className="theme-toggle"
+          title={theme === 'dark' ? '切换到浅色' : '切换到深色'}
+          onClick={() => setTheme((current) => (current === 'dark' ? 'light' : 'dark'))}
         >
-          {doc ? '换一份' : '打开 PDF'}
+          {theme === 'dark' ? '☀' : '☾'}
         </button>
+
+        {doc ? (
+          <button type="button" className="ghost topbar-back" onClick={closeDoc}>
+            书库
+          </button>
+        ) : (
+          !desktop && (
+            <button
+              type="button"
+              className="primary"
+              disabled={busy}
+              onClick={() => fileRef.current?.click()}
+            >
+              打开 PDF
+            </button>
+          )
+        )}
 
         <input
           ref={fileRef}
@@ -433,57 +508,63 @@ export default function App() {
 
       {message && <div className="status-bar">{message}</div>}
 
-      <main className={doc ? 'workspace' : 'workspace welcome'}>
-        {doc ? (
-          <>
-            <section className="viewer">
-              {Array.from({ length: doc.pageCount }, (_, index) => (
-                <PdfPage
-                  key={index}
-                  pdf={doc.pdf}
-                  pageIndex={index}
-                  scale={scale}
-                  annotations={byPage.get(index) ?? EMPTY}
-                  focusId={focusId}
-                  onSelect={handleSelect}
-                />
-              ))}
-            </section>
+      {doc ? (
+        <main className="workspace">
+          <section className="viewer" ref={viewerRef} onScroll={handleViewerScroll}>
+            {Array.from({ length: doc.pageCount }, (_, index) => (
+              <PdfPage
+                key={index}
+                pdf={doc.pdf}
+                pageIndex={index}
+                scale={scale}
+                annotations={byPage.get(index) ?? EMPTY}
+                focusId={focusId}
+                onSelect={handleSelect}
+              />
+            ))}
+          </section>
 
-            <aside className="sidebar">
-              <div className="sidebar-head">
-                <h2>标注</h2>
-                <span className="count">{visible.length}</span>
+          <aside className="sidebar">
+            <div className="sidebar-head">
+              <h2>标注</h2>
+              <span className="count">{visible.length}</span>
+              <span className="sidebar-progress">
+                {currentPage + 1} / {doc.pageCount}
+              </span>
+            </div>
+
+            {visible.length === 0 ? (
+              <p className="sidebar-hint">
+                选中正文即可高亮；点浮动栏里的「批注」写下你的想法。
+                所有标注会在刷新、缩放后回到原来的位置。
+              </p>
+            ) : (
+              <div className="annotation-list">
+                {visible.map((annotation) => (
+                  <AnnotationCard
+                    key={annotation.id}
+                    annotation={annotation}
+                    editing={editingId === annotation.id}
+                    onJump={() => jumpTo(annotation)}
+                    onBody={(body) => updateBody(doc.id, annotation.id, body)}
+                    onTags={(tags) => updateTags(doc.id, annotation.id, tags)}
+                    onDelete={() => removeAnnotation(doc.id, annotation.id)}
+                  />
+                ))}
               </div>
+            )}
 
-              {visible.length === 0 ? (
-                <p className="sidebar-hint">
-                  选中正文即可高亮；点浮动栏里的「批注」写下你的想法。
-                  所有标注会在刷新、缩放后回到原来的位置。
-                </p>
-              ) : (
-                <div className="annotation-list">
-                  {visible.map((annotation) => (
-                    <AnnotationCard
-                      key={annotation.id}
-                      annotation={annotation}
-                      editing={editingId === annotation.id}
-                      onJump={() => jumpTo(annotation)}
-                      onBody={(body) => updateBody(doc.id, annotation.id, body)}
-                      onDelete={() => removeAnnotation(doc.id, annotation.id)}
-                    />
-                  ))}
-                </div>
-              )}
-
-              <div className="sidebar-foot">
-                {desktop
-                  ? '标注写入本地 SQLite，并镜像到书库的 sidecar。'
-                  : '浏览器原型暂存于 localStorage；桌面版写入 SQLite 与 sidecar。'}
-              </div>
-            </aside>
-          </>
-        ) : (
+            <div className="sidebar-foot">
+              {desktop
+                ? '标注写入本地 SQLite，并镜像到书库的 sidecar。'
+                : '浏览器原型暂存于 localStorage；桌面版写入 SQLite 与 sidecar。'}
+            </div>
+          </aside>
+        </main>
+      ) : desktop ? (
+        <Library onOpen={openById} onMessage={setMessage} />
+      ) : (
+        <main className="workspace welcome">
           <div className="welcome-card">
             <div className="welcome-mark">G</div>
             <h1>把阅读留在页面上</h1>
@@ -496,29 +577,25 @@ export default function App() {
                 type="button"
                 className="primary large"
                 disabled={busy}
-                onClick={() => void choosePdf()}
+                onClick={() => fileRef.current?.click()}
               >
                 打开 PDF
               </button>
-              {!desktop && (
-                <button
-                  type="button"
-                  className="ghost"
-                  disabled={busy}
-                  onClick={() => void openSample()}
-                >
-                  先看看示例
-                </button>
-              )}
+              <button
+                type="button"
+                className="ghost"
+                disabled={busy}
+                onClick={() => void openSample()}
+              >
+                先看看示例
+              </button>
             </div>
             <p className="welcome-hint">
-              {desktop
-                ? '导入的 PDF 会复制进书库；标注同时写入 SQLite 与 sidecar。'
-                : '当前是浏览器原型：标注只存在 localStorage，尚未接入 SQLite 与云同步。'}
+              当前是浏览器原型：标注只存在 localStorage，尚未接入 SQLite 与云同步。
             </p>
           </div>
-        )}
-      </main>
+        </main>
+      )}
 
       {toolbar && (
         <div
@@ -554,11 +631,20 @@ interface AnnotationCardProps {
   editing: boolean;
   onJump: () => void;
   onBody: (body: string) => void;
+  onTags: (tags: string[]) => void;
   onDelete: () => void;
 }
 
-function AnnotationCard({ annotation, editing, onJump, onBody, onDelete }: AnnotationCardProps) {
+function AnnotationCard({
+  annotation,
+  editing,
+  onJump,
+  onBody,
+  onTags,
+  onDelete,
+}: AnnotationCardProps) {
   const [draft, setDraft] = useState(annotation.body);
+  const [tagDraft, setTagDraft] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const draftRef = useRef(annotation.body);
   const savedRef = useRef(annotation.body);
@@ -596,6 +682,17 @@ function AnnotationCard({ annotation, editing, onJump, onBody, onDelete }: Annot
     timerRef.current = window.setTimeout(flush, 600);
   };
 
+  const addTag = () => {
+    const value = tagDraft.trim().replace(/^#+/, '');
+    if (!value) return;
+    if (!annotation.tags.includes(value)) onTags([...annotation.tags, value]);
+    setTagDraft('');
+  };
+
+  const removeTag = (tag: string) => {
+    onTags(annotation.tags.filter((item) => item !== tag));
+  };
+
   return (
     <article className="annotation-card" onClick={onJump}>
       <header className="annotation-head">
@@ -625,6 +722,35 @@ function AnnotationCard({ annotation, editing, onJump, onBody, onDelete }: Annot
         onClick={(event) => event.stopPropagation()}
         onBlur={flush}
       />
+
+      <div className="tag-editor" onClick={(event) => event.stopPropagation()}>
+        {annotation.tags.map((tag) => (
+          <span className="tag" key={tag}>
+            #{tag}
+            <button type="button" title="移除标签" onClick={() => removeTag(tag)}>
+              ×
+            </button>
+          </span>
+        ))}
+        <input
+          value={tagDraft}
+          placeholder="+ 标签"
+          onChange={(event) => setTagDraft(event.target.value)}
+          onBlur={addTag}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' || event.key === ',') {
+              event.preventDefault();
+              addTag();
+            } else if (
+              event.key === 'Backspace' &&
+              tagDraft.length === 0 &&
+              annotation.tags.length > 0
+            ) {
+              removeTag(annotation.tags[annotation.tags.length - 1]);
+            }
+          }}
+        />
+      </div>
     </article>
   );
 }

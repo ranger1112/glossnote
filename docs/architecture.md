@@ -32,7 +32,7 @@ Rust 侧只做 WebView 做不了或做起来不划算的事：文件系统、哈
 │   └── 设计心理学.pdf
 └── .glossnote/
     ├── annotations/<sha256>.json     # 每份文档一份 sidecar，按内容哈希命名
-    ├── thumbnails/<sha256>.webp      # 首页封面，可重建
+    ├── thumbnails/<sha256>.jpg       # 首页封面，320px 宽，可重建
     └── manifest.json                 # 可选：标题、作者、页数、导入时间
 ```
 
@@ -41,7 +41,7 @@ Rust 侧只做 WebView 做不了或做起来不划算的事：文件系统、哈
 - 书库根目录可以由用户指到坚果云 / OneDrive / NAS 同步目录。
 - **sidecar 是可移植的真相源，SQLite 只是索引。** 删掉 `library.db` 后，扫描 `books/` + `.glossnote/annotations/` 必须能完整重建。
 
-默认位置是系统「文档」下的 `GlossNote`。要改到云盘目录，在 `%APPDATA%\com.phoebe.glossnote\settings.json` 写 `{"libraryDir": "D:\\GlossNote"}`；0.4 会提供目录选择器。
+默认位置是系统「文档」下的 `GlossNote`。要改到云盘目录，在 `%APPDATA%\com.phoebe.glossnote\settings.json` 写 `{"libraryDir": "D:\\GlossNote"}`；目录选择器尚未实现，推迟到同步阶段一起做。
 
 ## 本地数据库
 
@@ -52,12 +52,13 @@ Rust 侧只做 WebView 做不了或做起来不划算的事：文件系统、哈
 ```sql
 documents(
   id TEXT PRIMARY KEY,        -- sha256，内容寻址
-  path TEXT,                  -- 相对书库的路径
+  name TEXT NOT NULL,
   title TEXT, author TEXT,
   page_count INTEGER, size INTEGER, mtime INTEGER,
+  rel_path TEXT NOT NULL,     -- 相对书库的路径
   added_at INTEGER, last_opened_at INTEGER,
-  progress TEXT,              -- JSON: { page, scrollTop, scale }
-  cover TEXT                  -- 缩略图相对路径
+  last_page INTEGER DEFAULT 0,-- 0 基页码，本机阅读进度
+  cover TEXT DEFAULT ''       -- 缩略图相对路径
 );
 
 annotations(
@@ -74,7 +75,10 @@ annotations(
 );
 
 CREATE VIRTUAL TABLE annotation_fts USING fts5(
-  quote, body, content='annotations', content_rowid='rowid'
+  annotation_id UNINDEXED,
+  doc_id UNINDEXED,
+  quote,
+  body
 );
 
 cards(                        -- 0.6 才建
@@ -89,7 +93,8 @@ cards(                        -- 0.6 才建
 
 - 删除只写 `deleted = 1` 墓碑，不物理删除；同步、撤销、冲突合并都依赖它。
 - `doc_id` 是文件字节的 SHA-256，不是路径，也不是文件名。
-- `body` 与 `quote` 进 FTS5；标签和文档标题在 0.4 接入。
+- `body` 与 `quote` 会同步写入 FTS5；0.4 的书库搜索实际走 `LIKE` 子串匹配（覆盖 quote、正文、标签、文档名与标题），先把中文搜索跑通，FTS5 留待压测后接入。
+- `last_page` 是本机阅读进度，不写入 sidecar，也不参与跨设备合并。
 - 设置仍走应用配置文件；数据库只放业务数据。
 
 ## 导入流程
@@ -97,8 +102,8 @@ cards(                        -- 0.6 才建
 1. 用户点「导入」、拖入文件，或 `Ctrl+O`。
 2. 流式计算 SHA-256。命中已有 `doc_id` 时直接打开，不重复复制。
 3. 复制到 `books/`，文件名做最小清洗；重名但内容不同则追加 ` (2)`。
-4. 首次打开时用 pdf.js 读页数与元数据，渲染首页生成封面。
-5. 写 `documents`、`manifest.json`，在书库中出现。
+4. 书库首次展示或打开文档时，用 pdf.js 读页数与元数据，渲染首页生成封面（320px JPEG）。
+5. 写 `documents` 与 sidecar，在书库中出现。
 
 大文件先用 Rust 读取字节经 IPC 交给 WebView；超过 50 MB 给出提示，后续改用 Tauri asset protocol，避免一次性复制。
 
@@ -139,6 +144,19 @@ cards(                        -- 0.6 才建
 - 页面指纹是页级 FNV-1a，不是文档级；单页改动不会影响其他页。
 
 算法在 `src/anchoring.ts`，纯函数，单测覆盖 exact / relocated / 相似度 / 比例回退。
+
+## 书库与检索
+
+0.4 把单文档阅读器扩展成「书库 ↔ 阅读器」两视图：
+
+- **书库**：扫描书库后列出文档卡片；封面与页数在缺失时由前端用 pdf.js 补齐；标注数来自 `annotations` 子查询。
+- **搜索**：输入停顿 240ms 后调用 `search_annotations`，在 quote、`body`、`tags` JSON、文档名与标题上做 `LIKE` 子串匹配，最多返回 100 条，按更新时间倒序。结果点击后打开文档并滚到对应页。
+- **阅读进度**：滚动时按视口顶部命中页更新，700ms 防抖写 `last_page`；返回书库时再同步写一次，避免扫描读到旧值；打开文档时优先使用调用方传入的页码，其次使用 `last_page`。
+- **标签**：作为标注的 `tags` 数组存储，随标注写入 SQLite 与 sidecar；搜索命中会返回标签。
+- **导出**：`export_markdown(path, docId?)` 在 Rust 侧拼 Markdown 并原子落盘，前端只负责原生保存对话框。
+- **深色模式**：`data-theme` 作用在 `<html>`，配色全部走 CSS 变量；偏好存 `localStorage`。
+
+封面写入路径固定为 `.glossnote/thumbnails/<sha256>.jpg`，扫描时若记录里没有 cover 但文件存在，会重新挂上，避免删库后封面丢失。
 
 ## 同步
 
@@ -188,14 +206,16 @@ Tauri 侧注意：pdf.js 的 worker 需要 `worker-src 'self'`；部分扫描件
 
 ## 原型与目标的差距
 
-0.1 原型先跑在浏览器里；0.2 套上 Tauri 2 桌面壳，接入原生文件对话框与 asset protocol；0.3 把持久化换成 SQLite + sidecar，并在启动时扫描书库重建索引。
+0.1 原型先跑在浏览器里；0.2 套上 Tauri 2 桌面壳，接入原生文件对话框与 asset protocol；0.3 把持久化换成 SQLite + sidecar，并在启动时扫描书库重建索引；0.4 增加书库网格、封面、搜索、标签、阅读进度、Markdown 导出与深色模式。
 
 | 能力 | 现状 |
 | --- | --- |
-| 打开文件 | 已替换为 Tauri 原生对话框 + Rust 哈希 |
-| 持久化 | 已替换为 SQLite + 哈希 sidecar |
-| 单文档 | 仍是单文档；0.4 起接入书库列表 |
-| 封面 / 搜索 | 未实现，0.4 |
+| 打开文件 | Tauri 原生对话框 + Rust 哈希，导入即入库 |
+| 持久化 | SQLite + 哈希 sidecar |
+| 书库 | 封面网格、标注数、阅读进度 |
+| 搜索 | `LIKE` 子串匹配；FTS5 表已维护未接入 |
+| 封面 | 前端渲染首页，Rust 落盘 |
+| 导出 | 全库/单文档 Markdown |
 | 同步 | 未实现，0.5 |
 
-`src/storage.ts` 是唯一的数据读写边界，替换持久化层时保持接口不变，UI 不动。
+浏览器模式仍保留 `src/storage.ts` 作为 localStorage 适配器；桌面模式由 `src/desktop.ts` 直接调用 Tauri 命令，UI 不感知两者的差异。

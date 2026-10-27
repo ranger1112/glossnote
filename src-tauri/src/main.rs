@@ -6,7 +6,7 @@ mod models;
 mod state;
 
 use crate::{
-    models::{Annotation, Document, DocumentMetaPatch, ImportResult, LibraryInfo},
+    models::{Annotation, Document, DocumentMetaPatch, ImportResult, LibraryInfo, SearchHit},
     state::AppState,
 };
 use std::{fs, sync::Mutex};
@@ -29,6 +29,41 @@ async fn import_pdf(app: AppHandle, path: String) -> Result<ImportResult, String
     tauri::async_runtime::spawn_blocking(move || library::import_pdf(&app, &path))
         .await
         .map_err(|error| format!("导入任务失败：{error}"))?
+}
+
+#[tauri::command]
+async fn open_document(app: AppHandle, doc_id: String) -> Result<ImportResult, String> {
+    tauri::async_runtime::spawn_blocking(move || library::open_document(&app, &doc_id))
+        .await
+        .map_err(|error| format!("打开文档失败：{error}"))?
+}
+
+#[tauri::command]
+async fn save_cover(app: AppHandle, doc_id: String, bytes: Vec<u8>) -> Result<Document, String> {
+    tauri::async_runtime::spawn_blocking(move || library::save_cover(&app, &doc_id, bytes))
+        .await
+        .map_err(|error| format!("封面任务失败：{error}"))?
+}
+
+#[tauri::command]
+fn save_progress(app: AppHandle, doc_id: String, last_page: u32) -> Result<(), String> {
+    library::save_progress(&app, &doc_id, last_page)
+}
+
+#[tauri::command]
+fn search_annotations(app: AppHandle, query: String) -> Result<Vec<SearchHit>, String> {
+    library::search(&app, query)
+}
+
+#[tauri::command]
+async fn export_markdown(
+    app: AppHandle,
+    path: String,
+    doc_id: Option<String>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || library::export_markdown(&app, path, doc_id))
+        .await
+        .map_err(|error| format!("导出任务失败：{error}"))?
 }
 
 #[tauri::command]
@@ -91,6 +126,11 @@ fn main() {
             library_info,
             scan_library,
             import_pdf,
+            open_document,
+            save_cover,
+            save_progress,
+            search_annotations,
+            export_markdown,
             last_document,
             list_documents,
             list_annotations,

@@ -14,11 +14,22 @@ pub struct DocumentRow {
     pub mtime: i64,
     pub added_at: i64,
     pub last_opened_at: i64,
+    pub cover: String,
+    pub last_page: u32,
+    pub annotation_count: usize,
 }
 
 impl DocumentRow {
     pub fn to_document(&self, root: &Path) -> Document {
         let relative = self.rel_path.replace('/', std::path::MAIN_SEPARATOR_STR);
+        let cover = if self.cover.is_empty() {
+            String::new()
+        } else {
+            root.join(self.cover.replace('/', std::path::MAIN_SEPARATOR_STR))
+                .to_string_lossy()
+                .into_owned()
+        };
+
         Document {
             id: self.id.clone(),
             name: self.name.clone(),
@@ -26,9 +37,12 @@ impl DocumentRow {
             author: self.author.clone(),
             page_count: self.page_count,
             path: root.join(relative).to_string_lossy().into_owned(),
+            cover,
             size: self.size,
             added_at: self.added_at,
             last_opened_at: self.last_opened_at,
+            last_page: self.last_page,
+            annotation_count: self.annotation_count,
         }
     }
 }
@@ -42,9 +56,12 @@ pub struct Document {
     pub author: String,
     pub page_count: u32,
     pub path: String,
+    pub cover: String,
     pub size: u64,
     pub added_at: i64,
     pub last_opened_at: i64,
+    pub last_page: u32,
+    pub annotation_count: usize,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -92,6 +109,19 @@ pub struct LibraryInfo {
     pub root: String,
     pub documents: usize,
     pub annotations: usize,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchHit {
+    pub annotation_id: String,
+    pub doc_id: String,
+    pub doc_name: String,
+    pub page: u32,
+    pub quote: String,
+    pub body: String,
+    pub color: String,
+    pub tags: Vec<String>,
 }
 
 /// 与 PDF 同目录书库里的可移植标注文件。
