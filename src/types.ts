@@ -111,6 +111,44 @@ export interface CardView {
   previews: RatingPreview[];
 }
 
+export interface AiSettingsView {
+  enabled: boolean;
+  provider: string;
+  model: string;
+  baseUrl: string;
+  apiKeySet: boolean;
+  ready: boolean;
+}
+
+export interface AiSettingsInput {
+  enabled: boolean;
+  provider: string;
+  model: string;
+  baseUrl: string;
+  apiKey?: string | null;
+  clearKey?: boolean;
+}
+
+export interface AiCitation {
+  index: number;
+  page: number | null;
+  kind: string;
+  label: string;
+  snippet: string;
+  annotationId: string | null;
+}
+
+export interface AiAnswer {
+  text: string;
+  citations: AiCitation[];
+  model: string;
+}
+
+export interface PageTextInput {
+  page: number;
+  text: string;
+}
+
 /** 浏览器原型用的 localStorage 记录；桌面端以 SQLite + sidecar 为准。 */
 export interface DocRecord {
   schemaVersion: 1;

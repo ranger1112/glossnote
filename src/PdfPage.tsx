@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { pdfjsLib, type PdfTextItem } from './pdfjs';
+import { joinPdfItems } from './pdfText';
 import { buildAnchor, resolveAnchor, type Anchor, type NormRect } from './anchoring';
 import type { Annotation } from './types';
 
@@ -30,54 +31,27 @@ interface Point {
   offset: number;
 }
 
-/** 同一个文本行内，两个 item 之间是否有视觉上的空格。 */
-function needsSpace(previous: PdfTextItem, next: PdfTextItem): boolean {
-  if (previous.str.endsWith(' ') || next.str.startsWith(' ')) return false;
-
-  const previousEnd = previous.transform[4] + previous.width;
-  const nextStart = next.transform[4];
-  const sameLine =
-    Math.abs(previous.transform[5] - next.transform[5]) <
-    Math.max(previous.height, next.height) * 0.5;
-  if (!sameLine) return false;
-
-  return nextStart - previousEnd > Math.max(1, Math.min(previous.height, next.height) * 0.12);
-}
-
 /**
  * 文本层里的 span 与 textContent.items 一一对应。按顺序拼出页面纯文本，
  * 同时保留「每个 item 的文本节点 + 它在纯文本中的起点」，后续选区与重放都靠它。
  */
 function buildModel(items: PdfTextItem[], divs: HTMLElement[]): PageModel {
-  let text = '';
+  const { text, starts } = joinPdfItems(items);
   const infoList: ItemInfo[] = [];
   const byItem = new Map<number, ItemInfo>();
-  let previous: PdfTextItem | null = null;
 
   items.forEach((item, index) => {
-    if (item.str.length > 0) {
-      const start = text.length;
-      text += item.str;
+    if (item.str.length === 0) return;
 
-      const div = divs[index];
-      const node = div?.firstChild;
-      if (div && node instanceof Text) {
-        div.dataset.itemIndex = String(index);
-        const info = { start, end: text.length, node };
-        infoList.push(info);
-        byItem.set(index, info);
-      }
+    const div = divs[index];
+    const node = div?.firstChild;
+    if (!div || !(node instanceof Text)) return;
 
-      if (item.hasEOL) {
-        text += '\n';
-      } else if (previous && needsSpace(previous, item)) {
-        text += ' ';
-      }
-    } else if (item.hasEOL) {
-      text += '\n';
-    }
-
-    previous = item;
+    div.dataset.itemIndex = String(index);
+    const start = starts[index];
+    const info = { start, end: start + item.str.length, node };
+    infoList.push(info);
+    byItem.set(index, info);
   });
 
   return { text, items: infoList, byItem };

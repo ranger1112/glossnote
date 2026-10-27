@@ -1,4 +1,4 @@
-use crate::models::{Annotation, Card, CardRef, CardView, DocumentRow, SearchHit};
+use crate::models::{Annotation, Card, CardRef, CardView, Chunk, DocumentRow, SearchHit};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::path::Path;
 
@@ -29,7 +29,8 @@ fn migrate(conn: &Connection) -> Result<(), String> {
           added_at INTEGER NOT NULL,
           last_opened_at INTEGER NOT NULL DEFAULT 0,
           cover TEXT NOT NULL DEFAULT '',
-          last_page INTEGER NOT NULL DEFAULT 0
+          last_page INTEGER NOT NULL DEFAULT 0,
+          text_indexed_at INTEGER NOT NULL DEFAULT 0
         );
         CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_rel_path ON documents(rel_path);
 
@@ -78,6 +79,14 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         CREATE INDEX IF NOT EXISTS idx_cards_due ON cards(status, due_at);
         CREATE INDEX IF NOT EXISTS idx_cards_doc ON cards(source_doc_id);
         CREATE INDEX IF NOT EXISTS idx_cards_annotation ON cards(source_annotation_id);
+
+        CREATE TABLE IF NOT EXISTS chunks (
+          id TEXT PRIMARY KEY,
+          doc_id TEXT NOT NULL,
+          page INTEGER NOT NULL,
+          text TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id, page);
         "#,
     )
     .map_err(|error| format!("初始化数据库失败：{error}"))?;
@@ -85,6 +94,12 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     // 0.3 的库没有 cover / last_page，升级时补列。
     ensure_column(conn, "documents", "cover", "TEXT NOT NULL DEFAULT ''")?;
     ensure_column(conn, "documents", "last_page", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(
+        conn,
+        "documents",
+        "text_indexed_at",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     Ok(())
 }
 
@@ -427,11 +442,79 @@ pub fn search_annotations(conn: &Connection, query: &str) -> Result<Vec<SearchHi
         .map_err(|error| format!("读取搜索结果失败：{error}"))
 }
 
+pub fn is_text_indexed(conn: &Connection, doc_id: &str) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT text_indexed_at FROM documents WHERE id = ?1",
+        params![doc_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .optional()
+    .map(|value| value.unwrap_or(0) > 0)
+    .map_err(|error| format!("查询全文索引状态失败：{error}"))
+}
+
+pub fn replace_chunks(
+    conn: &mut Connection,
+    doc_id: &str,
+    chunks: &[Chunk],
+    now: i64,
+) -> Result<usize, String> {
+    let tx = conn
+        .transaction()
+        .map_err(|error| format!("开始全文索引事务失败：{error}"))?;
+    tx.execute("DELETE FROM chunks WHERE doc_id = ?1", params![doc_id])
+        .map_err(|error| format!("清理旧全文索引失败：{error}"))?;
+    {
+        let mut statement = tx
+            .prepare("INSERT INTO chunks (id, doc_id, page, text) VALUES (?1, ?2, ?3, ?4)")
+            .map_err(|error| format!("准备全文索引写入失败：{error}"))?;
+        for chunk in chunks {
+            statement
+                .execute(params![
+                    chunk.id,
+                    chunk.doc_id,
+                    chunk.page as i64,
+                    chunk.text
+                ])
+                .map_err(|error| format!("写入全文索引失败：{error}"))?;
+        }
+    }
+    // 扫描件没有文字时不要把状态标成已索引，否则界面会一直提供无效的“全文总结”。
+    let indexed_at = if chunks.is_empty() { 0 } else { now };
+    tx.execute(
+        "UPDATE documents SET text_indexed_at = ?2 WHERE id = ?1",
+        params![doc_id, indexed_at],
+    )
+    .map_err(|error| format!("更新全文索引状态失败：{error}"))?;
+    tx.commit()
+        .map_err(|error| format!("提交全文索引失败：{error}"))?;
+    Ok(chunks.len())
+}
+
+pub fn list_chunks(conn: &Connection, doc_id: &str) -> Result<Vec<Chunk>, String> {
+    let mut statement = conn
+        .prepare("SELECT id, doc_id, page, text FROM chunks WHERE doc_id = ?1 ORDER BY page ASC")
+        .map_err(|error| format!("准备全文查询失败：{error}"))?;
+    let rows = statement
+        .query_map(params![doc_id], |row| {
+            Ok(Chunk {
+                id: row.get(0)?,
+                doc_id: row.get(1)?,
+                page: row.get::<_, i64>(2)? as u32,
+                text: row.get(3)?,
+            })
+        })
+        .map_err(|error| format!("查询全文失败：{error}"))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error| format!("读取全文失败：{error}"))
+}
+
 /// 切换书库时清空索引；书库目录里的 PDF 与 sidecar 不受影响。
 pub fn clear_library(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
         "DELETE FROM annotation_fts;
          DELETE FROM cards;
+         DELETE FROM chunks;
          DELETE FROM annotations;
          DELETE FROM documents;",
     )
@@ -664,6 +747,8 @@ pub fn remove_document(conn: &Connection, id: &str, now: i64) -> Result<(), Stri
     .map_err(|error| format!("标记失效卡片失败：{error}"))?;
     conn.execute("DELETE FROM annotation_fts WHERE doc_id = ?1", params![id])
         .map_err(|error| format!("清理搜索索引失败：{error}"))?;
+    conn.execute("DELETE FROM chunks WHERE doc_id = ?1", params![id])
+        .map_err(|error| format!("清理全文索引失败：{error}"))?;
     conn.execute("DELETE FROM annotations WHERE doc_id = ?1", params![id])
         .map_err(|error| format!("清理标注失败：{error}"))?;
     conn.execute("DELETE FROM documents WHERE id = ?1", params![id])

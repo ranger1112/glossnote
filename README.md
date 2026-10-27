@@ -6,11 +6,13 @@
 
 ## 当前状态
 
-**0.1 锚定原型 + 0.2 桌面壳 + 0.3 本地持久化 + 0.4 书库体验 + 0.5 云同步 + 0.6 知识沉淀已完成**：导入 PDF 后进入书库，以封面网格浏览；打开文档可高亮、批注、打标签，搜索标注与原句，导出 Markdown；缩放、刷新、重开文档后，标注回到同一行字上，阅读进度也会恢复。
+**0.1 锚定原型 + 0.2 桌面壳 + 0.3 本地持久化 + 0.4 书库体验 + 0.5 云同步 + 0.6 知识沉淀 + 0.7 AI 已完成**：导入 PDF 后进入书库，以封面网格浏览；打开文档可高亮、批注、打标签，搜索标注与原句，导出 Markdown；缩放、刷新、重开文档后，标注回到同一行字上，阅读进度也会恢复。
 
 标注可以转成卡片，卡片之间可建立双向链接，并按 FSRS-4.5 的到期时间进入复习队列；来源标注删除后卡片保留，只标记为来源失效。
 
-导入的 PDF 会复制到 `文档/GlossNote/books/`，标注与卡片写入 SQLite 并镜像到 `.glossnote/annotations/<sha256>.json`；删掉数据库也能从 sidecar 重建。书库位置可在界面切换，指向云盘目录即可多设备同步；云盘产生的冲突副本会在扫描时按记录合并，并归档到 `.glossnote/conflicts/`。下一步是 0.7 AI。阶段进度与验收证据见 [docs/implementation-plan.md](docs/implementation-plan.md)。
+AI 默认关闭。开启后可对选段做解释、在本地提取全文后提问或总结；回答附带页码/标注来源，点击可跳回原文。支持 Anthropic 与 OpenAI 兼容服务，API Key 只保存在本机。
+
+导入的 PDF 会复制到 `文档/GlossNote/books/`，标注与卡片写入 SQLite 并镜像到 `.glossnote/annotations/<sha256>.json`；删掉数据库也能从 sidecar 重建。书库位置可在界面切换，指向云盘目录即可多设备同步；云盘产生的冲突副本会在扫描时按记录合并，并归档到 `.glossnote/conflicts/`。下一步是 1.0 多格式。阶段进度与验收证据见 [docs/implementation-plan.md](docs/implementation-plan.md)。
 
 ## 快速开始
 

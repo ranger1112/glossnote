@@ -217,6 +217,64 @@ pub struct SearchHit {
     pub tags: Vec<String>,
 }
 
+#[derive(Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PageTextInput {
+    pub page: u32,
+    #[serde(default)]
+    pub text: String,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AiSettingsView {
+    pub enabled: bool,
+    pub provider: String,
+    pub model: String,
+    pub base_url: String,
+    pub api_key_set: bool,
+    pub ready: bool,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AiSettingsInput {
+    pub enabled: bool,
+    pub provider: String,
+    pub model: String,
+    pub base_url: String,
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub clear_key: bool,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCitation {
+    pub index: usize,
+    pub page: Option<u32>,
+    pub kind: String,
+    pub label: String,
+    pub snippet: String,
+    pub annotation_id: Option<String>,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AiAnswer {
+    pub text: String,
+    pub citations: Vec<AiCitation>,
+    pub model: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct Chunk {
+    pub id: String,
+    pub doc_id: String,
+    pub page: u32,
+    pub text: String,
+}
+
 /// 与 PDF 同目录书库里的可移植标注文件。
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]

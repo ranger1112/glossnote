@@ -1,10 +1,14 @@
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import type {
+  AiAnswer,
+  AiSettingsInput,
+  AiSettingsView,
   Annotation,
   CardView,
   DocumentMeta,
   ImportResult,
   LibraryInfo,
+  PageTextInput,
   ScanReport,
   SearchHit,
 } from './types';
@@ -107,4 +111,44 @@ export function deleteCard(cardId: string): Promise<void> {
 
 export function reviewCard(cardId: string, rating: number): Promise<CardView> {
   return invoke('review_card', { cardId, rating });
+}
+
+export function aiSettings(): Promise<AiSettingsView> {
+  return invoke('ai_settings');
+}
+
+export function saveAiSettings(settings: AiSettingsInput): Promise<AiSettingsView> {
+  return invoke('save_ai_settings', { settings });
+}
+
+export function testAi(): Promise<string> {
+  return invoke('test_ai');
+}
+
+export function indexDocumentText(
+  docId: string,
+  pages: PageTextInput[],
+): Promise<number> {
+  return invoke('index_document_text', { docId, pages });
+}
+
+export function documentIndexStatus(docId: string): Promise<boolean> {
+  return invoke('document_index_status', { docId });
+}
+
+export function aiExplain(
+  docId: string,
+  page: number,
+  quote: string,
+  context: string,
+): Promise<AiAnswer> {
+  return invoke('ai_explain', { docId, page, quote, context });
+}
+
+export function aiAnswer(docId: string, question: string): Promise<AiAnswer> {
+  return invoke('ai_answer', { docId, question });
+}
+
+export function aiSummarize(docId: string, annotationsOnly: boolean): Promise<AiAnswer> {
+  return invoke('ai_summarize', { docId, annotationsOnly });
 }

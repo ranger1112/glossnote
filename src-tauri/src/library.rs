@@ -5,10 +5,10 @@ use crate::{
         Annotation, Card, CardView, Document, DocumentMetaPatch, DocumentRow, ImportResult,
         LibraryInfo, ScanReport, SearchHit, Sidecar,
     },
+    settings,
     state::AppState,
 };
 use chrono::Local;
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
@@ -23,31 +23,12 @@ use tauri::{AppHandle, Manager};
 const MAX_PDF_BYTES: u64 = 200 * 1024 * 1024;
 const SIDECAR_VERSION: u32 = 1;
 
-#[derive(Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-struct AppSettings {
-    #[serde(default)]
-    library_dir: Option<String>,
-}
-
-pub fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_data_dir()
-        .map(|dir| dir.join("settings.json"))
-        .map_err(|error| format!("定位应用数据目录失败：{error}"))
-}
-
 pub fn resolve_root(app: &AppHandle) -> Result<PathBuf, String> {
-    let path = settings_path(app)?;
-    if let Ok(text) = fs::read_to_string(&path) {
-        if let Ok(settings) = serde_json::from_str::<AppSettings>(&text) {
-            if let Some(dir) = settings
-                .library_dir
-                .filter(|value| !value.trim().is_empty())
-            {
-                return Ok(PathBuf::from(dir));
-            }
-        }
+    if let Some(dir) = settings::load(app)
+        .library_dir
+        .filter(|value| !value.trim().is_empty())
+    {
+        return Ok(PathBuf::from(dir));
     }
 
     let documents = app
@@ -61,27 +42,6 @@ pub fn ensure_dirs(root: &Path) -> Result<(), String> {
     fs::create_dir_all(root.join("books")).map_err(|error| format!("创建书库目录失败：{error}"))?;
     fs::create_dir_all(root.join(".glossnote").join("annotations"))
         .map_err(|error| format!("创建标注目录失败：{error}"))?;
-    Ok(())
-}
-
-fn save_settings(app: &AppHandle, root: &Path) -> Result<(), String> {
-    let path = settings_path(app)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| format!("创建应用数据目录失败：{error}"))?;
-    }
-
-    let settings = AppSettings {
-        library_dir: Some(root.to_string_lossy().into_owned()),
-    };
-    let bytes =
-        serde_json::to_vec_pretty(&settings).map_err(|error| format!("序列化设置失败：{error}"))?;
-
-    let temp = path.with_extension(format!("json.tmp-{}", process::id()));
-    fs::write(&temp, bytes).map_err(|error| format!("写入设置失败：{error}"))?;
-    if let Err(error) = fs::rename(&temp, &path) {
-        let _ = fs::remove_file(&path);
-        fs::rename(&temp, &path).map_err(|_| format!("保存设置失败：{error}"))?;
-    }
     Ok(())
 }
 
@@ -102,7 +62,9 @@ pub fn set_root(app: &AppHandle, path: &str) -> Result<ScanReport, String> {
     fs::write(&probe, b"ok").map_err(|error| format!("书库目录不可写：{error}"))?;
     let _ = fs::remove_file(&probe);
 
-    save_settings(app, &root)?;
+    let mut app_settings = settings::load(app);
+    app_settings.library_dir = Some(root.to_string_lossy().into_owned());
+    settings::save(app, &app_settings)?;
 
     {
         let state = app.state::<AppState>();

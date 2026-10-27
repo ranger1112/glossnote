@@ -1,15 +1,17 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod ai;
 mod db;
 mod fsrs;
 mod library;
 mod models;
+mod settings;
 mod state;
 
 use crate::{
     models::{
-        Annotation, CardView, Document, DocumentMetaPatch, ImportResult, LibraryInfo, ScanReport,
-        SearchHit,
+        AiAnswer, AiSettingsInput, AiSettingsView, Annotation, CardView, Document,
+        DocumentMetaPatch, ImportResult, LibraryInfo, PageTextInput, ScanReport, SearchHit,
     },
     state::AppState,
 };
@@ -144,6 +146,60 @@ fn review_card(app: AppHandle, card_id: String, rating: u8) -> Result<CardView, 
 }
 
 #[tauri::command]
+fn ai_settings(app: AppHandle) -> AiSettingsView {
+    ai::get_settings(&app)
+}
+
+#[tauri::command]
+fn save_ai_settings(app: AppHandle, settings: AiSettingsInput) -> Result<AiSettingsView, String> {
+    ai::save_settings(&app, settings)
+}
+
+#[tauri::command]
+async fn test_ai(app: AppHandle) -> Result<String, String> {
+    ai::test(&app).await
+}
+
+#[tauri::command]
+fn index_document_text(
+    app: AppHandle,
+    doc_id: String,
+    pages: Vec<PageTextInput>,
+) -> Result<usize, String> {
+    ai::index_document_text(&app, &doc_id, pages)
+}
+
+#[tauri::command]
+fn document_index_status(app: AppHandle, doc_id: String) -> Result<bool, String> {
+    ai::index_status(&app, &doc_id)
+}
+
+#[tauri::command]
+async fn ai_explain(
+    app: AppHandle,
+    doc_id: String,
+    page: u32,
+    quote: String,
+    context: String,
+) -> Result<AiAnswer, String> {
+    ai::explain(&app, &doc_id, page, quote, context).await
+}
+
+#[tauri::command]
+async fn ai_answer(app: AppHandle, doc_id: String, question: String) -> Result<AiAnswer, String> {
+    ai::answer(&app, &doc_id, question).await
+}
+
+#[tauri::command]
+async fn ai_summarize(
+    app: AppHandle,
+    doc_id: String,
+    annotations_only: bool,
+) -> Result<AiAnswer, String> {
+    ai::summarize(&app, &doc_id, annotations_only).await
+}
+
+#[tauri::command]
 fn update_document_meta(
     app: AppHandle,
     doc_id: String,
@@ -194,6 +250,14 @@ fn main() {
             update_card,
             delete_card,
             review_card,
+            ai_settings,
+            save_ai_settings,
+            test_ai,
+            index_document_text,
+            document_index_status,
+            ai_explain,
+            ai_answer,
+            ai_summarize,
             update_document_meta,
         ])
         .run(tauri::generate_context!())

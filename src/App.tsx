@@ -5,11 +5,21 @@ import { PdfPage } from './PdfPage';
 import { Library } from './Library';
 import { Review } from './Review';
 import { CardEditor, type CardDraft } from './CardEditor';
+import { AiPanel } from './AiPanel';
+import { AiSettingsModal } from './AiSettingsModal';
 import type { Anchor } from './anchoring';
-import type { Annotation, CardView, DocRecord, DocumentMeta, HighlightColor } from './types';
+import type {
+  AiSettingsView,
+  Annotation,
+  CardView,
+  DocRecord,
+  DocumentMeta,
+  HighlightColor,
+} from './types';
 import { loadDoc, saveDoc, sha256Hex } from './storage';
 import { isTauri } from './platform';
 import {
+  aiSettings,
   assetUrl,
   createCard,
   deleteAnnotation,
@@ -57,6 +67,11 @@ const COLORS: Array<{ key: HighlightColor; label: string }> = [
 
 const EMPTY: Annotation[] = [];
 
+type AiPanelState =
+  | { mode: 'qa' }
+  | { mode: 'explain'; page: number; quote: string; context: string }
+  | null;
+
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -101,6 +116,9 @@ export default function App() {
     existing?: CardView;
   } | null>(null);
   const [cardSaving, setCardSaving] = useState(false);
+  const [ai, setAi] = useState<AiSettingsView | null>(null);
+  const [aiSettingsOpen, setAiSettingsOpen] = useState(false);
+  const [aiPanel, setAiPanel] = useState<AiPanelState>(null);
 
   const fileRef = useRef<HTMLInputElement>(null);
   const recordRef = useRef<DocRecord | null>(null);
@@ -114,6 +132,53 @@ export default function App() {
   annotationsRef.current = annotations;
 
   useEffect(() => applyTheme(theme), [theme]);
+
+  useEffect(() => {
+    if (!desktop) return;
+    void aiSettings()
+      .then(setAi)
+      .catch((error) => setMessage(`读取 AI 设置失败：${errorText(error)}`));
+  }, [desktop]);
+
+  const openAiSettings = useCallback(async () => {
+    if (!ai) {
+      try {
+        setAi(await aiSettings());
+      } catch (error) {
+        setMessage(`读取 AI 设置失败：${errorText(error)}`);
+        return;
+      }
+    }
+    setAiSettingsOpen(true);
+  }, [ai]);
+
+  const openAssistant = useCallback(
+    (mode: 'qa' | 'explain', anchor?: Anchor) => {
+      if (!docRef.current) return;
+      if (!ai?.ready) {
+        setMessage('请先在 AI 设置中启用并填写 API Key。');
+        void openAiSettings();
+        return;
+      }
+
+      if (mode === 'explain' && anchor) {
+        const context = [anchor.prefix.trim(), anchor.suffix.trim()]
+          .filter(Boolean)
+          .join('\n…\n');
+        setAiPanel({
+          mode: 'explain',
+          page: anchor.page,
+          quote: anchor.quote,
+          context,
+        });
+        setToolbar(null);
+        window.getSelection()?.removeAllRanges();
+      } else {
+        setAiPanel({ mode: 'qa' });
+      }
+    },
+    [ai, openAiSettings],
+  );
 
   const visible = useMemo(
     () =>
@@ -197,6 +262,7 @@ export default function App() {
     setAnnotations(input.annotations);
     setToolbar(null);
     setFocusId(null);
+    setAiPanel(null);
     setMessage('');
 
     requestAnimationFrame(() => {
@@ -313,6 +379,7 @@ export default function App() {
       setCurrentPage(0);
       setCards([]);
       setCardEditing(null);
+      setAiPanel(null);
       setMessage('');
       closingRef.current = false;
     };
@@ -548,6 +615,17 @@ export default function App() {
           </div>
         )}
 
+        {desktop && (
+          <button
+            type="button"
+            className={`theme-toggle ai-topbutton ${ai?.ready ? 'ready' : ''}`}
+            title={ai?.ready ? 'AI 阅读助手设置' : '配置 AI'}
+            onClick={() => void openAiSettings()}
+          >
+            AI
+          </button>
+        )}
+
         <button
           type="button"
           className="theme-toggle"
@@ -612,6 +690,16 @@ export default function App() {
               <span className="sidebar-progress">
                 {currentPage + 1} / {doc.pageCount}
               </span>
+              {desktop && (
+                <button
+                  type="button"
+                  className="ai-head-button"
+                  title="基于这份文档提问"
+                  onClick={() => openAssistant('qa')}
+                >
+                  AI
+                </button>
+              )}
             </div>
 
             {visible.length === 0 ? (
@@ -716,7 +804,48 @@ export default function App() {
           >
             批注
           </button>
+          {desktop && (
+            <>
+              <span className="toolbar-sep" />
+              <button
+                type="button"
+                className="toolbar-note"
+                onClick={() => openAssistant('explain', toolbar.anchor)}
+              >
+                AI 解释
+              </button>
+            </>
+          )}
         </div>
+      )}
+
+      {doc && aiPanel && (
+        <AiPanel
+          key={`${doc.id}:${aiPanel.mode}:${aiPanel.mode === 'explain' ? aiPanel.page : ''}`}
+          docId={doc.id}
+          docName={doc.name}
+          pdf={doc.pdf}
+          mode={aiPanel.mode}
+          explain={
+            aiPanel.mode === 'explain'
+              ? { page: aiPanel.page, quote: aiPanel.quote, context: aiPanel.context }
+              : undefined
+          }
+          ready={!!ai?.ready}
+          onClose={() => setAiPanel(null)}
+          onJumpPage={(page) => scrollToPage(page)}
+          onOpenSettings={() => void openAiSettings()}
+          onMessage={setMessage}
+        />
+      )}
+
+      {aiSettingsOpen && ai && (
+        <AiSettingsModal
+          initial={ai}
+          onClose={() => setAiSettingsOpen(false)}
+          onSaved={setAi}
+          onMessage={setMessage}
+        />
       )}
 
       {cardEditing && (
