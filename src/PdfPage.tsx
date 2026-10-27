@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { pdfjsLib, type PdfTextItem } from './pdfjs';
 import { joinPdfItems } from './pdfText';
@@ -9,6 +9,10 @@ interface PdfPageProps {
   pdf: PDFDocumentProxy;
   pageIndex: number;
   scale: number;
+  /** 第一页在 scale=1 时的尺寸，用来给尚未渲染的页面占位。 */
+  baseSize: { width: number; height: number };
+  /** 只渲染当前页附近的页面；整本书一次渲染会占掉数 GB 画布内存。 */
+  active: boolean;
   annotations: Annotation[];
   focusId: string | null;
   onSelect: (anchor: Anchor, box: { x: number; y: number }) => void;
@@ -118,10 +122,12 @@ function offsetFromDom(node: Node, offset: number, model: PageModel): number | n
   return info.start + Math.max(0, Math.min(offset, info.node.length));
 }
 
-export function PdfPage({
+export const PdfPage = memo(function PdfPage({
   pdf,
   pageIndex,
   scale,
+  baseSize,
+  active,
   annotations,
   focusId,
   onSelect,
@@ -137,6 +143,7 @@ export function PdfPage({
   const focusRef = useRef(focusId);
   focusRef.current = focusId;
 
+  const [size, setSize] = useState(baseSize);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState('');
 
@@ -189,16 +196,41 @@ export function PdfPage({
     setReady(false);
     setError('');
 
+    if (!active) {
+      // 离屏页只保留占位高度；否则一本 500 页的书会同时占住数 GB 画布。
+      canvas.width = 1;
+      canvas.height = 1;
+      canvas.style.removeProperty('width');
+      canvas.style.removeProperty('height');
+      textElement.replaceChildren();
+      textElement.style.removeProperty('width');
+      textElement.style.removeProperty('height');
+      highlightRef.current?.replaceChildren();
+      modelRef.current = null;
+      return;
+    }
+
     const run = async () => {
       try {
         const page = await pdf.getPage(pageIndex + 1);
         if (cancelled) return;
 
         const viewport = page.getViewport({ scale });
-        const pixelRatio = Math.min(window.devicePixelRatio || 1, 3);
+        // 正常缩放用设备像素比；高倍或超大页面则压低画布像素数，避免再次 OOM。
+        const deviceRatio = Math.min(window.devicePixelRatio || 1, 3);
+        const pixelRatio = Math.min(
+          deviceRatio,
+          Math.sqrt(16_000_000 / Math.max(1, viewport.width * viewport.height)),
+        );
 
-        pageElement.style.width = `${viewport.width}px`;
-        pageElement.style.height = `${viewport.height}px`;
+        // 首页尺寸只是占位估计；本页实际尺寸不同时再修正占位。
+        const baseWidth = viewport.width / scale;
+        const baseHeight = viewport.height / scale;
+        setSize((current) =>
+          Math.abs(current.width - baseWidth) < 0.5 && Math.abs(current.height - baseHeight) < 0.5
+            ? current
+            : { width: baseWidth, height: baseHeight },
+        );
 
         canvas.width = Math.max(1, Math.floor(viewport.width * pixelRatio));
         canvas.height = Math.max(1, Math.floor(viewport.height * pixelRatio));
@@ -251,8 +283,17 @@ export function PdfPage({
       cancelled = true;
       renderTask?.cancel();
       textLayer?.cancel();
+      canvas.width = 1;
+      canvas.height = 1;
+      canvas.style.removeProperty('width');
+      canvas.style.removeProperty('height');
+      textElement.replaceChildren();
+      textElement.style.removeProperty('width');
+      textElement.style.removeProperty('height');
+      highlightRef.current?.replaceChildren();
+      modelRef.current = null;
     };
-  }, [pdf, pageIndex, scale, paintHighlights]);
+  }, [active, pdf, pageIndex, scale, paintHighlights]);
 
   useEffect(() => {
     if (ready) paintHighlights();
@@ -311,6 +352,7 @@ export function PdfPage({
       className="pdf-page"
       data-page-index={pageIndex}
       ref={pageRef}
+      style={{ width: Math.round(size.width * scale), height: Math.round(size.height * scale) }}
       onMouseUp={handleMouseUp}
     >
       <canvas ref={canvasRef} className="pdf-canvas" />
@@ -320,4 +362,4 @@ export function PdfPage({
       {error && <span className="page-error">{error}</span>}
     </div>
   );
-}
+});

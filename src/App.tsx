@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { pdfjsLib } from './pdfjs';
 import { PdfPage } from './PdfPage';
@@ -73,6 +73,27 @@ const COLORS: Array<{ key: HighlightColor; label: string }> = [
 
 const EMPTY: Annotation[] = [];
 
+const MIN_SCALE = 0.1;
+const MAX_SCALE = 3;
+
+type ZoomMode = 'fit-width' | 'fit-page' | 'custom';
+
+function fitScale(
+  viewer: HTMLElement,
+  base: { width: number; height: number },
+  mode: 'fit-width' | 'fit-page',
+): number {
+  const style = getComputedStyle(viewer);
+  const padX = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+  const padTop = parseFloat(style.paddingTop);
+  // clientWidth/clientHeight 已经排除了滚动条；再扣掉内边距才是页面可用空间。
+  const width = Math.max(120, viewer.clientWidth - padX - 2);
+  const height = Math.max(120, viewer.clientHeight - padTop - 32);
+  const byWidth = width / base.width;
+  const next = mode === 'fit-page' ? Math.min(byWidth, height / base.height) : byWidth;
+  return Math.min(MAX_SCALE, Math.max(MIN_SCALE, Math.round(next * 1000) / 1000));
+}
+
 type AiPanelState =
   | { mode: 'qa' }
   | { mode: 'explain'; page: number; quote: string; context: string }
@@ -90,16 +111,51 @@ function defaultCardTitle(annotation: Annotation): string {
 }
 
 /**
- * 页面是异步渲染的：占位 canvas 也有 150px 高，不能拿 offsetHeight 判断就绪。
- * PdfPage 拿到 viewport 后才写入内联高度，等到那时再滚动。
+ * 占位页在挂载时就有固定高度，通常可以立即滚动；
+ * 保留重试只是为了兜住首批 DOM 尚未提交的极短窗口。
  */
 function scrollToPage(page: number, attempt = 0) {
   const target = document.querySelector<HTMLElement>(`[data-page-index="${page}"]`);
   if (target && target.style.height) {
-    target.scrollIntoView({ behavior: 'instant', block: 'start' });
+    const viewer = document.querySelector<HTMLElement>('.viewer');
+    if (viewer) {
+      // 页顶留一点灰边，不要直接贴住顶栏。
+      const offset =
+        target.getBoundingClientRect().top - viewer.getBoundingClientRect().top - 24;
+      viewer.scrollTo({ top: viewer.scrollTop + offset, behavior: 'instant' });
+    } else {
+      target.scrollIntoView({ behavior: 'instant', block: 'start' });
+    }
     return;
   }
   if (attempt < 60) window.setTimeout(() => scrollToPage(page, attempt + 1), 80);
+}
+
+interface VisiblePage {
+  index: number;
+  element: HTMLElement;
+}
+
+/** 页面按 DOM 顺序排列，页底坐标单调递增；二分找视口顶部命中的那一页。 */
+function visiblePage(viewer: HTMLElement): VisiblePage | null {
+  const threshold = viewer.getBoundingClientRect().top + 60;
+  const elements = viewer.querySelectorAll<HTMLElement>('[data-page-index]');
+  let low = 0;
+  let high = elements.length - 1;
+  let found: VisiblePage | null = null;
+
+  while (low <= high) {
+    const middle = (low + high) >> 1;
+    const element = elements[middle];
+    if (element.getBoundingClientRect().bottom > threshold) {
+      found = { index: Number(element.dataset.pageIndex), element };
+      high = middle - 1;
+    } else {
+      low = middle + 1;
+    }
+  }
+
+  return found;
 }
 
 export default function App() {
@@ -109,6 +165,8 @@ export default function App() {
   const [doc, setDoc] = useState<OpenedDoc | null>(null);
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [scale, setScale] = useState(1.2);
+  const [zoomMode, setZoomMode] = useState<ZoomMode>('fit-width');
+  const [baseSize, setBaseSize] = useState<{ width: number; height: number } | null>(null);
   const [toolbar, setToolbar] = useState<ToolbarState | null>(null);
   const [focusId, setFocusId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -132,12 +190,91 @@ export default function App() {
   const annotationsRef = useRef<Annotation[]>([]);
   const viewerRef = useRef<HTMLElement | null>(null);
   const currentPageRef = useRef(0);
+  const scaleRef = useRef(scale);
+  const pendingAnchor = useRef<{
+    index: number;
+    offset?: number;
+    topGap?: number;
+    scale: number;
+  } | null>(null);
   const progressTimer = useRef<number | null>(null);
+  const scrollFrame = useRef<number | null>(null);
   const openingRef = useRef(false);
   const closingRef = useRef(false);
   annotationsRef.current = annotations;
+  scaleRef.current = scale;
 
   useEffect(() => applyTheme(theme), [theme]);
+
+  // 自适应缩放：首屏按页面尺寸算出比例，窗口变化时重算。
+  useLayoutEffect(() => {
+    const viewer = viewerRef.current;
+    if (!doc || !baseSize || zoomMode === 'custom' || !viewer) return;
+
+    let frame = 0;
+
+    const update = () => {
+      const next = fitScale(viewer, baseSize, zoomMode);
+      // ResizeObserver 会在缩放生效后再通知一次；比例没变就不要重新锚定。
+      if (Math.abs(scaleRef.current - next) < 0.002) return;
+
+      // 缩放前后保持视口里那一页的相对位置；否则切到「整页」会跳到别的页。
+      const visible = visiblePage(viewer);
+      let anchor: { index: number; offset?: number; topGap?: number } | null = null;
+      if (visible) {
+        const rect = visible.element.getBoundingClientRect();
+        if (rect.height > 0) {
+          anchor =
+            zoomMode === 'fit-page'
+              ? // 整页模式要让整页可见，直接从当前页顶部开始。
+                { index: visible.index, topGap: 24 }
+              : {
+                  index: visible.index,
+                  offset: (viewer.getBoundingClientRect().top - rect.top) / rect.height,
+                };
+        }
+      }
+
+      pendingAnchor.current = anchor ? { ...anchor, scale: next } : null;
+      setScale(next);
+    };
+
+    update();
+    const observer = new ResizeObserver(() => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(update);
+    });
+    observer.observe(viewer);
+
+    return () => {
+      observer.disconnect();
+      cancelAnimationFrame(frame);
+    };
+  }, [doc, baseSize, zoomMode]);
+
+  // 新的缩放已经落到 DOM 后，再把同一页的相对位置校正回来。
+  useLayoutEffect(() => {
+    const pending = pendingAnchor.current;
+    if (!pending || Math.abs(scale - pending.scale) > 0.002) return;
+    pendingAnchor.current = null;
+
+    const viewer = viewerRef.current;
+    const page = viewer?.querySelector<HTMLElement>(`[data-page-index="${pending.index}"]`);
+    if (!viewer || !page) return;
+
+    const pageRect = page.getBoundingClientRect();
+    if (pageRect.height <= 0) return;
+    const top = viewer.getBoundingClientRect().top;
+    const desired =
+      pending.topGap !== undefined
+        ? top + pending.topGap
+        : top - (pending.offset ?? 0) * pageRect.height;
+    const delta = pageRect.top - desired;
+    // viewer 有 scroll-behavior: smooth；直接改 scrollTop 会走动画，导致下一次布局读到旧位置。
+    if (Math.abs(delta) > 1) {
+      viewer.scrollTo({ top: viewer.scrollTop + delta, behavior: 'instant' });
+    }
+  }, [scale]);
 
   useEffect(() => {
     if (!message) return;
@@ -212,6 +349,10 @@ export default function App() {
     return map;
   }, [visible]);
 
+  // 放大后一页可达数千像素；减少同时渲染的页数，避免画布内存再次爆掉。
+  const pageHeight = baseSize ? baseSize.height * scale : 0;
+  const activeRadius = pageHeight > 1100 ? 1 : 2;
+
   const commit = useCallback((next: Annotation[]) => {
     annotationsRef.current = next;
     setAnnotations(next);
@@ -254,6 +395,11 @@ export default function App() {
       window.clearTimeout(progressTimer.current);
       progressTimer.current = null;
     }
+    if (scrollFrame.current !== null) {
+      cancelAnimationFrame(scrollFrame.current);
+      scrollFrame.current = null;
+    }
+    pendingAnchor.current = null;
     docRef.current?.dispose();
 
     const opened: OpenedDoc = {
@@ -267,6 +413,18 @@ export default function App() {
     };
     docRef.current = opened;
     if (input.desktopMeta) recordRef.current = null;
+
+    // 用第一页的原始尺寸作为占位与自适应缩放的基准；拿不到时退回 A4。
+    let pageSize = { width: 595, height: 842 };
+    try {
+      const first = await input.pdf.getPage(1);
+      const viewport = first.getViewport({ scale: 1 });
+      pageSize = { width: viewport.width, height: viewport.height };
+    } catch {
+      // 尺寸只影响缩放基准，失败不阻止打开。
+    }
+    setBaseSize(pageSize);
+    setZoomMode('fit-width');
 
     const startPage = Math.max(0, Math.min(input.initialPage ?? 0, input.pageCount - 1));
     currentPageRef.current = startPage;
@@ -379,12 +537,17 @@ export default function App() {
       window.clearTimeout(progressTimer.current);
       progressTimer.current = null;
     }
+    if (scrollFrame.current !== null) {
+      cancelAnimationFrame(scrollFrame.current);
+      scrollFrame.current = null;
+    }
 
     const finish = () => {
       docRef.current?.dispose();
       docRef.current = null;
       recordRef.current = null;
       currentPageRef.current = 0;
+      pendingAnchor.current = null;
       setDoc(null);
       setAnnotations([]);
       setToolbar(null);
@@ -408,29 +571,25 @@ export default function App() {
   }, []);
 
   const handleViewerScroll = useCallback(() => {
-    const viewer = viewerRef.current;
-    if (!viewer || !docRef.current) return;
+    if (scrollFrame.current !== null) return;
+    scrollFrame.current = requestAnimationFrame(() => {
+      scrollFrame.current = null;
+      const viewer = viewerRef.current;
+      if (!viewer || !docRef.current) return;
 
-    const threshold = viewer.getBoundingClientRect().top + 60;
-    let page = currentPageRef.current;
-    for (const element of viewer.querySelectorAll<HTMLElement>('[data-page-index]')) {
-      if (element.getBoundingClientRect().bottom > threshold) {
-        page = Number(element.dataset.pageIndex);
-        break;
+      const visible = visiblePage(viewer);
+      if (visible && visible.index !== currentPageRef.current) {
+        currentPageRef.current = visible.index;
+        setCurrentPage(visible.index);
       }
-    }
 
-    if (page !== currentPageRef.current) {
-      currentPageRef.current = page;
-      setCurrentPage(page);
-    }
-
-    if (progressTimer.current !== null) window.clearTimeout(progressTimer.current);
-    progressTimer.current = window.setTimeout(() => {
-      progressTimer.current = null;
-      const id = docRef.current?.id;
-      if (id) void saveProgress(id, currentPageRef.current).catch(() => undefined);
-    }, 700);
+      if (progressTimer.current !== null) window.clearTimeout(progressTimer.current);
+      progressTimer.current = window.setTimeout(() => {
+        progressTimer.current = null;
+        const id = docRef.current?.id;
+        if (id) void saveProgress(id, currentPageRef.current).catch(() => undefined);
+      }, 700);
+    });
   }, []);
 
   const openSample = useCallback(async () => {
@@ -516,15 +675,40 @@ export default function App() {
     [commit, removeFromLibrary],
   );
 
-  const jumpTo = useCallback((annotation: Annotation) => {
-    document
-      .querySelector(`[data-page-index="${annotation.page}"]`)
-      ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    setFocusId(annotation.id);
-    window.setTimeout(() => {
-      setFocusId((current) => (current === annotation.id ? null : current));
-    }, 1600);
+  const zoomTo = useCallback((next: number) => {
+    const viewer = viewerRef.current;
+    const visible = viewer ? visiblePage(viewer) : null;
+    if (viewer && visible && Math.abs(next - scaleRef.current) >= 0.002) {
+      const rect = visible.element.getBoundingClientRect();
+      if (rect.height > 0) {
+        pendingAnchor.current = {
+          index: visible.index,
+          offset: (viewer.getBoundingClientRect().top - rect.top) / rect.height,
+          scale: next,
+        };
+      }
+    }
+    setZoomMode('custom');
+    setScale(next);
   }, []);
+
+  const goToPage = useCallback((page: number) => {
+    // 先移动当前页，让目标页立刻进入渲染窗口，再滚过去。
+    currentPageRef.current = page;
+    setCurrentPage(page);
+    scrollToPage(page);
+  }, []);
+
+  const jumpTo = useCallback(
+    (annotation: Annotation) => {
+      goToPage(annotation.page);
+      setFocusId(annotation.id);
+      window.setTimeout(() => {
+        setFocusId((current) => (current === annotation.id ? null : current));
+      }, 1600);
+    },
+    [goToPage],
+  );
 
   const handleSelect = useCallback((anchor: Anchor, box: { x: number; y: number }) => {
     setToolbar({
@@ -614,18 +798,46 @@ export default function App() {
             <button
               type="button"
               title="缩小"
-              onClick={() => setScale((value) => Math.max(0.5, +(value - 0.25).toFixed(2)))}
+              onClick={() => zoomTo(Math.max(MIN_SCALE, +(scaleRef.current - 0.25).toFixed(2)))}
             >
               −
             </button>
-            <span>{Math.round(scale * 100)}%</span>
+            <span
+              title={
+                zoomMode === 'fit-width'
+                  ? '适应宽度'
+                  : zoomMode === 'fit-page'
+                    ? '适应整页'
+                    : '手动缩放'
+              }
+            >
+              {Math.round(scale * 100)}%
+            </span>
             <button
               type="button"
               title="放大"
-              onClick={() => setScale((value) => Math.min(3, +(value + 0.25).toFixed(2)))}
+              onClick={() => zoomTo(Math.min(MAX_SCALE, +(scaleRef.current + 0.25).toFixed(2)))}
             >
               +
             </button>
+            <div className="zoom-modes">
+              <button
+                type="button"
+                className={zoomMode === 'fit-width' ? 'active' : ''}
+                title="页面宽度铺满阅读区"
+                onClick={() => setZoomMode('fit-width')}
+              >
+                适宽
+              </button>
+              <button
+                type="button"
+                className={zoomMode === 'fit-page' ? 'active' : ''}
+                title="整页完整显示"
+                onClick={() => setZoomMode('fit-page')}
+              >
+                整页
+              </button>
+            </div>
           </div>
         )}
 
@@ -701,17 +913,20 @@ export default function App() {
       {doc ? (
         <main className="workspace">
           <section className="viewer" ref={viewerRef} onScroll={handleViewerScroll}>
-            {Array.from({ length: doc.pageCount }, (_, index) => (
-              <PdfPage
-                key={index}
-                pdf={doc.pdf}
-                pageIndex={index}
-                scale={scale}
-                annotations={byPage.get(index) ?? EMPTY}
-                focusId={focusId}
-                onSelect={handleSelect}
-              />
-            ))}
+            {baseSize &&
+              Array.from({ length: doc.pageCount }, (_, index) => (
+                <PdfPage
+                  key={`${doc.id}-${index}`}
+                  pdf={doc.pdf}
+                  pageIndex={index}
+                  scale={scale}
+                  baseSize={baseSize}
+                  active={Math.abs(index - currentPage) <= activeRadius}
+                  annotations={byPage.get(index) ?? EMPTY}
+                  focusId={focusId}
+                  onSelect={handleSelect}
+                />
+              ))}
           </section>
 
           <aside className="sidebar">
@@ -866,7 +1081,7 @@ export default function App() {
           }
           ready={!!ai?.ready}
           onClose={() => setAiPanel(null)}
-          onJumpPage={(page) => scrollToPage(page)}
+          onJumpPage={goToPage}
           onOpenSettings={() => void openAiSettings()}
           onMessage={setMessage}
         />

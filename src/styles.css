@@ -469,6 +469,27 @@ select {
   text-align: center;
 }
 
+.zoom-modes {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  margin-left: 4px;
+  padding-left: 5px;
+  border-left: 1px solid var(--line);
+}
+
+.zoom-modes button {
+  width: auto;
+  padding: 0 7px;
+  font-size: 10.5px;
+}
+
+.zoom-modes button.active {
+  background: var(--panel);
+  color: var(--ink);
+  box-shadow: var(--shadow-xs);
+}
+
 .topbar-back {
   padding: 0 9px;
 }
@@ -895,6 +916,8 @@ select {
 
 .viewer {
   overflow: auto;
+  /* 缩放时页面高度会整体变化，关闭浏览器滚动锚定，由代码自己保持阅读位置。 */
+  overflow-anchor: none;
   padding: 32px 26px 96px;
   background: var(--viewer);
   scroll-behavior: smooth;
@@ -910,6 +933,8 @@ select {
 
 .pdf-canvas {
   display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .highlight-layer {
