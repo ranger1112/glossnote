@@ -124,8 +124,12 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
         setLoading(false);
 
         if (announce) {
+          const merged = [
+            report.merged > 0 ? `${report.merged} 条标注` : '',
+            report.mergedCards > 0 ? `${report.mergedCards} 张卡片` : '',
+          ].filter(Boolean);
           const parts = [
-            report.merged > 0 ? `合并 ${report.merged} 条` : '',
+            merged.length > 0 ? `合并 ${merged.join('、')}` : '',
             report.archived > 0 ? `归档 ${report.archived} 个冲突副本` : '',
             report.duplicatePdfs > 0 ? `${report.duplicatePdfs} 份重复 PDF 已忽略` : '',
           ].filter(Boolean);
@@ -238,9 +242,15 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
   }, [loadDocs, onMessage, sync?.root]);
 
   const searchingNow = query.trim().length > 0;
-  const syncNote = sync
+  const mergedBits = sync
     ? [
-        sync.merged > 0 ? `合并 ${sync.merged} 条` : '',
+        sync.merged > 0 ? `${sync.merged} 条标注` : '',
+        sync.mergedCards > 0 ? `${sync.mergedCards} 张卡片` : '',
+      ].filter(Boolean)
+    : [];
+  const syncNote = mergedBits.length > 0 ? `合并 ${mergedBits.join('、')}` : '';
+  const syncExtra = sync
+    ? [
         sync.archived > 0 ? `归档 ${sync.archived} 个冲突副本` : '',
         sync.duplicatePdfs > 0 ? `${sync.duplicatePdfs} 份重复 PDF` : '',
       ]
@@ -262,6 +272,7 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
             <p className="library-path" title={sync.root}>
               <span className="path-text">书库：{sync.root}</span>
               {syncNote && <span className="sync-note">{syncNote}</span>}
+              {syncExtra && <span className="sync-extra">{syncExtra}</span>}
               <span className="sync-time">
                 上次扫描 {new Date(sync.scannedAt).toLocaleTimeString()}
               </span>

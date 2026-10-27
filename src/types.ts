@@ -64,7 +64,51 @@ export interface ScanReport {
   archived: number;
   duplicatePdfs: number;
   ignoredSidecars: number;
+  mergedCards: number;
   scannedAt: number;
+}
+
+export interface Card {
+  id: string;
+  title: string;
+  body: string;
+  sourceAnnotationId: string | null;
+  sourceDocId: string | null;
+  sourcePage: number | null;
+  links: string[];
+  /** active | orphaned */
+  status: string;
+  createdAt: number;
+  updatedAt: number;
+  dueAt: number;
+  stability: number;
+  difficulty: number;
+  reps: number;
+  lapses: number;
+  lastReviewedAt: number;
+  /** new | review */
+  state: string;
+  deleted: boolean;
+}
+
+export interface CardRef {
+  id: string;
+  title: string;
+}
+
+export interface RatingPreview {
+  rating: number;
+  label: string;
+  dueAt: number;
+  intervalDays: number;
+}
+
+export interface CardView {
+  card: Card;
+  docName: string;
+  sourceQuote: string;
+  backlinks: CardRef[];
+  previews: RatingPreview[];
 }
 
 /** 浏览器原型用的 localStorage 记录；桌面端以 SQLite + sidecar 为准。 */

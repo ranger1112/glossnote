@@ -82,11 +82,21 @@ CREATE VIRTUAL TABLE annotation_fts USING fts5(
   body
 );
 
-cards(                        -- 0.6 才建
-  id TEXT PRIMARY KEY,
-  annotation_ids TEXT,        -- JSON 数组
-  body TEXT,
-  links TEXT, created_at INTEGER, updated_at INTEGER
+cards(
+  id TEXT PRIMARY KEY,              -- card-<annotation_id>，一条标注一张卡
+  title TEXT NOT NULL,
+  body TEXT NOT NULL DEFAULT '',
+  source_annotation_id TEXT,
+  source_doc_id TEXT,
+  source_page INTEGER,
+  links TEXT NOT NULL DEFAULT '[]', -- 出链的卡片 id，双向链接由查询反算
+  status TEXT NOT NULL DEFAULT 'active', -- active | orphaned
+  created_at INTEGER, updated_at INTEGER,
+  due_at INTEGER,
+  stability REAL, difficulty REAL,   -- FSRS 记忆状态
+  reps INTEGER, lapses INTEGER, last_reviewed_at INTEGER,
+  state TEXT NOT NULL DEFAULT 'new', -- new | review
+  deleted INTEGER NOT NULL DEFAULT 0
 );
 ```
 
@@ -96,6 +106,8 @@ cards(                        -- 0.6 才建
 - `doc_id` 是文件字节的 SHA-256，不是路径，也不是文件名。
 - `body` 与 `quote` 会同步写入 FTS5；0.4 的书库搜索实际走 `LIKE` 子串匹配（覆盖 quote、正文、标签、文档名与标题），先把中文搜索跑通，FTS5 留待压测后接入。
 - `last_page` 是本机阅读进度，不写入 sidecar，也不参与跨设备合并。
+- 卡片的 `links` 只存出链 id；反向链接在列表查询时用内存反查，避免维护两张表造成不一致。
+- 卡片删除写墓碑；来源标注删除时卡片不删除，只把 `status` 改为 `orphaned`。
 - 设置仍走应用配置文件；数据库只放业务数据。
 
 ## 导入流程
@@ -159,6 +171,24 @@ cards(                        -- 0.6 才建
 
 封面写入路径固定为 `.glossnote/thumbnails/<sha256>.jpg`，扫描时若记录里没有 cover 但文件存在，会重新挂上，避免删库后封面丢失。
 
+## 卡片与复习
+
+0.6 把标注变成可复习的卡片，但卡片仍然是“可丢弃的派生层”之上的显式记录：删掉 SQLite 后能从 sidecar 重建，原文锚点永远保留。
+
+- **生成**：阅读器侧栏的「制卡」把标注转成卡片，预填原句/批注；标题与内容可改。卡片 id 为 `card-<annotation_id>`，一条标注一张卡，重复保存是幂等更新。
+- **来源**：卡片保存 `source_annotation_id`、`source_doc_id`、`source_page`。详情与复习界面都能「打开原文」，回到对应页。
+- **双向链接**：编辑器从现有卡片中选出链；列表查询把其他卡片的 `links` 反查成 `backlinks`。不做 `[[标题]]` 解析，也不做关系图。
+- **FSRS**：`src-tauri/src/fsrs.rs` 实现 FSRS-4.5 默认权重（17 个参数），四档评分，保存 stability / difficulty / reps / lapses / lastReviewedAt / dueAt。复习前返回四档预计到期时间，复习后按公式重新排期；again 固定 10 分钟，其余至少 1 天、最多 10 年。
+- **队列**：复习视图按 `dueAt` 取全部到期卡片（含来源失效的），跨文档；来源失效会在卡片上明确标注，但仍可复习和编辑。
+- **失效**：删除标注写墓碑后，同一事务里把来源卡片标记 `orphaned`；跨设备通过 sidecar 墓碑合并后，`orphan_cards_for_document` 会重新计算失效状态。
+- **同步**：sidecar 增加 `cards` 数组（旧文件缺省为空），随来源文档一起写入；扫描时卡片按 `updatedAt` 做 LWW 合并，`ScanReport.mergedCards` 报告合并数量。
+
+边界：
+
+- FSRS 使用固定默认权重，不训练个人参数；同一天内的短时复习用天级公式近似。
+- 卡片与标注是一对一；多卡拆分、卡片合并、关系图未实现。
+- 卡片目前不参与 Markdown 导出。
+
 ## 同步
 
 0.5 采用“零代码”同步：**不做账号与服务端**。书库目录交给用户的云盘（坚果云、OneDrive、Nextcloud、Syncthing），PDF、sidecar、封面自动随目录走；应用默认不联网。
@@ -174,7 +204,7 @@ cards(                        -- 0.6 才建
 
 约束与边界：
 
-- 同步单位是 `annotation`，每条带 `updatedAt` 与 `deleted`；不做整文件覆盖。
+- 同步单位是 `annotation` 与 `card`，每条带 `updatedAt` 与 `deleted`；不做整文件覆盖。卡片跟随来源文档的 sidecar，跨文档移动尚未支持。
 - **不上 CRDT。** 标注是准不可变的小记录，LWW 足够；只有出现“两人同时编辑同一段笔记正文”时才重新评估。
 - 冲突副本只保留原始 JSON，不提供逐字段 diff 或人工选择；同时间戳的冲突按路径顺序取舍。
 - 书库索引是单库模型：切换根目录会清空 SQLite，再扫描新目录；不并行维护多个书库。
@@ -217,7 +247,7 @@ Tauri 侧注意：pdf.js 的 worker 需要 `worker-src 'self'`；部分扫描件
 
 ## 原型与目标的差距
 
-0.1 原型先跑在浏览器里；0.2 套上 Tauri 2 桌面壳，接入原生文件对话框与 asset protocol；0.3 把持久化换成 SQLite + sidecar，并在启动时扫描书库重建索引；0.4 增加书库网格、封面、搜索、标签、阅读进度、Markdown 导出与深色模式；0.5 增加书库目录切换与云盘冲突副本合并。
+0.1 原型先跑在浏览器里；0.2 套上 Tauri 2 桌面壳，接入原生文件对话框与 asset protocol；0.3 把持久化换成 SQLite + sidecar，并在启动时扫描书库重建索引；0.4 增加书库网格、封面、搜索、标签、阅读进度、Markdown 导出与深色模式；0.5 增加书库目录切换与云盘冲突副本合并；0.6 增加标注制卡、双向链接与 FSRS 复习。
 
 | 能力 | 现状 |
 | --- | --- |
@@ -228,5 +258,6 @@ Tauri 侧注意：pdf.js 的 worker 需要 `worker-src 'self'`；部分扫描件
 | 封面 | 前端渲染首页，Rust 落盘 |
 | 导出 | 全库/单文档 Markdown |
 | 同步 | 云盘目录 + sidecar 冲突合并（0.5） |
+| 卡片 / 复习 | 标注制卡、双向链接、FSRS-4.5 默认参数（0.6） |
 
 浏览器模式仍保留 `src/storage.ts` 作为 localStorage 适配器；桌面模式由 `src/desktop.ts` 直接调用 Tauri 命令，UI 不感知两者的差异。

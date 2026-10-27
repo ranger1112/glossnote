@@ -3,15 +3,20 @@ import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { pdfjsLib } from './pdfjs';
 import { PdfPage } from './PdfPage';
 import { Library } from './Library';
+import { Review } from './Review';
+import { CardEditor, type CardDraft } from './CardEditor';
 import type { Anchor } from './anchoring';
-import type { Annotation, DocRecord, DocumentMeta, HighlightColor } from './types';
+import type { Annotation, CardView, DocRecord, DocumentMeta, HighlightColor } from './types';
 import { loadDoc, saveDoc, sha256Hex } from './storage';
 import { isTauri } from './platform';
 import {
   assetUrl,
+  createCard,
   deleteAnnotation,
+  listCards,
   openDocument,
   saveProgress,
+  updateCard,
   updateDocumentMeta,
   upsertAnnotation,
 } from './desktop';
@@ -56,6 +61,13 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function defaultCardTitle(annotation: Annotation): string {
+  const line = (annotation.anchor.quote || annotation.body).trim().split('\n')[0]?.trim() ?? '';
+  if (!line) return '未命名卡片';
+  const chars = Array.from(line);
+  return chars.length > 60 ? `${chars.slice(0, 60).join('')}…` : line;
+}
+
 /**
  * 页面是异步渲染的：占位 canvas 也有 150px 高，不能拿 offsetHeight 判断就绪。
  * PdfPage 拿到 viewport 后才写入内联高度，等到那时再滚动。
@@ -82,6 +94,13 @@ export default function App() {
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
   const [currentPage, setCurrentPage] = useState(0);
+  const [view, setView] = useState<'library' | 'review'>('library');
+  const [cards, setCards] = useState<CardView[]>([]);
+  const [cardEditing, setCardEditing] = useState<{
+    annotation: Annotation;
+    existing?: CardView;
+  } | null>(null);
+  const [cardSaving, setCardSaving] = useState(false);
 
   const fileRef = useRef<HTMLInputElement>(null);
   const recordRef = useRef<DocRecord | null>(null);
@@ -142,6 +161,15 @@ export default function App() {
     }
   }, []);
 
+  const refreshCards = useCallback(async () => {
+    if (!isTauri()) return;
+    try {
+      setCards(await listCards());
+    } catch (error) {
+      setMessage(`读取卡片失败：${errorText(error)}`);
+    }
+  }, []);
+
   const activate = useCallback(async (input: Activation) => {
     if (progressTimer.current !== null) {
       window.clearTimeout(progressTimer.current);
@@ -177,6 +205,7 @@ export default function App() {
     });
 
     if (input.desktopMeta) {
+      void refreshCards();
       try {
         const metadata = await input.pdf.getMetadata();
         const info = (metadata.info ?? {}) as { Title?: string; Author?: string };
@@ -189,7 +218,7 @@ export default function App() {
         // 元数据是锦上添花，失败不影响阅读与标注。
       }
     }
-  }, []);
+  }, [refreshCards]);
 
   const openFile = useCallback(
     async (file: File) => {
@@ -282,6 +311,8 @@ export default function App() {
       setFocusId(null);
       setEditingId(null);
       setCurrentPage(0);
+      setCards([]);
+      setCardEditing(null);
       setMessage('');
       closingRef.current = false;
     };
@@ -392,6 +423,13 @@ export default function App() {
 
       const updated: Annotation = { ...existing, deleted: true, updatedAt: Date.now() };
       commit(annotationsRef.current.map((annotation) => (annotation.id === id ? updated : annotation)));
+      setCards((current) =>
+        current.map((view) =>
+          view.card.sourceAnnotationId === id
+            ? { ...view, card: { ...view.card, status: 'orphaned' } }
+            : view,
+        ),
+      );
       if (isTauri()) void removeFromLibrary(docId, id);
     },
     [commit, removeFromLibrary],
@@ -415,6 +453,30 @@ export default function App() {
     });
   }, []);
 
+  const saveCard = useCallback(
+    async (draft: CardDraft) => {
+      const editing = cardEditing;
+      const docId = docRef.current?.id;
+      if (!editing || !docId) return;
+
+      setCardSaving(true);
+      try {
+        const saved = editing.existing
+          ? await updateCard(editing.existing.card.id, draft.title, draft.body, draft.links)
+          : await createCard(docId, editing.annotation.id, draft.title, draft.body, draft.links);
+
+        setCards((current) => [saved, ...current.filter((view) => view.card.id !== saved.card.id)]);
+        setCardEditing(null);
+        setMessage(editing.existing ? '卡片已更新。' : '已加入复习队列。');
+      } catch (error) {
+        setMessage(`保存卡片失败：${errorText(error)}`);
+      } finally {
+        setCardSaving(false);
+      }
+    },
+    [cardEditing],
+  );
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
@@ -435,6 +497,25 @@ export default function App() {
             Gloss<span className="brand-accent">Note</span>
           </span>
         </div>
+
+        {!doc && desktop && (
+          <nav className="topbar-nav">
+            <button
+              type="button"
+              className={view === 'library' ? 'active' : ''}
+              onClick={() => setView('library')}
+            >
+              书库
+            </button>
+            <button
+              type="button"
+              className={view === 'review' ? 'active' : ''}
+              onClick={() => setView('review')}
+            >
+              复习
+            </button>
+          </nav>
+        )}
 
         {doc && (
           <div className="doc-title" title={doc.name}>
@@ -544,10 +625,21 @@ export default function App() {
                   <AnnotationCard
                     key={annotation.id}
                     annotation={annotation}
+                    card={cards.find(
+                      (view) => view.card.sourceAnnotationId === annotation.id,
+                    )}
                     editing={editingId === annotation.id}
                     onJump={() => jumpTo(annotation)}
                     onBody={(body) => updateBody(doc.id, annotation.id, body)}
                     onTags={(tags) => updateTags(doc.id, annotation.id, tags)}
+                    onCard={() =>
+                      setCardEditing({
+                        annotation,
+                        existing: cards.find(
+                          (view) => view.card.sourceAnnotationId === annotation.id,
+                        ),
+                      })
+                    }
                     onDelete={() => removeAnnotation(doc.id, annotation.id)}
                   />
                 ))}
@@ -562,7 +654,11 @@ export default function App() {
           </aside>
         </main>
       ) : desktop ? (
-        <Library onOpen={openById} onMessage={setMessage} />
+        view === 'review' ? (
+          <Review onOpenDoc={openById} onMessage={setMessage} />
+        ) : (
+          <Library onOpen={openById} onMessage={setMessage} />
+        )
       ) : (
         <main className="workspace welcome">
           <div className="welcome-card">
@@ -622,25 +718,45 @@ export default function App() {
           </button>
         </div>
       )}
+
+      {cardEditing && (
+        <CardEditor
+          heading={cardEditing.existing ? '编辑卡片' : '制作卡片'}
+          initial={{
+            title: cardEditing.existing?.card.title ?? defaultCardTitle(cardEditing.annotation),
+            body: cardEditing.existing?.card.body ?? cardEditing.annotation.body,
+            links: cardEditing.existing?.card.links ?? [],
+          }}
+          cards={cards}
+          excludeId={cardEditing.existing?.card.id}
+          saving={cardSaving}
+          onCancel={() => setCardEditing(null)}
+          onSave={(draft) => void saveCard(draft)}
+        />
+      )}
     </div>
   );
 }
 
 interface AnnotationCardProps {
   annotation: Annotation;
+  card?: CardView;
   editing: boolean;
   onJump: () => void;
   onBody: (body: string) => void;
   onTags: (tags: string[]) => void;
+  onCard: () => void;
   onDelete: () => void;
 }
 
 function AnnotationCard({
   annotation,
+  card,
   editing,
   onJump,
   onBody,
   onTags,
+  onCard,
   onDelete,
 }: AnnotationCardProps) {
   const [draft, setDraft] = useState(annotation.body);
@@ -751,6 +867,23 @@ function AnnotationCard({
           }}
         />
       </div>
+
+      <button
+        type="button"
+        className="card-button"
+        onClick={(event) => {
+          event.stopPropagation();
+          onCard();
+        }}
+      >
+        {card
+          ? card.card.status === 'orphaned'
+            ? '卡片 · 来源失效'
+            : card.card.reps > 0
+              ? `卡片 · 复习 ${card.card.reps} 次`
+              : '卡片 · 新'
+          : '制卡'}
+      </button>
     </article>
   );
 }

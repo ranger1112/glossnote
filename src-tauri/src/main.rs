@@ -1,13 +1,15 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod db;
+mod fsrs;
 mod library;
 mod models;
 mod state;
 
 use crate::{
     models::{
-        Annotation, Document, DocumentMetaPatch, ImportResult, LibraryInfo, ScanReport, SearchHit,
+        Annotation, CardView, Document, DocumentMetaPatch, ImportResult, LibraryInfo, ScanReport,
+        SearchHit,
     },
     state::AppState,
 };
@@ -104,6 +106,44 @@ fn delete_annotation(app: AppHandle, doc_id: String, id: String) -> Result<(), S
 }
 
 #[tauri::command]
+fn list_cards(app: AppHandle) -> Result<Vec<CardView>, String> {
+    library::cards(&app)
+}
+
+#[tauri::command]
+fn create_card(
+    app: AppHandle,
+    doc_id: String,
+    annotation_id: String,
+    title: String,
+    body: String,
+    links: Vec<String>,
+) -> Result<CardView, String> {
+    library::create_card(&app, &doc_id, &annotation_id, title, body, links)
+}
+
+#[tauri::command]
+fn update_card(
+    app: AppHandle,
+    card_id: String,
+    title: String,
+    body: String,
+    links: Vec<String>,
+) -> Result<CardView, String> {
+    library::update_card(&app, &card_id, title, body, links)
+}
+
+#[tauri::command]
+fn delete_card(app: AppHandle, card_id: String) -> Result<(), String> {
+    library::delete_card(&app, &card_id)
+}
+
+#[tauri::command]
+fn review_card(app: AppHandle, card_id: String, rating: u8) -> Result<CardView, String> {
+    library::review_card(&app, &card_id, rating)
+}
+
+#[tauri::command]
 fn update_document_meta(
     app: AppHandle,
     doc_id: String,
@@ -149,6 +189,11 @@ fn main() {
             list_annotations,
             upsert_annotation,
             delete_annotation,
+            list_cards,
+            create_card,
+            update_card,
+            delete_card,
+            review_card,
             update_document_meta,
         ])
         .run(tauri::generate_context!())

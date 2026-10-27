@@ -1,4 +1,4 @@
-use crate::models::{Annotation, DocumentRow, SearchHit};
+use crate::models::{Annotation, Card, CardRef, CardView, DocumentRow, SearchHit};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::path::Path;
 
@@ -54,6 +54,30 @@ fn migrate(conn: &Connection) -> Result<(), String> {
           quote,
           body
         );
+
+        CREATE TABLE IF NOT EXISTS cards (
+          id TEXT PRIMARY KEY,
+          title TEXT NOT NULL,
+          body TEXT NOT NULL DEFAULT '',
+          source_annotation_id TEXT,
+          source_doc_id TEXT,
+          source_page INTEGER,
+          links TEXT NOT NULL DEFAULT '[]',
+          status TEXT NOT NULL DEFAULT 'active',
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          due_at INTEGER NOT NULL DEFAULT 0,
+          stability REAL NOT NULL DEFAULT 0,
+          difficulty REAL NOT NULL DEFAULT 0,
+          reps INTEGER NOT NULL DEFAULT 0,
+          lapses INTEGER NOT NULL DEFAULT 0,
+          last_reviewed_at INTEGER NOT NULL DEFAULT 0,
+          state TEXT NOT NULL DEFAULT 'new',
+          deleted INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_cards_due ON cards(status, due_at);
+        CREATE INDEX IF NOT EXISTS idx_cards_doc ON cards(source_doc_id);
+        CREATE INDEX IF NOT EXISTS idx_cards_annotation ON cards(source_annotation_id);
         "#,
     )
     .map_err(|error| format!("初始化数据库失败：{error}"))?;
@@ -407,13 +431,237 @@ pub fn search_annotations(conn: &Connection, query: &str) -> Result<Vec<SearchHi
 pub fn clear_library(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
         "DELETE FROM annotation_fts;
+         DELETE FROM cards;
          DELETE FROM annotations;
          DELETE FROM documents;",
     )
     .map_err(|error| format!("清空书库索引失败：{error}"))
 }
 
-pub fn remove_document(conn: &Connection, id: &str) -> Result<(), String> {
+const CARD_COLUMNS: &str = "id, title, body, source_annotation_id, source_doc_id, source_page, links, status, created_at, updated_at, due_at, stability, difficulty, reps, lapses, last_reviewed_at, state, deleted";
+const CARD_COLUMNS_QUALIFIED: &str = "c.id, c.title, c.body, c.source_annotation_id, c.source_doc_id, c.source_page, c.links, c.status, c.created_at, c.updated_at, c.due_at, c.stability, c.difficulty, c.reps, c.lapses, c.last_reviewed_at, c.state, c.deleted";
+
+fn row_to_card(row: &Row<'_>) -> rusqlite::Result<Card> {
+    let links_text: String = row.get(6)?;
+    Ok(Card {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        body: row.get(2)?,
+        source_annotation_id: row.get(3)?,
+        source_doc_id: row.get(4)?,
+        source_page: row.get::<_, Option<i64>>(5)?.map(|page| page as u32),
+        links: serde_json::from_str(&links_text).unwrap_or_default(),
+        status: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
+        due_at: row.get(10)?,
+        stability: row.get(11)?,
+        difficulty: row.get(12)?,
+        reps: row.get::<_, i64>(13)? as u32,
+        lapses: row.get::<_, i64>(14)? as u32,
+        last_reviewed_at: row.get(15)?,
+        state: row.get(16)?,
+        deleted: row.get::<_, i64>(17)? != 0,
+    })
+}
+
+pub fn get_card(conn: &Connection, id: &str) -> Result<Option<Card>, String> {
+    conn.query_row(
+        &format!("SELECT {CARD_COLUMNS} FROM cards WHERE id = ?1"),
+        params![id],
+        row_to_card,
+    )
+    .optional()
+    .map_err(|error| format!("查询卡片失败：{error}"))
+}
+
+pub fn find_card_by_annotation(
+    conn: &Connection,
+    annotation_id: &str,
+) -> Result<Option<Card>, String> {
+    conn.query_row(
+        &format!(
+            "SELECT {CARD_COLUMNS} FROM cards WHERE source_annotation_id = ?1
+             ORDER BY updated_at DESC LIMIT 1"
+        ),
+        params![annotation_id],
+        row_to_card,
+    )
+    .optional()
+    .map_err(|error| format!("查询标注卡片失败：{error}"))
+}
+
+pub fn upsert_card(conn: &Connection, card: &Card) -> Result<(), String> {
+    let links = serde_json::to_string(&card.links)
+        .map_err(|error| format!("序列化卡片链接失败：{error}"))?;
+
+    conn.execute(
+        "INSERT INTO cards
+           (id, title, body, source_annotation_id, source_doc_id, source_page, links, status,
+            created_at, updated_at, due_at, stability, difficulty, reps, lapses,
+            last_reviewed_at, state, deleted)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+         ON CONFLICT(id) DO UPDATE SET
+           title = excluded.title,
+           body = excluded.body,
+           source_annotation_id = excluded.source_annotation_id,
+           source_doc_id = excluded.source_doc_id,
+           source_page = excluded.source_page,
+           links = excluded.links,
+           status = excluded.status,
+           updated_at = excluded.updated_at,
+           due_at = excluded.due_at,
+           stability = excluded.stability,
+           difficulty = excluded.difficulty,
+           reps = excluded.reps,
+           lapses = excluded.lapses,
+           last_reviewed_at = excluded.last_reviewed_at,
+           state = excluded.state,
+           deleted = excluded.deleted",
+        params![
+            card.id,
+            card.title,
+            card.body,
+            card.source_annotation_id,
+            card.source_doc_id,
+            card.source_page.map(|page| page as i64),
+            links,
+            card.status,
+            card.created_at,
+            card.updated_at,
+            card.due_at,
+            card.stability,
+            card.difficulty,
+            card.reps as i64,
+            card.lapses as i64,
+            card.last_reviewed_at,
+            card.state,
+            card.deleted as i64,
+        ],
+    )
+    .map_err(|error| format!("写入卡片失败：{error}"))?;
+    Ok(())
+}
+
+/// 写 sidecar 时用：包含墓碑，保证删除也能同步。
+pub fn list_cards_for_document(conn: &Connection, doc_id: &str) -> Result<Vec<Card>, String> {
+    let mut statement = conn
+        .prepare(&format!(
+            "SELECT {CARD_COLUMNS} FROM cards WHERE source_doc_id = ?1 ORDER BY created_at ASC"
+        ))
+        .map_err(|error| format!("准备文档卡片查询失败：{error}"))?;
+
+    let rows = statement
+        .query_map(params![doc_id], row_to_card)
+        .map_err(|error| format!("查询文档卡片失败：{error}"))?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error| format!("读取文档卡片失败：{error}"))
+}
+
+pub fn list_cards(conn: &Connection) -> Result<Vec<CardView>, String> {
+    let mut statement = conn
+        .prepare(&format!(
+            "SELECT {CARD_COLUMNS_QUALIFIED}, COALESCE(d.name, ''), COALESCE(a.anchor, '')
+             FROM cards c
+             LEFT JOIN documents d ON d.id = c.source_doc_id
+             LEFT JOIN annotations a ON a.id = c.source_annotation_id
+             WHERE c.deleted = 0
+             ORDER BY c.due_at ASC, c.created_at DESC"
+        ))
+        .map_err(|error| format!("准备卡片列表查询失败：{error}"))?;
+
+    let rows = statement
+        .query_map([], |row| {
+            let card = row_to_card(row)?;
+            let doc_name: String = row.get(18)?;
+            let anchor_text: String = row.get(19)?;
+            let anchor: serde_json::Value =
+                serde_json::from_str(&anchor_text).unwrap_or(serde_json::Value::Null);
+            let source_quote = anchor
+                .get("quote")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string();
+            Ok(CardView {
+                card,
+                doc_name,
+                source_quote,
+                backlinks: Vec::new(),
+                previews: Vec::new(),
+            })
+        })
+        .map_err(|error| format!("查询卡片列表失败：{error}"))?;
+
+    let mut views = rows
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error| format!("读取卡片列表失败：{error}"))?;
+
+    let refs: Vec<(String, String, Vec<String>)> = views
+        .iter()
+        .map(|view| {
+            (
+                view.card.id.clone(),
+                view.card.title.clone(),
+                view.card.links.clone(),
+            )
+        })
+        .collect();
+
+    for view in &mut views {
+        view.backlinks = refs
+            .iter()
+            .filter(|(id, _, links)| {
+                id != &view.card.id && links.iter().any(|link| link == &view.card.id)
+            })
+            .map(|(id, title, _)| CardRef {
+                id: id.clone(),
+                title: title.clone(),
+            })
+            .collect();
+    }
+
+    Ok(views)
+}
+
+/// 标注被删除或从 sidecar 合并为墓碑后，来源卡片保留内容但标记失效。
+pub fn orphan_cards_for_document(
+    conn: &Connection,
+    doc_id: &str,
+    now: i64,
+) -> Result<usize, String> {
+    conn.execute(
+        "UPDATE cards SET status = 'orphaned', updated_at = ?2
+         WHERE deleted = 0 AND status = 'active' AND source_doc_id = ?1
+           AND source_annotation_id IS NOT NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM annotations a
+             WHERE a.id = cards.source_annotation_id AND a.deleted = 0
+           )",
+        params![doc_id, now],
+    )
+    .map_err(|error| format!("标记失效卡片失败：{error}"))
+}
+
+pub fn orphan_cards_for_annotation(
+    conn: &Connection,
+    annotation_id: &str,
+    now: i64,
+) -> Result<usize, String> {
+    conn.execute(
+        "UPDATE cards SET status = 'orphaned', updated_at = ?2
+         WHERE deleted = 0 AND status = 'active' AND source_annotation_id = ?1",
+        params![annotation_id, now],
+    )
+    .map_err(|error| format!("标记失效卡片失败：{error}"))
+}
+
+pub fn remove_document(conn: &Connection, id: &str, now: i64) -> Result<(), String> {
+    conn.execute(
+        "UPDATE cards SET status = 'orphaned', updated_at = ?2 WHERE source_doc_id = ?1",
+        params![id, now],
+    )
+    .map_err(|error| format!("标记失效卡片失败：{error}"))?;
     conn.execute("DELETE FROM annotation_fts WHERE doc_id = ?1", params![id])
         .map_err(|error| format!("清理搜索索引失败：{error}"))?;
     conn.execute("DELETE FROM annotations WHERE doc_id = ?1", params![id])

@@ -1,6 +1,7 @@
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import type {
   Annotation,
+  CardView,
   DocumentMeta,
   ImportResult,
   LibraryInfo,
@@ -75,4 +76,35 @@ export function exportMarkdown(path: string, docId?: string): Promise<string> {
 
 export function libraryInfo(): Promise<LibraryInfo> {
   return invoke('library_info');
+}
+
+export function listCards(): Promise<CardView[]> {
+  return invoke('list_cards');
+}
+
+export function createCard(
+  docId: string,
+  annotationId: string,
+  title: string,
+  body: string,
+  links: string[],
+): Promise<CardView> {
+  return invoke('create_card', { docId, annotationId, title, body, links });
+}
+
+export function updateCard(
+  cardId: string,
+  title: string,
+  body: string,
+  links: string[],
+): Promise<CardView> {
+  return invoke('update_card', { cardId, title, body, links });
+}
+
+export function deleteCard(cardId: string): Promise<void> {
+  return invoke('delete_card', { cardId });
+}
+
+export function reviewCard(cardId: string, rating: number): Promise<CardView> {
+  return invoke('review_card', { cardId, rating });
 }

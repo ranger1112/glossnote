@@ -1,8 +1,9 @@
 use crate::{
     db,
+    fsrs::{self, MemoryState},
     models::{
-        Annotation, Document, DocumentMetaPatch, DocumentRow, ImportResult, LibraryInfo,
-        ScanReport, SearchHit, Sidecar,
+        Annotation, Card, CardView, Document, DocumentMetaPatch, DocumentRow, ImportResult,
+        LibraryInfo, ScanReport, SearchHit, Sidecar,
     },
     state::AppState,
 };
@@ -228,6 +229,7 @@ type SidecarEntry = (PathBuf, Sidecar);
 #[derive(Default)]
 struct MergeStats {
     merged: usize,
+    merged_cards: usize,
     archived: usize,
     ignored: usize,
 }
@@ -316,6 +318,7 @@ fn apply_sidecar(
     sidecar: &Sidecar,
     page_count: &mut u32,
     merged: &mut usize,
+    merged_cards: &mut usize,
 ) -> Result<(), String> {
     if *page_count == 0 && sidecar.page_count > 0 {
         *page_count = sidecar.page_count;
@@ -329,6 +332,20 @@ fn apply_sidecar(
         if !keep_database {
             db::upsert_annotation(conn, &document.id, annotation)?;
             *merged += 1;
+        }
+    }
+
+    for card in &sidecar.cards {
+        // 卡片只跟随来源文档的 sidecar，避免错误文件把卡片挪到别的文档。
+        if card.source_doc_id.as_deref() != Some(document.id.as_str()) {
+            continue;
+        }
+        let keep_database = db::get_card(conn, &card.id)?
+            .map(|existing| existing.updated_at >= card.updated_at)
+            .unwrap_or(false);
+        if !keep_database {
+            db::upsert_card(conn, card)?;
+            *merged_cards += 1;
         }
     }
 
@@ -359,9 +376,17 @@ fn reconcile_document(
             stats.ignored += 1;
             continue;
         }
-        apply_sidecar(conn, document, sidecar, &mut page_count, &mut stats.merged)?;
+        apply_sidecar(
+            conn,
+            document,
+            sidecar,
+            &mut page_count,
+            &mut stats.merged,
+            &mut stats.merged_cards,
+        )?;
     }
 
+    db::orphan_cards_for_document(conn, &document.id, now_ms())?;
     write_sidecar(conn, root, &document.id)?;
 
     for (path, sidecar) in &ordered {
@@ -395,6 +420,7 @@ fn merge_document(
 pub fn write_sidecar(conn: &rusqlite::Connection, root: &Path, doc_id: &str) -> Result<(), String> {
     let document = db::find_by_id(conn, doc_id)?.ok_or_else(|| "文档不存在".to_string())?;
     let annotations = db::list_annotations(conn, doc_id)?;
+    let cards = db::list_cards_for_document(conn, doc_id)?;
     let sidecar = Sidecar {
         schema_version: SIDECAR_VERSION,
         doc_id: document.id.clone(),
@@ -402,6 +428,7 @@ pub fn write_sidecar(conn: &rusqlite::Connection, root: &Path, doc_id: &str) -> 
         size: document.size,
         page_count: document.page_count,
         annotations,
+        cards,
     };
 
     let path = sidecar_path(root, doc_id);
@@ -564,7 +591,7 @@ pub fn scan(app: &AppHandle) -> Result<ScanReport, String> {
 
         if let Some(stale) = &by_path {
             if stale.id != id {
-                db::remove_document(&conn, &stale.id)?;
+                db::remove_document(&conn, &stale.id, now)?;
             }
         }
 
@@ -618,6 +645,7 @@ pub fn scan(app: &AppHandle) -> Result<ScanReport, String> {
         documents,
         annotations,
         merged: stats.merged,
+        merged_cards: stats.merged_cards,
         archived: stats.archived,
         duplicate_pdfs,
         ignored_sidecars: stats.ignored,
@@ -883,6 +911,8 @@ pub fn delete_annotation(app: &AppHandle, doc_id: &str, id: &str) -> Result<(), 
     annotation.deleted = true;
     annotation.updated_at = now_ms();
     db::upsert_annotation(&conn, doc_id, &annotation)?;
+    // 卡片不跟着删：保留内容，只标记来源失效。
+    db::orphan_cards_for_annotation(&conn, id, annotation.updated_at)?;
     write_sidecar(&conn, &root, doc_id)
 }
 
@@ -908,6 +938,253 @@ pub fn update_meta(
     write_sidecar(&conn, &root, doc_id)?;
     let document = db::find_by_id(&conn, doc_id)?.ok_or_else(|| "文档不存在".to_string())?;
     Ok(document.to_document(&root))
+}
+
+fn memory_state(card: &Card) -> MemoryState {
+    MemoryState {
+        stability: card.stability,
+        difficulty: card.difficulty,
+        reps: card.reps,
+        lapses: card.lapses,
+        last_reviewed_at: card.last_reviewed_at,
+    }
+}
+
+fn with_previews(mut view: CardView, now: i64) -> CardView {
+    view.previews = fsrs::previews(memory_state(&view.card), now);
+    view
+}
+
+fn card_view(conn: &rusqlite::Connection, id: &str, now: i64) -> Result<CardView, String> {
+    db::list_cards(conn)?
+        .into_iter()
+        .find(|view| view.card.id == id)
+        .map(|view| with_previews(view, now))
+        .ok_or_else(|| "卡片不存在".to_string())
+}
+
+pub fn cards(app: &AppHandle) -> Result<Vec<CardView>, String> {
+    let state = app.state::<AppState>();
+    let conn = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let now = now_ms();
+    Ok(db::list_cards(&conn)?
+        .into_iter()
+        .map(|view| with_previews(view, now))
+        .collect())
+}
+
+fn sanitize_links(
+    conn: &rusqlite::Connection,
+    links: &[String],
+    exclude: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let mut result = Vec::new();
+    for id in links {
+        if Some(id.as_str()) == exclude || result.contains(id) {
+            continue;
+        }
+        if let Some(card) = db::get_card(conn, id)? {
+            if !card.deleted {
+                result.push(id.clone());
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn default_card_title(quote: &str, body: &str) -> String {
+    let text = if quote.trim().is_empty() {
+        body.trim()
+    } else {
+        quote.trim()
+    };
+    let line = text.lines().next().unwrap_or("").trim();
+    if line.is_empty() {
+        return "未命名卡片".to_string();
+    }
+
+    let mut title: String = line.chars().take(60).collect();
+    if line.chars().count() > 60 {
+        title.push('…');
+    }
+    title
+}
+
+fn persist_card_sidecar(
+    conn: &rusqlite::Connection,
+    root: &Path,
+    card: &Card,
+) -> Result<(), String> {
+    if let Some(doc_id) = card.source_doc_id.as_deref() {
+        if db::find_by_id(conn, doc_id)?.is_some() {
+            write_sidecar(conn, root, doc_id)?;
+        }
+    }
+    Ok(())
+}
+
+pub fn create_card(
+    app: &AppHandle,
+    doc_id: &str,
+    annotation_id: &str,
+    title: String,
+    body: String,
+    links: Vec<String>,
+) -> Result<CardView, String> {
+    let state = app.state::<AppState>();
+    let root = state.root();
+    let conn = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let annotation = db::list_annotations(&conn, doc_id)?
+        .into_iter()
+        .find(|annotation| annotation.id == annotation_id)
+        .ok_or_else(|| "来源标注不存在".to_string())?;
+    if annotation.deleted {
+        return Err("来源标注已删除".to_string());
+    }
+
+    let now = now_ms();
+    let quote = annotation
+        .anchor
+        .get("quote")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let title = if title.trim().is_empty() {
+        default_card_title(quote, &body)
+    } else {
+        title.trim().to_string()
+    };
+
+    // 前端已经按“是否已有卡片”切换入口；这里做成幂等写入，
+    // 双击或上次保存中途失败都不会产生第二张卡片或报错。
+    if let Some(mut existing) = db::find_card_by_annotation(&conn, annotation_id)? {
+        if !existing.deleted {
+            existing.title = title;
+            existing.body = body.trim().to_string();
+            existing.links = sanitize_links(&conn, &links, Some(&existing.id))?;
+            existing.updated_at = now;
+            db::upsert_card(&conn, &existing)?;
+            persist_card_sidecar(&conn, &root, &existing)?;
+            return card_view(&conn, &existing.id, now);
+        }
+    }
+
+    let card = Card {
+        id: format!("card-{annotation_id}"),
+        title,
+        body: body.trim().to_string(),
+        source_annotation_id: Some(annotation.id.clone()),
+        source_doc_id: Some(doc_id.to_string()),
+        source_page: Some(annotation.page),
+        links: sanitize_links(&conn, &links, None)?,
+        status: "active".to_string(),
+        created_at: now,
+        updated_at: now,
+        due_at: now,
+        stability: 0.0,
+        difficulty: 0.0,
+        reps: 0,
+        lapses: 0,
+        last_reviewed_at: 0,
+        state: "new".to_string(),
+        deleted: false,
+    };
+
+    db::upsert_card(&conn, &card)?;
+    persist_card_sidecar(&conn, &root, &card)?;
+    card_view(&conn, &card.id, now)
+}
+
+pub fn update_card(
+    app: &AppHandle,
+    card_id: &str,
+    title: String,
+    body: String,
+    links: Vec<String>,
+) -> Result<CardView, String> {
+    let state = app.state::<AppState>();
+    let root = state.root();
+    let conn = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let mut card = db::get_card(&conn, card_id)?.ok_or_else(|| "卡片不存在".to_string())?;
+    if card.deleted {
+        return Err("卡片已删除".to_string());
+    }
+    if title.trim().is_empty() {
+        return Err("卡片标题不能为空".to_string());
+    }
+
+    card.title = title.trim().to_string();
+    card.body = body.trim().to_string();
+    card.links = sanitize_links(&conn, &links, Some(card_id))?;
+    card.updated_at = now_ms();
+
+    db::upsert_card(&conn, &card)?;
+    persist_card_sidecar(&conn, &root, &card)?;
+    card_view(&conn, &card.id, card.updated_at)
+}
+
+pub fn delete_card(app: &AppHandle, card_id: &str) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let root = state.root();
+    let conn = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let Some(mut card) = db::get_card(&conn, card_id)? else {
+        return Ok(());
+    };
+    if card.deleted {
+        return Ok(());
+    }
+
+    card.deleted = true;
+    card.updated_at = now_ms();
+    db::upsert_card(&conn, &card)?;
+    persist_card_sidecar(&conn, &root, &card)
+}
+
+pub fn review_card(app: &AppHandle, card_id: &str, rating: u8) -> Result<CardView, String> {
+    if !(1..=4).contains(&rating) {
+        return Err("复习评分必须是 1 到 4".to_string());
+    }
+
+    let state = app.state::<AppState>();
+    let root = state.root();
+    let conn = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let mut card = db::get_card(&conn, card_id)?.ok_or_else(|| "卡片不存在".to_string())?;
+    if card.deleted {
+        return Err("卡片已删除".to_string());
+    }
+
+    let now = now_ms();
+    let outcome = fsrs::schedule(memory_state(&card), rating, now);
+    card.stability = outcome.stability;
+    card.difficulty = outcome.difficulty;
+    card.due_at = outcome.due_at;
+    card.reps = outcome.reps;
+    card.lapses = outcome.lapses;
+    card.last_reviewed_at = now;
+    card.state = "review".to_string();
+    card.updated_at = now;
+
+    db::upsert_card(&conn, &card)?;
+    persist_card_sidecar(&conn, &root, &card)?;
+    card_view(&conn, &card.id, now)
 }
 
 pub fn info(app: &AppHandle) -> Result<LibraryInfo, String> {
@@ -1009,7 +1286,115 @@ mod tests {
             size: 10,
             page_count: 2,
             annotations,
+            cards: Vec::new(),
         }
+    }
+
+    fn card(id: &str, doc_id: &str, annotation_id: &str, updated_at: i64, title: &str) -> Card {
+        Card {
+            id: id.to_string(),
+            title: title.to_string(),
+            body: "card body".to_string(),
+            source_annotation_id: Some(annotation_id.to_string()),
+            source_doc_id: Some(doc_id.to_string()),
+            source_page: Some(0),
+            links: Vec::new(),
+            status: "active".to_string(),
+            created_at: 1,
+            updated_at,
+            due_at: 1,
+            stability: 0.0,
+            difficulty: 0.0,
+            reps: 0,
+            lapses: 0,
+            last_reviewed_at: 0,
+            state: "new".to_string(),
+            deleted: false,
+        }
+    }
+
+    fn write_conflict(root: &Path, name: &str, sidecar: &Sidecar) -> PathBuf {
+        let path = root.join(".glossnote").join("annotations").join(name);
+        fs::write(&path, serde_json::to_vec(sidecar).unwrap()).unwrap();
+        path
+    }
+
+    #[test]
+    fn card_sidecar_round_trip_and_conflict_merge() {
+        let dir = temp_dir("cards");
+        let root = dir.join("library");
+        ensure_dirs(&root).unwrap();
+        let conn = db::open(&dir.join("test.db")).unwrap();
+        let row = document("doc1", "books/doc1.pdf");
+
+        db::upsert_document(&conn, &row).unwrap();
+        db::upsert_annotation(&conn, &row.id, &annotation("a1", 10, "note")).unwrap();
+        db::upsert_card(&conn, &card("c1", "doc1", "a1", 10, "旧卡片")).unwrap();
+        write_sidecar(&conn, &root, "doc1").unwrap();
+
+        let canonical: Sidecar =
+            serde_json::from_slice(&fs::read(sidecar_path(&root, "doc1")).unwrap()).unwrap();
+        assert_eq!(canonical.cards.len(), 1);
+        assert_eq!(canonical.cards[0].title, "旧卡片");
+
+        let mut conflict = sidecar_for("doc1", vec![annotation("a1", 10, "note")]);
+        conflict.cards = vec![card("c1", "doc1", "a1", 20, "冲突卡片")];
+        let conflict_path = write_conflict(&root, "doc1 (conflicted copy).json", &conflict);
+
+        let (mut groups, _) = load_sidecars(&root).unwrap();
+        let files = groups.remove("doc1").unwrap();
+        let mut stats = MergeStats::default();
+        reconcile_document(&conn, &root, &row, &files, &mut stats).unwrap();
+
+        assert_eq!(stats.merged_cards, 1);
+        assert_eq!(stats.archived, 1);
+        assert!(!conflict_path.exists());
+        assert_eq!(
+            db::get_card(&conn, "c1").unwrap().unwrap().title,
+            "冲突卡片"
+        );
+
+        let canonical: Sidecar =
+            serde_json::from_slice(&fs::read(sidecar_path(&root, "doc1")).unwrap()).unwrap();
+        assert_eq!(canonical.cards[0].title, "冲突卡片");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tombstoned_annotation_orphans_but_keeps_card() {
+        let dir = temp_dir("orphan");
+        let root = dir.join("library");
+        ensure_dirs(&root).unwrap();
+        let conn = db::open(&dir.join("test.db")).unwrap();
+        let row = document("doc1", "books/doc1.pdf");
+
+        db::upsert_document(&conn, &row).unwrap();
+        db::upsert_annotation(&conn, &row.id, &annotation("a1", 10, "note")).unwrap();
+        db::upsert_card(&conn, &card("c1", "doc1", "a1", 10, "要保留的卡片")).unwrap();
+        write_sidecar(&conn, &root, "doc1").unwrap();
+
+        // 另一台设备删除标注：冲突副本里只有墓碑，卡片本体没变。
+        let mut tombstone = annotation("a1", 20, "");
+        tombstone.deleted = true;
+        let conflict = sidecar_for("doc1", vec![tombstone]);
+        write_conflict(&root, "doc1 (2).json", &conflict);
+
+        let (mut groups, _) = load_sidecars(&root).unwrap();
+        let files = groups.remove("doc1").unwrap();
+        let mut stats = MergeStats::default();
+        reconcile_document(&conn, &root, &row, &files, &mut stats).unwrap();
+
+        let card = db::get_card(&conn, "c1").unwrap().unwrap();
+        assert_eq!(card.title, "要保留的卡片");
+        assert_eq!(card.status, "orphaned");
+        assert!(!card.deleted);
+
+        let canonical: Sidecar =
+            serde_json::from_slice(&fs::read(sidecar_path(&root, "doc1")).unwrap()).unwrap();
+        assert_eq!(canonical.cards[0].status, "orphaned");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

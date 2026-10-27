@@ -126,7 +126,82 @@ pub struct ScanReport {
     pub duplicate_pdfs: usize,
     /// 无法解析或版本不认识的 sidecar 数量。
     pub ignored_sidecars: usize,
+    /// 从 sidecar 合并进数据库的卡片数量。
+    pub merged_cards: usize,
     pub scanned_at: i64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Card {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub source_annotation_id: Option<String>,
+    #[serde(default)]
+    pub source_doc_id: Option<String>,
+    #[serde(default)]
+    pub source_page: Option<u32>,
+    #[serde(default)]
+    pub links: Vec<String>,
+    /// active / orphaned：来源标注被删除后卡片保留，但标记为来源失效。
+    #[serde(default = "default_card_status")]
+    pub status: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    #[serde(default)]
+    pub due_at: i64,
+    #[serde(default)]
+    pub stability: f64,
+    #[serde(default)]
+    pub difficulty: f64,
+    #[serde(default)]
+    pub reps: u32,
+    #[serde(default)]
+    pub lapses: u32,
+    #[serde(default)]
+    pub last_reviewed_at: i64,
+    /// new / review
+    #[serde(default = "default_card_state")]
+    pub state: String,
+    #[serde(default)]
+    pub deleted: bool,
+}
+
+fn default_card_status() -> String {
+    "active".to_string()
+}
+
+fn default_card_state() -> String {
+    "new".to_string()
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct CardRef {
+    pub id: String,
+    pub title: String,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RatingPreview {
+    pub rating: u8,
+    pub label: String,
+    pub due_at: i64,
+    pub interval_days: f64,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct CardView {
+    pub card: Card,
+    pub doc_name: String,
+    pub source_quote: String,
+    pub backlinks: Vec<CardRef>,
+    pub previews: Vec<RatingPreview>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -154,4 +229,7 @@ pub struct Sidecar {
     pub page_count: u32,
     #[serde(default)]
     pub annotations: Vec<Annotation>,
+    /// 0.6 起随 sidecar 同步卡片；旧文件没有该字段时按空数组处理。
+    #[serde(default)]
+    pub cards: Vec<Card>,
 }
