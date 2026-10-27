@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { CardEditor, type CardDraft } from './CardEditor';
 import { deleteCard, listCards, reviewCard, updateCard } from './desktop';
+import { IconRefresh } from './icons';
 import type { CardView } from './types';
 
 interface ReviewProps {
@@ -157,6 +158,7 @@ export function Review({ onOpenDoc, onMessage }: ReviewProps) {
         </div>
         <div className="library-actions">
           <button type="button" className="ghost" disabled={loading} onClick={() => void load()}>
+            <IconRefresh size={14} />
             刷新队列
           </button>
         </div>

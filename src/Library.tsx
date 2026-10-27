@@ -12,6 +12,13 @@ import {
   updateDocumentMeta,
 } from './desktop';
 import { pickDirectory, pickMarkdownPath, pickPdfPath } from './platform';
+import {
+  IconDownload,
+  IconFolder,
+  IconRefresh,
+  IconSearch,
+  IconUpload,
+} from './icons';
 import type { DocumentMeta, ScanReport, SearchHit } from './types';
 
 interface LibraryProps {
@@ -281,19 +288,24 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
         </div>
 
         <div className="library-actions">
-          <input
-            className="search-input"
-            type="search"
-            value={query}
-            placeholder="搜索标注、批注、标签…"
-            onChange={(event) => setQuery(event.target.value)}
-          />
+          <div className="search-box">
+            <IconSearch size={15} />
+            <input
+              className="search-input"
+              type="search"
+              value={query}
+              aria-label="搜索标注、批注、标签"
+              placeholder="搜索标注、批注、标签…"
+              onChange={(event) => setQuery(event.target.value)}
+            />
+          </div>
           <button
             type="button"
             className="ghost"
             disabled={scanning || switching}
             onClick={() => void refresh(true)}
           >
+            <IconRefresh size={14} />
             {scanning ? '扫描中…' : '重新扫描'}
           </button>
           <button
@@ -302,6 +314,7 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
             disabled={switching}
             onClick={() => void handleChangeRoot()}
           >
+            <IconFolder size={14} />
             {switching ? '切换中…' : '书库位置'}
           </button>
           <button
@@ -310,6 +323,7 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
             disabled={docs.length === 0}
             onClick={() => void handleExport()}
           >
+            <IconDownload size={14} />
             导出 Markdown
           </button>
           <button
@@ -318,6 +332,7 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
             disabled={importing}
             onClick={() => void handleImport()}
           >
+            <IconUpload size={15} />
             {importing ? '导入中…' : '导入 PDF'}
           </button>
         </div>
@@ -373,6 +388,7 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
             disabled={importing}
             onClick={() => void handleImport()}
           >
+            <IconUpload size={16} />
             导入 PDF
           </button>
         </div>
@@ -409,9 +425,11 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
                       ? ` · 读到第 ${doc.lastPage + 1} 页`
                       : ''}
                   </span>
-                  <div className="progress">
-                    <i style={{ width: `${progress}%` }} />
-                  </div>
+                  {progress > 0 && (
+                    <div className="progress" aria-hidden="true">
+                      <i style={{ width: `${progress}%` }} />
+                    </div>
+                  )}
                 </div>
               </button>
             );

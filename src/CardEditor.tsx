@@ -128,6 +128,7 @@ export function CardEditor({
         </div>
 
         <footer className="modal-foot">
+          <span className="modal-spacer" />
           <button type="button" className="ghost" onClick={onCancel}>
             取消
           </button>

@@ -7,6 +7,12 @@ import { Review } from './Review';
 import { CardEditor, type CardDraft } from './CardEditor';
 import { AiPanel } from './AiPanel';
 import { AiSettingsModal } from './AiSettingsModal';
+import {
+  IconArrowLeft,
+  IconMoon,
+  IconSparkles,
+  IconSun,
+} from './icons';
 import type { Anchor } from './anchoring';
 import type {
   AiSettingsView,
@@ -132,6 +138,14 @@ export default function App() {
   annotationsRef.current = annotations;
 
   useEffect(() => applyTheme(theme), [theme]);
+
+  useEffect(() => {
+    if (!message) return;
+    // 进行中的提示保持到状态更新；成功提示自动收起；错误留给用户处理。
+    if (/正在/.test(message) || /失败|错误|无法|不可|超时|不存在/.test(message)) return;
+    const timer = window.setTimeout(() => setMessage(''), 5000);
+    return () => window.clearTimeout(timer);
+  }, [message]);
 
   useEffect(() => {
     if (!desktop) return;
@@ -620,9 +634,10 @@ export default function App() {
             type="button"
             className={`theme-toggle ai-topbutton ${ai?.ready ? 'ready' : ''}`}
             title={ai?.ready ? 'AI 阅读助手设置' : '配置 AI'}
+            aria-label="AI 阅读助手设置"
             onClick={() => void openAiSettings()}
           >
-            AI
+            <IconSparkles size={15} />
           </button>
         )}
 
@@ -630,13 +645,15 @@ export default function App() {
           type="button"
           className="theme-toggle"
           title={theme === 'dark' ? '切换到浅色' : '切换到深色'}
+          aria-label={theme === 'dark' ? '切换到浅色' : '切换到深色'}
           onClick={() => setTheme((current) => (current === 'dark' ? 'light' : 'dark'))}
         >
-          {theme === 'dark' ? '☀' : '☾'}
+          {theme === 'dark' ? <IconSun size={16} /> : <IconMoon size={16} />}
         </button>
 
         {doc ? (
           <button type="button" className="ghost topbar-back" onClick={closeDoc}>
+            <IconArrowLeft size={14} />
             书库
           </button>
         ) : (
@@ -665,7 +682,21 @@ export default function App() {
         />
       </header>
 
-      {message && <div className="status-bar">{message}</div>}
+      {message && (
+        <div
+          className={`status-bar ${
+            /失败|错误|无法|不可|超时|不存在/.test(message)
+              ? 'error'
+              : /正在/.test(message)
+                ? 'busy'
+                : 'info'
+          }`}
+          role="status"
+          aria-live="polite"
+        >
+          {message}
+        </div>
+      )}
 
       {doc ? (
         <main className="workspace">
@@ -697,7 +728,8 @@ export default function App() {
                   title="基于这份文档提问"
                   onClick={() => openAssistant('qa')}
                 >
-                  AI
+                  <IconSparkles size={12} />
+                  问 AI
                 </button>
               )}
             </div>
@@ -812,6 +844,7 @@ export default function App() {
                 className="toolbar-note"
                 onClick={() => openAssistant('explain', toolbar.anchor)}
               >
+                <IconSparkles size={13} />
                 AI 解释
               </button>
             </>

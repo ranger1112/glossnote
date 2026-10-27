@@ -162,7 +162,7 @@ export function AiSettingsModal({
           <input
             type="password"
             value={apiKey}
-            placeholder={initial.apiKeySet ? '••••••••' : '粘贴 API Key'}
+            placeholder={initial.apiKeySet ? '输入新 Key 以替换，留空不修改' : '粘贴 API Key'}
             autoComplete="off"
             onChange={(event) => {
               setApiKey(event.target.value);
