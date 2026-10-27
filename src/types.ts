@@ -1,19 +1,46 @@
 import type { Anchor } from './anchoring';
 
 export type HighlightColor = 'yellow' | 'green' | 'blue' | 'pink';
+export type AnnotationKind = 'highlight' | 'underline' | 'note' | 'area' | 'ink';
 
 export interface Annotation {
   id: string;
   page: number;
   anchor: Anchor;
   color: HighlightColor;
-  note: string;
+  kind: AnnotationKind;
+  body: string;
+  tags: string[];
   createdAt: number;
   updatedAt: number;
   /** 墓碑式删除：同步与撤销都依赖它，不做物理删除 */
   deleted?: boolean;
 }
 
+export interface DocumentMeta {
+  id: string;
+  name: string;
+  title: string;
+  author: string;
+  pageCount: number;
+  path: string;
+  size: number;
+  addedAt: number;
+  lastOpenedAt: number;
+}
+
+export interface ImportResult {
+  document: DocumentMeta;
+  annotations: Annotation[];
+}
+
+export interface LibraryInfo {
+  root: string;
+  documents: number;
+  annotations: number;
+}
+
+/** 浏览器原型用的 localStorage 记录；桌面端以 SQLite + sidecar 为准。 */
 export interface DocRecord {
   schemaVersion: 1;
   docId: string;

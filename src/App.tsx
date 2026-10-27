@@ -3,9 +3,18 @@ import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { pdfjsLib } from './pdfjs';
 import { PdfPage } from './PdfPage';
 import type { Anchor } from './anchoring';
-import type { Annotation, DocRecord, HighlightColor } from './types';
+import type { Annotation, DocRecord, DocumentMeta, HighlightColor } from './types';
 import { loadDoc, saveDoc, sha256Hex } from './storage';
-import { isTauri, pickPdf } from './platform';
+import { isTauri, pickPdfPath } from './platform';
+import {
+  assetUrl,
+  deleteAnnotation,
+  getLastDocument,
+  importPdf,
+  scanLibrary,
+  updateDocumentMeta,
+  upsertAnnotation,
+} from './desktop';
 
 interface OpenedDoc {
   id: string;
@@ -21,6 +30,17 @@ interface ToolbarState {
   y: number;
 }
 
+interface Activation {
+  id: string;
+  name: string;
+  size: number;
+  pageCount: number;
+  pdf: PDFDocumentProxy;
+  task: ReturnType<typeof pdfjsLib.getDocument>;
+  annotations: Annotation[];
+  desktopMeta?: DocumentMeta;
+}
+
 const COLORS: Array<{ key: HighlightColor; label: string }> = [
   { key: 'yellow', label: '黄色高亮' },
   { key: 'green', label: '绿色高亮' },
@@ -31,6 +51,7 @@ const COLORS: Array<{ key: HighlightColor; label: string }> = [
 const EMPTY: Annotation[] = [];
 
 export default function App() {
+  const desktop = isTauri();
   const [doc, setDoc] = useState<OpenedDoc | null>(null);
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [scale, setScale] = useState(1.2);
@@ -43,6 +64,8 @@ export default function App() {
   const fileRef = useRef<HTMLInputElement>(null);
   const recordRef = useRef<DocRecord | null>(null);
   const docRef = useRef<OpenedDoc | null>(null);
+  const annotationsRef = useRef<Annotation[]>([]);
+  annotationsRef.current = annotations;
 
   const visible = useMemo(
     () =>
@@ -63,56 +86,70 @@ export default function App() {
   }, [visible]);
 
   const commit = useCallback((next: Annotation[]) => {
+    annotationsRef.current = next;
     setAnnotations(next);
+    if (isTauri()) return;
+
     const record = recordRef.current;
-    if (!record) return;
-    record.annotations = next;
-    saveDoc(record);
+    if (record) {
+      record.annotations = next;
+      saveDoc(record);
+    }
   }, []);
 
-  const loadDocument = useCallback(
-    async (
-      loadingTask: ReturnType<typeof pdfjsLib.getDocument>,
-      docId: string,
-      name: string,
-      size: number,
-    ) => {
-      const pdf = await loadingTask.promise;
-      const existing = loadDoc(docId);
+  const persistAnnotation = useCallback(async (docId: string, annotation: Annotation) => {
+    try {
+      await upsertAnnotation(docId, annotation);
+    } catch (error) {
+      setMessage(`保存标注失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, []);
 
-      const record: DocRecord = existing ?? {
-        schemaVersion: 1,
-        docId,
-        name,
-        size,
-        annotations: [],
-      };
-      record.name = name;
-      record.size = size;
-      saveDoc(record);
-      recordRef.current = record;
+  const removeFromLibrary = useCallback(async (docId: string, id: string) => {
+    try {
+      await deleteAnnotation(docId, id);
+    } catch (error) {
+      setMessage(`删除标注失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, []);
 
-      const opened: OpenedDoc = {
-        id: docId,
-        name,
-        pageCount: pdf.numPages,
-        pdf,
-        dispose: () => {
-          void loadingTask.destroy().catch(() => undefined);
-        },
-      };
-      docRef.current?.dispose();
-      docRef.current = opened;
+  const activate = useCallback(async (input: Activation) => {
+    docRef.current?.dispose();
 
-      setDoc(opened);
-      setAnnotations(record.annotations);
-      setToolbar(null);
-      setFocusId(null);
-      setMessage('');
-      requestAnimationFrame(() => document.querySelector('.viewer')?.scrollTo({ top: 0 }));
-    },
-    [],
-  );
+    const opened: OpenedDoc = {
+      id: input.id,
+      name: input.name,
+      pageCount: input.pageCount,
+      pdf: input.pdf,
+      dispose: () => {
+        void input.task.destroy().catch(() => undefined);
+      },
+    };
+    docRef.current = opened;
+    if (input.desktopMeta) recordRef.current = null;
+
+    annotationsRef.current = input.annotations;
+    setDoc(opened);
+    setAnnotations(input.annotations);
+    setToolbar(null);
+    setFocusId(null);
+    setMessage('');
+    requestAnimationFrame(() => document.querySelector('.viewer')?.scrollTo({ top: 0 }));
+
+    if (input.desktopMeta) {
+      try {
+        const metadata = await input.pdf.getMetadata();
+        const info = (metadata.info ?? {}) as { Title?: string; Author?: string };
+        await updateDocumentMeta(input.id, {
+          pageCount: input.pdf.numPages,
+          title: info.Title,
+          author: info.Author,
+        });
+      } catch {
+        // 元数据是锦上添花，失败不影响阅读与标注。
+      }
+    }
+  }, []);
 
   const openFile = useCallback(
     async (file: File) => {
@@ -121,14 +158,37 @@ export default function App() {
       try {
         const bytes = await file.arrayBuffer();
         const docId = await sha256Hex(bytes);
-        await loadDocument(pdfjsLib.getDocument({ data: bytes.slice(0) }), docId, file.name, file.size);
+        const existing = loadDoc(docId);
+        const record: DocRecord = existing ?? {
+          schemaVersion: 1,
+          docId,
+          name: file.name,
+          size: file.size,
+          annotations: [],
+        };
+        record.name = file.name;
+        record.size = file.size;
+        saveDoc(record);
+        recordRef.current = record;
+
+        const task = pdfjsLib.getDocument({ data: bytes.slice(0) });
+        const pdf = await task.promise;
+        await activate({
+          id: docId,
+          name: file.name,
+          size: file.size,
+          pageCount: pdf.numPages,
+          pdf,
+          task,
+          annotations: record.annotations,
+        });
       } catch (error) {
         setMessage(`打开失败：${error instanceof Error ? error.message : String(error)}`);
       } finally {
         setBusy(false);
       }
     },
-    [loadDocument],
+    [activate],
   );
 
   const choosePdf = useCallback(async () => {
@@ -140,24 +200,34 @@ export default function App() {
     setBusy(true);
     setMessage('正在选择 PDF…');
     try {
-      const meta = await pickPdf();
-      if (!meta) {
+      const path = await pickPdfPath();
+      if (!path) {
         setMessage('');
         return;
       }
+
+      setMessage('正在导入 PDF…');
+      const result = await importPdf(path);
       setMessage('正在打开 PDF…');
-      await loadDocument(
-        pdfjsLib.getDocument({ url: meta.url }),
-        meta.sha256,
-        meta.name,
-        meta.size,
-      );
+
+      const task = pdfjsLib.getDocument({ url: assetUrl(result.document.path) });
+      const pdf = await task.promise;
+      await activate({
+        id: result.document.id,
+        name: result.document.name,
+        size: result.document.size,
+        pageCount: pdf.numPages,
+        pdf,
+        task,
+        annotations: result.annotations,
+        desktopMeta: result.document,
+      });
     } catch (error) {
-      setMessage(`打开失败：${error instanceof Error ? error.message : String(error)}`);
+      setMessage(`导入失败：${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setBusy(false);
     }
-  }, [loadDocument]);
+  }, [activate]);
 
   const openSample = useCallback(async () => {
     try {
@@ -171,9 +241,59 @@ export default function App() {
   }, [openFile]);
 
   useEffect(() => {
-    if (!import.meta.env.DEV) return;
+    if (!import.meta.env.DEV || isTauri()) return;
     if (new URLSearchParams(window.location.search).has('sample')) void openSample();
   }, [openSample]);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+
+    let cancelled = false;
+    void (async () => {
+      setBusy(true);
+      setMessage('正在整理书库…');
+      try {
+        await scanLibrary();
+        if (cancelled) return;
+
+        const last = await getLastDocument();
+        if (cancelled) return;
+        if (!last) {
+          setMessage('');
+          return;
+        }
+
+        setMessage('正在打开上次的文档…');
+        const task = pdfjsLib.getDocument({ url: assetUrl(last.document.path) });
+        const pdf = await task.promise;
+        if (cancelled) {
+          void task.destroy();
+          return;
+        }
+
+        await activate({
+          id: last.document.id,
+          name: last.document.name,
+          size: last.document.size,
+          pageCount: pdf.numPages,
+          pdf,
+          task,
+          annotations: last.annotations,
+          desktopMeta: last.document,
+        });
+      } catch (error) {
+        if (!cancelled) {
+          setMessage(`整理书库失败：${error instanceof Error ? error.message : String(error)}`);
+        }
+      } finally {
+        if (!cancelled) setBusy(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activate]);
 
   const addHighlight = useCallback(
     (anchor: Anchor, color: HighlightColor, withNote: boolean) => {
@@ -183,38 +303,44 @@ export default function App() {
         page: anchor.page,
         anchor,
         color,
-        note: '',
+        kind: 'highlight',
+        body: '',
+        tags: [],
         createdAt: now,
         updatedAt: now,
       };
-      commit([...(recordRef.current?.annotations ?? []), annotation]);
+      commit([...annotationsRef.current, annotation]);
+      const docId = docRef.current?.id;
+      if (isTauri() && docId) void persistAnnotation(docId, annotation);
       setToolbar(null);
       window.getSelection()?.removeAllRanges();
       if (withNote) setEditingId(annotation.id);
     },
-    [commit],
+    [commit, persistAnnotation],
   );
 
-  const updateNote = useCallback(
-    (id: string, note: string) => {
-      commit(
-        (recordRef.current?.annotations ?? []).map((annotation) =>
-          annotation.id === id ? { ...annotation, note, updatedAt: Date.now() } : annotation,
-        ),
-      );
+  const updateBody = useCallback(
+    (docId: string, id: string, body: string) => {
+      const existing = annotationsRef.current.find((annotation) => annotation.id === id);
+      if (!existing) return;
+
+      const updated: Annotation = { ...existing, body, updatedAt: Date.now() };
+      commit(annotationsRef.current.map((annotation) => (annotation.id === id ? updated : annotation)));
+      if (isTauri()) void persistAnnotation(docId, updated);
     },
-    [commit],
+    [commit, persistAnnotation],
   );
 
   const removeAnnotation = useCallback(
-    (id: string) => {
-      commit(
-        (recordRef.current?.annotations ?? []).map((annotation) =>
-          annotation.id === id ? { ...annotation, deleted: true, updatedAt: Date.now() } : annotation,
-        ),
-      );
+    (docId: string, id: string) => {
+      const existing = annotationsRef.current.find((annotation) => annotation.id === id);
+      if (!existing) return;
+
+      const updated: Annotation = { ...existing, deleted: true, updatedAt: Date.now() };
+      commit(annotationsRef.current.map((annotation) => (annotation.id === id ? updated : annotation)));
+      if (isTauri()) void removeFromLibrary(docId, id);
     },
-    [commit],
+    [commit, removeFromLibrary],
   );
 
   const jumpTo = useCallback((annotation: Annotation) => {
@@ -343,15 +469,17 @@ export default function App() {
                       annotation={annotation}
                       editing={editingId === annotation.id}
                       onJump={() => jumpTo(annotation)}
-                      onNote={(note) => updateNote(annotation.id, note)}
-                      onDelete={() => removeAnnotation(annotation.id)}
+                      onBody={(body) => updateBody(doc.id, annotation.id, body)}
+                      onDelete={() => removeAnnotation(doc.id, annotation.id)}
                     />
                   ))}
                 </div>
               )}
 
               <div className="sidebar-foot">
-                标注暂存于浏览器 localStorage；桌面版将写入 SQLite 与 sidecar。
+                {desktop
+                  ? '标注写入本地 SQLite，并镜像到书库的 sidecar。'
+                  : '浏览器原型暂存于 localStorage；桌面版写入 SQLite 与 sidecar。'}
               </div>
             </aside>
           </>
@@ -372,12 +500,21 @@ export default function App() {
               >
                 打开 PDF
               </button>
-              <button type="button" className="ghost" disabled={busy} onClick={() => void openSample()}>
-                先看看示例
-              </button>
+              {!desktop && (
+                <button
+                  type="button"
+                  className="ghost"
+                  disabled={busy}
+                  onClick={() => void openSample()}
+                >
+                  先看看示例
+                </button>
+              )}
             </div>
             <p className="welcome-hint">
-              当前是锚定原型：标注只存在浏览器里，尚未接入 SQLite 与云同步。
+              {desktop
+                ? '导入的 PDF 会复制进书库；标注同时写入 SQLite 与 sidecar。'
+                : '当前是浏览器原型：标注只存在 localStorage，尚未接入 SQLite 与云同步。'}
             </p>
           </div>
         )}
@@ -416,27 +553,48 @@ interface AnnotationCardProps {
   annotation: Annotation;
   editing: boolean;
   onJump: () => void;
-  onNote: (note: string) => void;
+  onBody: (body: string) => void;
   onDelete: () => void;
 }
 
-function AnnotationCard({
-  annotation,
-  editing,
-  onJump,
-  onNote,
-  onDelete,
-}: AnnotationCardProps) {
-  const [draft, setDraft] = useState(annotation.note);
+function AnnotationCard({ annotation, editing, onJump, onBody, onDelete }: AnnotationCardProps) {
+  const [draft, setDraft] = useState(annotation.body);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const draftRef = useRef(annotation.body);
+  const savedRef = useRef(annotation.body);
+  const timerRef = useRef<number | null>(null);
+  const onBodyRef = useRef(onBody);
+  onBodyRef.current = onBody;
 
   useEffect(() => {
-    setDraft(annotation.note);
-  }, [annotation.note]);
+    setDraft(annotation.body);
+    draftRef.current = annotation.body;
+    savedRef.current = annotation.body;
+  }, [annotation.body]);
 
   useEffect(() => {
     if (editing) textareaRef.current?.focus();
   }, [editing]);
+
+  /** 输入停顿 600ms 或失焦时落盘；组件卸载时也补一次，避免切换文档丢字。 */
+  const flush = useCallback(() => {
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    if (draftRef.current === savedRef.current) return;
+    savedRef.current = draftRef.current;
+    onBodyRef.current(draftRef.current);
+  }, []);
+
+  useEffect(() => () => flush(), [flush]);
+
+  const handleChange = (value: string) => {
+    setDraft(value);
+    draftRef.current = value;
+    if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    timerRef.current = window.setTimeout(flush, 600);
+  };
 
   return (
     <article className="annotation-card" onClick={onJump}>
@@ -463,11 +621,9 @@ function AnnotationCard({
         className="note-input"
         value={draft}
         placeholder="写下你的批注…"
-        onChange={(event) => setDraft(event.target.value)}
+        onChange={(event) => handleChange(event.target.value)}
         onClick={(event) => event.stopPropagation()}
-        onBlur={() => {
-          if (draft !== annotation.note) onNote(draft);
-        }}
+        onBlur={flush}
       />
     </article>
   );

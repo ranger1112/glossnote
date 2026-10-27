@@ -41,9 +41,13 @@ Rust 侧只做 WebView 做不了或做起来不划算的事：文件系统、哈
 - 书库根目录可以由用户指到坚果云 / OneDrive / NAS 同步目录。
 - **sidecar 是可移植的真相源，SQLite 只是索引。** 删掉 `library.db` 后，扫描 `books/` + `.glossnote/annotations/` 必须能完整重建。
 
+默认位置是系统「文档」下的 `GlossNote`。要改到云盘目录，在 `%APPDATA%\com.phoebe.glossnote\settings.json` 写 `{"libraryDir": "D:\\GlossNote"}`；0.4 会提供目录选择器。
+
 ## 本地数据库
 
 位置：`%APPDATA%\com.phoebe.glossnote\library.db`，不放在书库目录里，避免云盘多端同时写坏。
+
+0.3 起启动时扫描 `books/` 与 sidecars：命中 path + size + mtime 缓存就跳过哈希，未命中才计算 SHA-256；sidecar 按 `updated_at` 合并进 DB，再回写修复。删除 DB 后可完整重建。
 
 ```sql
 documents(
@@ -184,13 +188,13 @@ Tauri 侧注意：pdf.js 的 worker 需要 `worker-src 'self'`；部分扫描件
 
 ## 原型与目标的差距
 
-0.1 原型先跑在浏览器里；0.2 已套上 Tauri 2 桌面壳，接入原生文件对话框与 asset protocol。持久化仍然是 localStorage。
+0.1 原型先跑在浏览器里；0.2 套上 Tauri 2 桌面壳，接入原生文件对话框与 asset protocol；0.3 把持久化换成 SQLite + sidecar，并在启动时扫描书库重建索引。
 
 | 能力 | 现状 |
 | --- | --- |
 | 打开文件 | 已替换为 Tauri 原生对话框 + Rust 哈希 |
-| 持久化 | 仍是 localStorage，0.3 替换为 SQLite + sidecar |
-| 单文档 | 仍是单文档，0.3 起接入书库与导入 |
+| 持久化 | 已替换为 SQLite + 哈希 sidecar |
+| 单文档 | 仍是单文档；0.4 起接入书库列表 |
 | 封面 / 搜索 | 未实现，0.4 |
 | 同步 | 未实现，0.5 |
 

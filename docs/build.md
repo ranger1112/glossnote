@@ -37,6 +37,20 @@ VCVARS      = D:\BuildTools\VC\Auxiliary\Build\vcvars64.bat
 
 不要在网关脚本里改用 `npm run tauri dev`：在这台机器上 npm 会重建子进程的 PATH，把 `_env.cmd` 加进去的 `D:\Rust\cargo\bin` 丢掉，Tauri CLI 随后报 `cargo metadata ... program not found`。直接调用 `.bin\tauri.cmd` 可以保留批处理的环境。
 
+## 数据位置
+
+| 内容 | 位置 |
+| --- | --- |
+| 书库（PDF + sidecar） | `文档\GlossNote\` |
+| SQLite 索引 | `%APPDATA%\com.phoebe.glossnote\library.db` |
+| 设置（可改 `libraryDir`） | `%APPDATA%\com.phoebe.glossnote\settings.json` |
+
+要换书库位置，在 `settings.json` 写：
+
+```json
+{ "libraryDir": "D:\\GlossNote" }
+```
+
 ## Tauri 配置要点
 
 - `tauri = { features = ["protocol-asset"] }` 与 `security.assetProtocol.enable = true` 必须同时存在，否则 `cargo check` 会直接报 allowlist 不匹配。
