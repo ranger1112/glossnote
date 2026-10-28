@@ -67,6 +67,24 @@ export function IconRefresh({ size = 16, className }: IconProps) {
   );
 }
 
+export function IconUndo({ size = 16, className }: IconProps) {
+  return (
+    <svg {...iconProps(size, className)}>
+      <path d="M9 14 4 9l5-5" />
+      <path d="M4 9h10a6 6 0 0 1 0 12h-3" />
+    </svg>
+  );
+}
+
+export function IconRedo({ size = 16, className }: IconProps) {
+  return (
+    <svg {...iconProps(size, className)}>
+      <path d="m15 14 5-5-5-5" />
+      <path d="M20 9H10a6 6 0 0 0 0 12h3" />
+    </svg>
+  );
+}
+
 export function IconSparkles({ size = 16, className }: IconProps) {
   return (
     <svg {...iconProps(size, className)}>

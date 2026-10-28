@@ -12,8 +12,10 @@ import {
   IconDownload,
   IconMoon,
   IconRefresh,
+  IconRedo,
   IconSparkles,
   IconSun,
+  IconUndo,
 } from './icons';
 import type { Anchor } from './anchoring';
 import type {
@@ -100,6 +102,8 @@ const EMPTY: Annotation[] = [];
 
 const MIN_SCALE = 0.1;
 const MAX_SCALE = 3;
+/** 撤销栈按整份标注数组存快照；50 步足够覆盖一次阅读里的误操作，内存也不至于失控。 */
+const HISTORY_LIMIT = 50;
 
 type ZoomMode = 'fit-width' | 'fit-page' | 'custom';
 
@@ -225,6 +229,7 @@ export default function App() {
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [installingUpdate, setInstallingUpdate] = useState(false);
   const [exportingPdf, setExportingPdf] = useState(false);
+  const [historyDepth, setHistoryDepth] = useState({ undo: 0, redo: 0 });
   const [findOpen, setFindOpen] = useState(false);
   const [findQuery, setFindQuery] = useState('');
   const [findResults, setFindResults] = useState<FindMatch[]>([]);
@@ -241,6 +246,9 @@ export default function App() {
   const recordRef = useRef<DocRecord | null>(null);
   const docRef = useRef<OpenedDoc | null>(null);
   const annotationsRef = useRef<Annotation[]>([]);
+  // 每条记录都是一份完整的标注数组；所有改动都走不可变更新，快照可以安全复用。
+  const undoRef = useRef<Annotation[][]>([]);
+  const redoRef = useRef<Annotation[][]>([]);
   const viewerRef = useRef<HTMLElement | null>(null);
   const currentPageRef = useRef(0);
   const scaleRef = useRef(scale);
@@ -478,17 +486,37 @@ export default function App() {
   const pageHeight = baseSize ? baseSize.height * scale : 0;
   const activeRadius = pageHeight > 1100 ? 1 : 2;
 
-  const commit = useCallback((next: Annotation[]) => {
-    annotationsRef.current = next;
-    setAnnotations(next);
-    if (isTauri()) return;
-
-    const record = recordRef.current;
-    if (record) {
-      record.annotations = next;
-      saveDoc(record);
-    }
+  const syncHistory = useCallback(() => {
+    setHistoryDepth({ undo: undoRef.current.length, redo: redoRef.current.length });
   }, []);
+
+  const resetHistory = useCallback(() => {
+    undoRef.current = [];
+    redoRef.current = [];
+    syncHistory();
+  }, [syncHistory]);
+
+  const commit = useCallback(
+    (next: Annotation[], record = true) => {
+      if (record) {
+        undoRef.current.push(annotationsRef.current);
+        if (undoRef.current.length > HISTORY_LIMIT) undoRef.current.shift();
+        redoRef.current = [];
+        syncHistory();
+      }
+
+      annotationsRef.current = next;
+      setAnnotations(next);
+      if (isTauri()) return;
+
+      const recordDoc = recordRef.current;
+      if (recordDoc) {
+        recordDoc.annotations = next;
+        saveDoc(recordDoc);
+      }
+    },
+    [syncHistory],
+  );
 
   const persistAnnotation = useCallback(async (docId: string, annotation: Annotation) => {
     try {
@@ -514,6 +542,83 @@ export default function App() {
       setMessage(`读取卡片失败：${errorText(error)}`);
     }
   }, []);
+
+  /**
+   * 撤销/重做共用：写回目标快照，并把与当前状态的差异落盘。
+   * 变更的记录要换新的 updatedAt，否则 sidecar 合并时会输给较新的墓碑。
+   */
+  const applyHistory = useCallback(
+    (target: Annotation[]) => {
+      const before = annotationsRef.current;
+      const now = Date.now();
+      const targetIds = new Set(target.map((item) => item.id));
+      const changed: Annotation[] = [];
+
+      const next = target.map((item) => {
+        if (before.includes(item)) return item;
+        const updated = { ...item, updatedAt: now };
+        changed.push(updated);
+        return updated;
+      });
+
+      // 快照里没有、当前却存在的记录：撤销「添加」时要补一条墓碑。
+      for (const item of before) {
+        if (targetIds.has(item.id)) continue;
+        changed.push({ ...item, deleted: true, updatedAt: now });
+      }
+
+      annotationsRef.current = next;
+      setAnnotations(next);
+
+      if (!isTauri()) {
+        const record = recordRef.current;
+        if (record) {
+          record.annotations = next;
+          saveDoc(record);
+        }
+        return;
+      }
+
+      const docId = docRef.current?.id;
+      if (!docId) return;
+
+      void (async () => {
+        for (const item of changed) {
+          try {
+            await upsertAnnotation(docId, item);
+          } catch (error) {
+            setMessage(`保存撤销/重做结果失败：${errorText(error)}`);
+            return;
+          }
+        }
+        // 恢复被删标注时 Rust 会让来源卡片重新可用；重新读一次卡片列表。
+        void refreshCards();
+      })();
+    },
+    [refreshCards],
+  );
+
+  const undo = useCallback(() => {
+    const previous = undoRef.current.pop();
+    if (!previous) return;
+
+    redoRef.current.push(annotationsRef.current);
+    if (redoRef.current.length > HISTORY_LIMIT) redoRef.current.shift();
+    syncHistory();
+    applyHistory(previous);
+    setMessage('已撤销上一步标注操作。');
+  }, [applyHistory, syncHistory]);
+
+  const redo = useCallback(() => {
+    const next = redoRef.current.pop();
+    if (!next) return;
+
+    undoRef.current.push(annotationsRef.current);
+    if (undoRef.current.length > HISTORY_LIMIT) undoRef.current.shift();
+    syncHistory();
+    applyHistory(next);
+    setMessage('已重做标注操作。');
+  }, [applyHistory, syncHistory]);
 
   const activate = useCallback(async (input: Activation) => {
     if (progressTimer.current !== null) {
@@ -558,6 +663,7 @@ export default function App() {
     annotationsRef.current = input.annotations;
     setDoc(opened);
     setAnnotations(input.annotations);
+    resetHistory();
     setToolbar(null);
     setFocusId(null);
     setAiPanel(null);
@@ -582,7 +688,7 @@ export default function App() {
         // 元数据是锦上添花，失败不影响阅读与标注。
       }
     }
-  }, [refreshCards]);
+  }, [refreshCards, resetHistory]);
 
   const openFile = useCallback(
     async (file: File) => {
@@ -677,6 +783,7 @@ export default function App() {
       pinnedPage.current = null;
       setDoc(null);
       setAnnotations([]);
+      resetHistory();
       setToolbar(null);
       setFocusId(null);
       setEditingId(null);
@@ -695,7 +802,7 @@ export default function App() {
     } else {
       finish();
     }
-  }, []);
+  }, [resetHistory]);
 
   const handleViewerScroll = useCallback(() => {
     if (scrollFrame.current !== null) return;
@@ -1064,11 +1171,29 @@ export default function App() {
         setFindOpen(false);
         setSearchTarget(null);
         window.getSelection()?.removeAllRanges();
+        return;
       }
+
+      if (!doc || !(event.ctrlKey || event.metaKey)) return;
+      const key = event.key.toLowerCase();
+      if (key !== 'z' && key !== 'y') return;
+
+      // 输入框内的 Ctrl+Z 留给文本本身，不撤销标注。
+      const target = event.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      if (key === 'y' || event.shiftKey) redo();
+      else undo();
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, []);
+  }, [doc, redo, undo]);
 
   return (
     <div className="app">
@@ -1155,6 +1280,31 @@ export default function App() {
                 整页
               </button>
             </div>
+          </div>
+        )}
+
+        {doc && (
+          <div className="history-controls">
+            <button
+              type="button"
+              className="theme-toggle"
+              title="撤销 (Ctrl+Z)"
+              aria-label="撤销"
+              disabled={historyDepth.undo === 0}
+              onClick={undo}
+            >
+              <IconUndo size={16} />
+            </button>
+            <button
+              type="button"
+              className="theme-toggle"
+              title="重做 (Ctrl+Shift+Z / Ctrl+Y)"
+              aria-label="重做"
+              disabled={historyDepth.redo === 0}
+              onClick={redo}
+            >
+              <IconRedo size={16} />
+            </button>
           </div>
         )}
 

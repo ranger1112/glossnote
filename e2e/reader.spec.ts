@@ -92,6 +92,49 @@ test('示例文档：划词高亮与下划线，刷新后复原', async ({ page 
   expect(errors).toEqual([]);
 });
 
+test('撤销与重做标注操作', async ({ page }) => {
+  await page.goto('/?sample');
+  await expect(
+    page.locator('.pdf-page').first().locator('.text-layer span').first(),
+  ).toBeVisible({ timeout: 30_000 });
+
+  await selectSpans(page, 1, 4);
+  await page.locator('.selection-toolbar .swatch.yellow').click();
+  await expect(page.locator('.annotation-card')).toHaveCount(1);
+  await expect(page.locator('.highlight').first()).toBeVisible();
+
+  // 撤销新增：卡片与页面上的高亮一起消失。
+  await page.keyboard.press('Control+z');
+  await expect(page.locator('.annotation-card')).toHaveCount(0);
+  await expect(page.locator('.highlight')).toHaveCount(0);
+
+  // 重做：标注回来。
+  await page.keyboard.press('Control+Shift+z');
+  await expect(page.locator('.annotation-card')).toHaveCount(1);
+
+  // 删除（两段确认）后再撤销，标注与卡片都恢复。
+  const card = page.locator('.annotation-card').first();
+  await card.locator('button.icon-button').click();
+  await card.locator('button.icon-button').click();
+  await expect(page.locator('.annotation-card')).toHaveCount(0);
+  await page.keyboard.press('Control+z');
+  await expect(page.locator('.annotation-card')).toHaveCount(1);
+
+  // 顶栏按钮与 Ctrl+Y 同样可用。
+  await page.locator('.history-controls button[aria-label="撤销"]').click();
+  await expect(page.locator('.annotation-card')).toHaveCount(0);
+  await page.locator('.history-controls button[aria-label="重做"]').click();
+  await expect(page.locator('.annotation-card')).toHaveCount(1);
+  await page.keyboard.press('Control+z');
+  await expect(page.locator('.annotation-card')).toHaveCount(0);
+  await page.keyboard.press('Control+y');
+  await expect(page.locator('.annotation-card')).toHaveCount(1);
+
+  // 撤销/重做的结果也要落盘。
+  await page.reload();
+  await expect(page.locator('.annotation-card')).toHaveCount(1);
+});
+
 test('页内查找：Ctrl+F 搜索并定位命中', async ({ page }) => {
   await page.goto('/?sample');
   await expect(

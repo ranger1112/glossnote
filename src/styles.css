@@ -345,6 +345,22 @@ select {
   color: var(--ink);
 }
 
+.history-controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.history-controls .theme-toggle:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.history-controls .theme-toggle:disabled:hover {
+  background: transparent;
+  color: var(--muted);
+}
+
 .theme-toggle.ready {
   background: var(--accent-soft);
   color: var(--accent);

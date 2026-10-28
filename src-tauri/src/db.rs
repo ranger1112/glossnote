@@ -410,6 +410,16 @@ pub fn upsert_annotation(
     )
     .map_err(|error| format!("写入标注失败：{error}"))?;
 
+    // 撤销删除会把 deleted = 0 的同一条标注写回来；来源卡片要跟着恢复可用。
+    if !annotation.deleted {
+        conn.execute(
+            "UPDATE cards SET status = 'active', updated_at = ?2
+             WHERE source_annotation_id = ?1 AND status = 'orphaned' AND deleted = 0",
+            params![annotation.id, annotation.updated_at],
+        )
+        .map_err(|error| format!("恢复卡片状态失败：{error}"))?;
+    }
+
     Ok(())
 }
 
@@ -851,6 +861,28 @@ mod tests {
 
         drop(conn);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restoring_annotation_reactivates_orphaned_card() {
+        let conn = seeded();
+        conn.execute(
+            "INSERT INTO cards
+               (id, title, body, source_annotation_id, source_doc_id, source_page, links,
+                status, created_at, updated_at)
+             VALUES ('c1', '卡片', '', 'a1', 'd1', 0, '[]', 'orphaned', 1, 1)",
+            [],
+        )
+        .unwrap();
+
+        // 撤销删除会把同一条标注以 deleted = 0 写回来。
+        let annotation = get_annotation(&conn, "a1").unwrap().unwrap();
+        upsert_annotation(&conn, "d1", &annotation).unwrap();
+
+        let status: String = conn
+            .query_row("SELECT status FROM cards WHERE id = 'c1'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(status, "active");
     }
 
     #[test]
