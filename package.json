@@ -2,6 +2,7 @@
   "name": "glossnote",
   "private": true,
   "version": "0.1.0",
+  "license": "Apache-2.0",
   "type": "module",
   "description": "GlossNote — 在文档上批注，把标注沉淀成知识。",
   "scripts": {

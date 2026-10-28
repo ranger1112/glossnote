@@ -46,4 +46,4 @@ Tauri 2 + React + TypeScript + pdf.js。标注锚定算法在 `src/anchoring.ts`
 
 ## 许可
 
-尚未确定。在确定之前，代码默认保留所有权利。
+Apache License 2.0，见 [LICENSE](LICENSE)。可自由使用、修改与再分发（含商用），需保留版权声明与许可声明。
