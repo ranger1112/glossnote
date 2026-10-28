@@ -24,6 +24,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
+    "check:versions": "node scripts/check-versions.mjs",
     "sample": "node scripts/make-sample.mjs",
     "tauri": "tauri",
     "desktop:dev": "tauri dev",

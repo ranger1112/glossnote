@@ -55,3 +55,14 @@ cargo test
 - 涉及界面变化时附截图或录屏。
 - 涉及数据格式时说明向前/向后兼容策略。
 - PR 模板里的检查项请如实勾选。
+
+## 发布
+
+维护者按以下顺序发布：
+
+1. 同步 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 的版本号（三处必须一致）。
+2. 在 `CHANGELOG.md` 顶部加对应版本段落。
+3. 提交后创建带注释的标签并推送：`git tag -a v0.1.0 -m "GlossNote 0.1.0" && git push origin v0.1.0`。
+4. `Release` workflow 会在 windows-latest 上构建 NSIS 安装包并上传到对应 Release；失败时可在 Actions 里用 `workflow_dispatch` 填同一个标签重跑。
+
+版本号遵循语义化版本；0.x 阶段不承诺数据格式稳定，但 sidecar 的旧字段必须继续可读。
