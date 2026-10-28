@@ -880,7 +880,9 @@ mod tests {
         upsert_annotation(&conn, "d1", &annotation).unwrap();
 
         let status: String = conn
-            .query_row("SELECT status FROM cards WHERE id = 'c1'", [], |row| row.get(0))
+            .query_row("SELECT status FROM cards WHERE id = 'c1'", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(status, "active");
     }
