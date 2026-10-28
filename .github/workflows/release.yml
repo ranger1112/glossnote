@@ -46,12 +46,24 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: 生成 SHA-256 校验文件
+        shell: bash
+        run: |
+          cd src-tauri/target/release/bundle/nsis
+          sha256sum *.exe > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
       - name: 上传安装包到 Release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag || github.ref_name }}
         run: |
+          NOTES=".github/release-notes/${TAG}.md"
+          [ -f "$NOTES" ] || NOTES="CHANGELOG.md"
           gh release view "$TAG" >/dev/null 2>&1 \
-            || gh release create "$TAG" --title "GlossNote ${TAG#v}" --notes-file CHANGELOG.md
-          gh release upload "$TAG" src-tauri/target/release/bundle/nsis/*.exe --clobber
+            || gh release create "$TAG" --title "GlossNote ${TAG#v}" --notes-file "$NOTES"
+          gh release upload "$TAG" \
+            src-tauri/target/release/bundle/nsis/*.exe \
+            src-tauri/target/release/bundle/nsis/SHA256SUMS.txt \
+            --clobber

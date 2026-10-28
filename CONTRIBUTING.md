@@ -61,8 +61,8 @@ cargo test
 维护者按以下顺序发布：
 
 1. 同步 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 的版本号（三处必须一致）。
-2. 在 `CHANGELOG.md` 顶部加对应版本段落。
+2. 在 `CHANGELOG.md` 顶部加对应版本段落；需要更贴用户的 Release 说明时，在 `.github/release-notes/vX.Y.Z.md` 另写一份（缺省使用 CHANGELOG）。
 3. 提交后创建带注释的标签并推送：`git tag -a v0.1.0 -m "GlossNote 0.1.0" && git push origin v0.1.0`。
-4. `Release` workflow 会在 windows-latest 上构建 NSIS 安装包并上传到对应 Release；失败时可在 Actions 里用 `workflow_dispatch` 填同一个标签重跑。
+4. `Release` workflow 会在 windows-latest 上构建 NSIS 安装包、生成 `SHA256SUMS.txt` 并上传到对应 Release；失败时可在 Actions 里用 `workflow_dispatch` 填同一个标签重跑。
 
 版本号遵循语义化版本；0.x 阶段不承诺数据格式稳定，但 sidecar 的旧字段必须继续可读。
