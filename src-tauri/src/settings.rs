@@ -58,14 +58,34 @@ pub fn path(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| format!("定位应用数据目录失败：{error}"))
 }
 
-pub fn load(app: &AppHandle) -> AppSettings {
+/// 解析失败时把坏文件改名留档，再用默认值启动。
+/// 直接回退默认值会让用户以为书库「空了」，而且下一次保存会覆盖掉原文件。
+pub fn load_reporting(app: &AppHandle) -> (AppSettings, Option<PathBuf>) {
     let Ok(path) = path(app) else {
-        return AppSettings::default();
+        return (AppSettings::default(), None);
     };
-    let Ok(text) = fs::read_to_string(path) else {
-        return AppSettings::default();
+    let Ok(text) = fs::read_to_string(&path) else {
+        return (AppSettings::default(), None);
     };
-    serde_json::from_str(&text).unwrap_or_default()
+    match serde_json::from_str::<AppSettings>(&text) {
+        Ok(settings) => (settings, None),
+        Err(error) => {
+            eprintln!("设置文件无法解析：{error}");
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis())
+                .unwrap_or(0);
+            let backup = path.with_extension(format!("json.broken-{stamp}"));
+            match fs::rename(&path, &backup) {
+                Ok(()) => (AppSettings::default(), Some(backup)),
+                Err(_) => (AppSettings::default(), None),
+            }
+        }
+    }
+}
+
+pub fn load(app: &AppHandle) -> AppSettings {
+    load_reporting(app).0
 }
 
 pub fn save(app: &AppHandle, settings: &AppSettings) -> Result<(), String> {

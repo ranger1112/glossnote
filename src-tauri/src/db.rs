@@ -1,17 +1,77 @@
 use crate::models::{Annotation, Card, CardRef, CardView, Chunk, DocumentRow, SearchHit};
 use rusqlite::{params, Connection, OptionalExtension, Row};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const DOCUMENT_SELECT: &str = "SELECT d.id, d.name, d.title, d.author, d.page_count, d.rel_path, d.size, d.mtime, d.added_at, d.last_opened_at, d.cover, d.last_page, (SELECT COUNT(*) FROM annotations a WHERE a.doc_id = d.id AND a.deleted = 0) FROM documents d";
 
 pub fn open(path: &Path) -> Result<Connection, String> {
     let conn = Connection::open(path).map_err(|error| format!("打开数据库失败：{error}"))?;
+    // 云盘同步目录里的库文件偶尔会被别的进程短暂锁住；等一会儿比直接报错好。
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(|error| format!("设置数据库超时失败：{error}"))?;
     conn.pragma_update(None, "journal_mode", "WAL")
         .map_err(|error| format!("设置 WAL 失败：{error}"))?;
     conn.pragma_update(None, "synchronous", "NORMAL")
         .map_err(|error| format!("设置同步模式失败：{error}"))?;
     migrate(&conn)?;
     Ok(conn)
+}
+
+/// 索引文件实在打不开时的兜底：本次会话用内存库。
+/// PDF 与 sidecar 不受影响，标注照常写入书库，只是阅读进度等本机状态不落盘。
+pub fn open_memory() -> Result<Connection, String> {
+    let conn = Connection::open_in_memory().map_err(|error| format!("创建临时索引失败：{error}"))?;
+    migrate(&conn)?;
+    Ok(conn)
+}
+
+/// 打不开或已损坏时，把旧库改名留档，再从空库重建。
+/// 索引是派生数据：`books/` + sidecar 才是真相源，重开一次不会丢标注。
+pub fn open_recovering(path: &Path) -> Result<(Connection, Option<PathBuf>), String> {
+    match open(path) {
+        Ok(conn) => Ok((conn, None)),
+        // 只在确认是坏库时才重建。磁盘满、被别的进程锁住这类临时错误
+        // 换库解决不了，还会白白丢掉索引。
+        Err(first) if looks_corrupt(&first) => {
+            let backup = backup_database(path)
+                .map_err(|error| format!("{first}；备份旧索引失败：{error}"))?;
+            let conn = open(path).map_err(|again| format!("{first}；重建索引仍失败：{again}"))?;
+            Ok((conn, Some(backup)))
+        }
+        Err(first) => Err(first),
+    }
+}
+
+fn looks_corrupt(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    lower.contains("not a database")
+        || lower.contains("malformed")
+        || lower.contains("corrupt")
+        || lower.contains("encrypted")
+}
+
+fn backup_database(path: &Path) -> Result<PathBuf, String> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    let backup = path.with_extension(format!("db.broken-{stamp}"));
+    std::fs::rename(path, &backup).map_err(|error| format!("{error}"))?;
+
+    // -wal / -shm 必须跟着走，否则新库会把旧日志当成自己的。
+    for suffix in ["-wal", "-shm"] {
+        let extra = append_suffix(path, suffix);
+        if extra.exists() {
+            let _ = std::fs::rename(&extra, append_suffix(&backup, suffix));
+        }
+    }
+    Ok(backup)
+}
+
+fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
 }
 
 fn migrate(conn: &Connection) -> Result<(), String> {
@@ -807,6 +867,26 @@ mod tests {
         };
         upsert_annotation(&conn, "d1", &annotation).unwrap();
         conn
+    }
+
+    #[test]
+    fn recovers_from_corrupt_database() {
+        let dir = std::env::temp_dir().join(format!("glossnote-db-recover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("library.db");
+        std::fs::write(&path, b"this is not a sqlite database").unwrap();
+
+        let (conn, backup) = open_recovering(&path).unwrap();
+        let backup = backup.expect("坏库应当被备份");
+        assert!(backup.exists());
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

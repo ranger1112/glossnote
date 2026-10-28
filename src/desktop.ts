@@ -21,6 +21,11 @@ export function scanLibrary(): Promise<ScanReport> {
   return invoke('scan_library');
 }
 
+/** 启动时如果重建过索引或回退过设置，返回一条提示；只会返回一次。 */
+export function startupNotice(): Promise<string | null> {
+  return invoke('startup_notice');
+}
+
 /** 切换书库目录；Rust 会清空旧索引并扫描新目录。 */
 export function setLibraryRoot(path: string): Promise<ScanReport> {
   return invoke('set_library_root', { path });

@@ -32,6 +32,7 @@ import {
   listCards,
   openDocument,
   saveProgress,
+  startupNotice,
   updateCard,
   updateDocumentMeta,
   upsertAnnotation,
@@ -290,6 +291,16 @@ export default function App() {
     void aiSettings()
       .then(setAi)
       .catch((error) => setMessage(`读取 AI 设置失败：${errorText(error)}`));
+  }, [desktop]);
+
+  // 索引重建、设置回退这类启动事件要告诉用户，否则他们只会看到「书库空了」。
+  useEffect(() => {
+    if (!desktop) return;
+    void startupNotice()
+      .then((notice) => {
+        if (notice) setMessage(notice);
+      })
+      .catch(() => undefined);
   }, [desktop]);
 
   const openAiSettings = useCallback(async () => {

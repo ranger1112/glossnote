@@ -26,6 +26,17 @@ fn library_info(app: AppHandle) -> Result<LibraryInfo, String> {
     library::info(&app)
 }
 
+/// 启动时的恢复提示只给用户看一次。
+#[tauri::command(async)]
+fn startup_notice(app: AppHandle) -> Option<String> {
+    let state = app.state::<AppState>();
+    let mut slot = state
+        .startup_notice
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    slot.take()
+}
+
 #[tauri::command]
 async fn scan_library(app: AppHandle) -> Result<ScanReport, String> {
     tauri::async_runtime::spawn_blocking(move || library::scan(&app))
@@ -213,6 +224,14 @@ fn update_document_meta(
 
 fn main() {
     tauri::Builder::default()
+        // 单实例要最先注册：第二个进程在碰数据库和 sidecar 之前就退出。
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let handle = app.handle().clone();
@@ -222,19 +241,56 @@ fn main() {
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
             fs::create_dir_all(&app_data).map_err(std::io::Error::other)?;
 
-            let connection =
-                db::open(&app_data.join("library.db")).map_err(std::io::Error::other)?;
+            // 先读设置（坏文件会被改名留档），再解析书库目录。
+            let (_, settings_backup) = settings::load_reporting(&handle);
+            let (connection, db_backup, db_degraded) =
+                match db::open_recovering(&app_data.join("library.db")) {
+                    Ok((conn, backup)) => (conn, backup, None),
+                    // 坏库已经救不回来（权限、磁盘错误）：用内存库先把这次会话跑起来。
+                    Err(error) => (
+                        db::open_memory().map_err(std::io::Error::other)?,
+                        None,
+                        Some(error),
+                    ),
+                };
             let library_root = library::resolve_root(&handle).map_err(std::io::Error::other)?;
             library::ensure_dirs(&library_root).map_err(std::io::Error::other)?;
+
+            let mut notice = String::new();
+            if let Some(error) = &db_degraded {
+                notice.push_str(&format!(
+                    "索引文件无法打开（{error}），本次使用临时索引。PDF 与标注不受影响；释放占用或修复权限后重启即可恢复阅读进度。"
+                ));
+            }
+            if let Some(path) = &db_backup {
+                if !notice.is_empty() {
+                    notice.push('\n');
+                }
+                notice.push_str(&format!(
+                    "书库索引已损坏，旧文件备份为 {}。本次从书库目录里的标注文件重建，内容不会丢。",
+                    path.display()
+                ));
+            }
+            if let Some(path) = &settings_backup {
+                if !notice.is_empty() {
+                    notice.push('\n');
+                }
+                notice.push_str(&format!(
+                    "设置文件无法解析，已备份为 {}，书库位置与 AI 配置回到默认值。",
+                    path.display()
+                ));
+            }
 
             handle.manage(AppState {
                 db: Mutex::new(connection),
                 library_root: RwLock::new(library_root),
+                startup_notice: Mutex::new((!notice.is_empty()).then_some(notice)),
             });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             library_info,
+            startup_notice,
             scan_library,
             set_library_root,
             import_pdf,

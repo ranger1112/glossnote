@@ -49,6 +49,8 @@ Rust 侧只做 WebView 做不了或做起来不划算的事：文件系统、哈
 
 位置：`%APPDATA%\com.phoebe.glossnote\library.db`，不放在书库目录里，避免云盘多端同时写坏。
 
+启动时如果 `library.db` 打不开或已损坏，会把旧文件（连同 `-wal` / `-shm`）改名为 `library.db.broken-<时间戳>`，再从空库重建——索引是派生物，`books/` + sidecar 才是真相源。`settings.json` 解析失败同样会改名备份。两种情况都会通过 `startup_notice` 在界面上提示一次。应用启用单实例保护，重复启动会聚焦已有窗口，避免两个进程同时写同一个库和 sidecar。
+
 0.3 起启动时扫描 `books/` 与 sidecars：命中 path + size + mtime 缓存就跳过哈希，未命中才计算 SHA-256；sidecar 按 `updated_at` 合并进 DB，内容有变化时才回写修复（内容相同不碰文件，避免云盘把每次启动都当成一次修改）。删除 DB 后可完整重建。0.5 起扫描还负责识别云盘冲突副本、归档冲突文件，并报告合并结果。
 
 ```sql
