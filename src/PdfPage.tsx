@@ -79,6 +79,59 @@ function pointAt(model: PageModel, offset: number): Point | null {
   };
 }
 
+/**
+ * pdf.js 的文本项按字形/词切分，相邻矩形常常互相压边。逐块绘制时重叠处会被
+ * multiply 两次，看起来像一条条深色接缝。把同一行、横向相接的矩形先合并。
+ */
+function mergeRects(rects: NormRect[]): NormRect[] {
+  if (rects.length < 2) return rects;
+
+  // 归一化坐标下的容差：约 4px（按页面宽度 1000px 估）。pdf.js 的相邻文本项
+  // 常有 1–2px 的缝，缝太大会在字间留下未着色的白点。
+  const EPS = 0.004;
+  const sorted = [...rects].sort((a, b) => a.y - b.y || a.x - b.x);
+  const lines: NormRect[][] = [];
+
+  for (const rect of sorted) {
+    const line = lines[lines.length - 1];
+    if (line) {
+      const first = line[0];
+      const overlap = Math.min(first.y + first.h, rect.y + rect.h) - Math.max(first.y, rect.y);
+      // 高度重合超过一半就算同一行。
+      if (overlap > Math.min(first.h, rect.h) * 0.5) {
+        line.push(rect);
+        continue;
+      }
+    }
+    lines.push([rect]);
+  }
+
+  const merged: NormRect[] = [];
+  for (const line of lines) {
+    line.sort((a, b) => a.x - b.x);
+    let current = { ...line[0] };
+    for (const rect of line.slice(1)) {
+      const touches = rect.x <= current.x + current.w + EPS;
+      if (touches) {
+        const right = Math.max(current.x + current.w, rect.x + rect.w);
+        const bottom = Math.max(current.y + current.h, rect.y + rect.h);
+        current = {
+          x: current.x,
+          y: Math.min(current.y, rect.y),
+          w: right - current.x,
+          h: bottom - Math.min(current.y, rect.y),
+        };
+      } else {
+        merged.push(current);
+        current = { ...rect };
+      }
+    }
+    merged.push(current);
+  }
+
+  return merged;
+}
+
 function rectsForRange(
   model: PageModel,
   start: number,
@@ -100,7 +153,7 @@ function rectsForRange(
   const pageRect = pageElement.getBoundingClientRect();
   if (pageRect.width === 0 || pageRect.height === 0) return [];
 
-  return Array.from(range.getClientRects())
+  const raw = Array.from(range.getClientRects())
     .filter((rect) => rect.width > 0.5 && rect.height > 0.5)
     .map((rect) => ({
       x: (rect.left - pageRect.left) / pageRect.width,
@@ -108,6 +161,8 @@ function rectsForRange(
       w: rect.width / pageRect.width,
       h: rect.height / pageRect.height,
     }));
+
+  return mergeRects(raw);
 }
 
 function offsetFromDom(node: Node, offset: number, model: PageModel): number | null {
@@ -162,7 +217,8 @@ export const PdfPage = memo(function PdfPage({
       if (!resolved) continue;
 
       const computed = rectsForRange(model, resolved.start, resolved.end, pageElement);
-      const rects = computed.length > 0 ? computed : annotation.anchor.rects;
+      // 旧标注存的是逐字形矩形，绘制前同样合并，避免历史高亮出现接缝。
+      const rects = computed.length > 0 ? computed : mergeRects(annotation.anchor.rects);
 
       for (const rect of rects) {
         const element = document.createElement('div');

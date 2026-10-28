@@ -925,6 +925,8 @@ select {
 
 .pdf-page {
   position: relative;
+  /* 建立独立的混合组：高亮层才能和 canvas 相乘，而不是和页面背景相乘。 */
+  isolation: isolate;
   margin: 0 auto 30px;
   border-radius: 2px;
   background: #ffffff;
@@ -940,31 +942,31 @@ select {
 .highlight-layer {
   position: absolute;
   inset: 0;
-  z-index: 1;
+  /* 不能设 z-index：那会新建层叠上下文，multiply 只跟空图层混合，文字就被盖住。 */
   pointer-events: none;
 }
 
 .highlight {
   position: absolute;
   border-radius: 2px;
-  opacity: 0.55;
+  /* multiply 让底色透出来：纸面粉底 + 半透明黄 = 仍看得见字的荧光笔效果。 */
   mix-blend-mode: multiply;
 }
 
 .highlight-yellow {
-  background: #fde047;
+  background: #ffe066;
 }
 
 .highlight-green {
-  background: #86efac;
+  background: #a7f3c9;
 }
 
 .highlight-blue {
-  background: #93c5fd;
+  background: #b8d4ff;
 }
 
 .highlight-pink {
-  background: #f9a8d4;
+  background: #ffc4e1;
 }
 
 .highlight.focused {
@@ -1331,19 +1333,19 @@ select {
 }
 
 .swatch.yellow {
-  background: #fde047;
+  background: #ffe066;
 }
 
 .swatch.green {
-  background: #86efac;
+  background: #a7f3c9;
 }
 
 .swatch.blue {
-  background: #93c5fd;
+  background: #b8d4ff;
 }
 
 .swatch.pink {
-  background: #f9a8d4;
+  background: #ffc4e1;
 }
 
 .toolbar-sep {
