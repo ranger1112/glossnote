@@ -23,6 +23,8 @@ interface PdfPageProps {
   focusId: string | null;
   /** context 是选区前后各一段正文，供 AI 解释使用；不写进锚点。 */
   onSelect: (anchor: Anchor, box: { x: number; y: number }, context: string) => void;
+  /** 页内查找的当前命中；token 变化时滚动到这一行。 */
+  searchMatch?: { start: number; end: number; token: number };
 }
 
 interface ItemInfo {
@@ -222,6 +224,7 @@ export const PdfPage = memo(function PdfPage({
   annotations,
   focusId,
   onSelect,
+  searchMatch,
 }: PdfPageProps) {
   const pageRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -235,6 +238,9 @@ export const PdfPage = memo(function PdfPage({
   annotationsRef.current = annotations;
   const focusRef = useRef(focusId);
   focusRef.current = focusId;
+  const searchRef = useRef(searchMatch);
+  searchRef.current = searchMatch;
+  const lastSearchToken = useRef(0);
 
   const [size, setSize] = useState(baseSize);
   const [ready, setReady] = useState(false);
@@ -280,6 +286,32 @@ export const PdfPage = memo(function PdfPage({
         element.style.width = `${rect.w * pageRect.width}px`;
         element.style.height = `${rect.h * pageRect.height}px`;
         layer.append(element);
+      }
+    }
+
+    const search = searchRef.current;
+    if (!search) return;
+
+    const hits = rectsForRange(model, search.start, search.end, pageElement);
+    for (const rect of hits) {
+      const element = document.createElement('div');
+      element.className = 'search-hit';
+      element.style.left = `${rect.x * pageRect.width}px`;
+      element.style.top = `${rect.y * pageRect.height}px`;
+      element.style.width = `${rect.w * pageRect.width}px`;
+      element.style.height = `${rect.h * pageRect.height}px`;
+      layer.append(element);
+    }
+
+    // 同一个 token 只滚动一次，避免批注变化时反复把页面拽回命中处。
+    if (hits.length > 0 && lastSearchToken.current !== search.token) {
+      lastSearchToken.current = search.token;
+      const target = pageRect.top + (hits[0].y + hits[0].h / 2) * pageRect.height;
+      const viewer = pageElement.closest<HTMLElement>('.viewer');
+      if (viewer) {
+        const viewerRect = viewer.getBoundingClientRect();
+        const delta = target - (viewerRect.top + viewerRect.height / 2);
+        viewer.scrollTo({ top: Math.max(0, viewer.scrollTop + delta), behavior: 'instant' });
       }
     }
   }, []);
@@ -412,7 +444,7 @@ export const PdfPage = memo(function PdfPage({
 
   useEffect(() => {
     if (ready) paintHighlights();
-  }, [ready, annotations, focusId, paintHighlights]);
+  }, [ready, annotations, focusId, searchMatch, paintHighlights]);
 
   const handleMouseUp = useCallback(() => {
     // 等浏览器完成本次选区的收尾，再读取 range。

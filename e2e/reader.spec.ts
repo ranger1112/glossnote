@@ -91,3 +91,25 @@ test('示例文档：划词高亮与下划线，刷新后复原', async ({ page 
 
   expect(errors).toEqual([]);
 });
+
+test('页内查找：Ctrl+F 搜索并定位命中', async ({ page }) => {
+  await page.goto('/?sample');
+  await expect(
+    page.locator('.pdf-page').first().locator('.text-layer span').first(),
+  ).toBeVisible({ timeout: 30_000 });
+
+  await page.keyboard.press('Control+f');
+  const input = page.locator('.find-bar input');
+  await expect(input).toBeVisible();
+  await input.fill('Anchoring');
+
+  await expect(page.locator('.find-count')).toContainText('/', { timeout: 20_000 });
+  await expect(page.locator('.search-hit').first()).toBeVisible();
+
+  const firstCount = (await page.locator('.find-count').textContent()) ?? '';
+  await page.locator('.find-bar button[title="下一个"]').click();
+  await expect(page.locator('.find-count')).not.toHaveText(firstCount);
+
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.find-bar')).toHaveCount(0);
+});

@@ -26,6 +26,8 @@ import type {
   HighlightColor,
 } from './types';
 import { loadDoc, saveDoc, sha256Hex } from './storage';
+import { joinPdfItems } from './pdfText';
+import type { PdfTextItem } from './pdfjs';
 import { errorText } from './errors';
 import { isTauri, pickPdfSavePath } from './platform';
 import { findUpdate, installUpdate, type AvailableUpdate } from './updater';
@@ -59,6 +61,20 @@ interface ToolbarState {
   context: string;
   x: number;
   y: number;
+}
+
+interface FindMatch {
+  page: number;
+  start: number;
+  end: number;
+  snippet: string;
+}
+
+interface SearchTarget {
+  page: number;
+  start: number;
+  end: number;
+  token: number;
 }
 
 interface Activation {
@@ -209,7 +225,18 @@ export default function App() {
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [installingUpdate, setInstallingUpdate] = useState(false);
   const [exportingPdf, setExportingPdf] = useState(false);
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState('');
+  const [findResults, setFindResults] = useState<FindMatch[]>([]);
+  const [findIndex, setFindIndex] = useState(-1);
+  const [findBusy, setFindBusy] = useState(false);
+  const [findProgress, setFindProgress] = useState({ done: 0, total: 0 });
+  const [findTruncated, setFindTruncated] = useState(false);
+  const [searchTarget, setSearchTarget] = useState<SearchTarget | null>(null);
 
+  const findInputRef = useRef<HTMLInputElement>(null);
+  const findTokenRef = useRef(0);
+  const pageTextsRef = useRef<Map<number, string>>(new Map());
   const fileRef = useRef<HTMLInputElement>(null);
   const recordRef = useRef<DocRecord | null>(null);
   const docRef = useRef<OpenedDoc | null>(null);
@@ -855,6 +882,145 @@ export default function App() {
     [],
   );
 
+  // 换书或关书时清空搜索缓存与结果。
+  useEffect(() => {
+    pageTextsRef.current.clear();
+    findTokenRef.current += 1;
+    setFindOpen(false);
+    setFindQuery('');
+    setFindResults([]);
+    setFindIndex(-1);
+    setSearchTarget(null);
+    setFindBusy(false);
+    setFindTruncated(false);
+  }, [doc?.id]);
+
+  useEffect(() => {
+    if (!findOpen || !doc) return;
+    const query = findQuery.trim();
+    if (!query) {
+      setFindResults([]);
+      setFindIndex(-1);
+      setSearchTarget(null);
+      setFindBusy(false);
+      setFindTruncated(false);
+      return;
+    }
+
+    const token = ++findTokenRef.current;
+    setFindBusy(true);
+    setFindTruncated(false);
+    setFindProgress({ done: 0, total: doc.pageCount });
+
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        const needle = query.toLowerCase();
+        const matches: FindMatch[] = [];
+        let truncated = false;
+
+        for (let pageIndex = 0; pageIndex < doc.pageCount; pageIndex += 1) {
+          if (findTokenRef.current !== token) return;
+
+          let text = pageTextsRef.current.get(pageIndex);
+          if (text === undefined) {
+            try {
+              const page = await doc.pdf.getPage(pageIndex + 1);
+              const content = await page.getTextContent();
+              const items = (content.items as unknown[]).filter(
+                (item): item is PdfTextItem => typeof (item as PdfTextItem).str === 'string',
+              );
+              text = joinPdfItems(items).text;
+              pageTextsRef.current.set(pageIndex, text);
+            } catch (error) {
+              console.warn('提取页面文字失败', pageIndex + 1, error);
+              text = '';
+            }
+          }
+
+          const haystack = text.toLowerCase();
+          let from = 0;
+          while (matches.length < 500) {
+            const index = haystack.indexOf(needle, from);
+            if (index < 0) break;
+            matches.push({
+              page: pageIndex,
+              start: index,
+              end: index + needle.length,
+              snippet: text
+                .slice(Math.max(0, index - 16), Math.min(text.length, index + needle.length + 42))
+                .replace(/\s+/g, ' ')
+                .trim(),
+            });
+            from = index + Math.max(1, needle.length);
+          }
+          if (matches.length >= 500) {
+            truncated = true;
+            break;
+          }
+          if (pageIndex % 16 === 0) {
+            setFindProgress({ done: pageIndex + 1, total: doc.pageCount });
+          }
+        }
+
+        if (findTokenRef.current !== token) return;
+        setFindBusy(false);
+        setFindTruncated(truncated);
+        setFindResults(matches);
+        if (matches.length > 0) {
+          setFindIndex(0);
+          setSearchTarget({
+            page: matches[0].page,
+            start: matches[0].start,
+            end: matches[0].end,
+            token: Date.now(),
+          });
+          goToPage(matches[0].page);
+        } else {
+          setFindIndex(-1);
+          setSearchTarget(null);
+        }
+      })();
+    }, 250);
+
+    return () => {
+      window.clearTimeout(timer);
+      findTokenRef.current += 1;
+    };
+  }, [doc, findOpen, findQuery, goToPage]);
+
+  const stepFind = useCallback(
+    (delta: number) => {
+      if (findResults.length === 0) return;
+      const next = (findIndex + delta + findResults.length) % findResults.length;
+      const match = findResults[next];
+      setFindIndex(next);
+      setSearchTarget({
+        page: match.page,
+        start: match.start,
+        end: match.end,
+        token: Date.now(),
+      });
+      goToPage(match.page);
+    },
+    [findIndex, findResults, goToPage],
+  );
+
+  useEffect(() => {
+    if (!findOpen) return;
+    findInputRef.current?.focus();
+    findInputRef.current?.select();
+  }, [findOpen]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'f' || !doc) return;
+      event.preventDefault();
+      setFindOpen(true);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [doc]);
+
   const handleSelect = useCallback(
     (anchor: Anchor, box: { x: number; y: number }, context: string) => {
       setToolbar({
@@ -895,6 +1061,8 @@ export default function App() {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         setToolbar(null);
+        setFindOpen(false);
+        setSearchTarget(null);
         window.getSelection()?.removeAllRanges();
       }
     };
@@ -1082,6 +1250,70 @@ export default function App() {
         />
       </header>
 
+      {doc && findOpen && (
+        <div className="find-bar" role="search">
+          <input
+            ref={findInputRef}
+            value={findQuery}
+            placeholder="在本书中查找…"
+            aria-label="在本书中查找"
+            onChange={(event) => setFindQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                stepFind(event.shiftKey ? -1 : 1);
+              } else if (event.key === 'Escape') {
+                setFindOpen(false);
+                setSearchTarget(null);
+              }
+            }}
+          />
+          <span className="find-count">
+            {findBusy
+              ? `搜索中 ${findProgress.done}/${findProgress.total}…`
+              : findQuery.trim()
+                ? findResults.length > 0
+                  ? `${findIndex + 1} / ${findResults.length}${findTruncated ? '+' : ''}`
+                  : '无结果'
+                : ''}
+          </span>
+          {!findBusy && findResults[findIndex] && (
+            <span className="find-snippet" title={findResults[findIndex].snippet}>
+              {findResults[findIndex].snippet}
+            </span>
+          )}
+          <button
+            type="button"
+            title="上一个"
+            aria-label="上一个"
+            disabled={findResults.length === 0}
+            onClick={() => stepFind(-1)}
+          >
+            ↑
+          </button>
+          <button
+            type="button"
+            title="下一个"
+            aria-label="下一个"
+            disabled={findResults.length === 0}
+            onClick={() => stepFind(1)}
+          >
+            ↓
+          </button>
+          <button
+            type="button"
+            title="关闭"
+            aria-label="关闭查找"
+            onClick={() => {
+              setFindOpen(false);
+              setSearchTarget(null);
+            }}
+          >
+            ×
+          </button>
+        </div>
+      )}
+
       {message && (
         <div
           className={`status-bar ${
@@ -1113,6 +1345,15 @@ export default function App() {
                   annotations={byPage.get(index) ?? EMPTY}
                   focusId={focusId}
                   onSelect={handleSelect}
+                  searchMatch={
+                    searchTarget?.page === index
+                      ? {
+                          start: searchTarget.start,
+                          end: searchTarget.end,
+                          token: searchTarget.token,
+                        }
+                      : undefined
+                  }
                 />
               ))}
           </section>

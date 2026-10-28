@@ -1091,6 +1091,82 @@ select {
   outline: 1px dashed rgba(220, 38, 38, 0.55);
 }
 
+.search-hit {
+  position: absolute;
+  border-radius: 2px;
+  background: rgba(245, 158, 11, 0.22);
+  outline: 2px solid rgba(217, 119, 6, 0.85);
+  mix-blend-mode: multiply;
+}
+
+.find-bar {
+  position: fixed;
+  top: 58px;
+  left: 50%;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(760px, calc(100vw - 48px));
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-full);
+  background: var(--panel);
+  box-shadow: var(--shadow-md);
+  transform: translateX(-50%);
+}
+
+.find-bar input {
+  width: 220px;
+  min-width: 120px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-full);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.find-bar input:focus {
+  outline: 2px solid var(--accent-line);
+}
+
+.find-count {
+  flex: none;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.find-snippet {
+  overflow: hidden;
+  max-width: 280px;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.find-bar button {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-xs);
+  color: var(--muted);
+  font-size: 14px;
+  place-items: center;
+}
+
+.find-bar button:hover:not(:disabled) {
+  background: var(--surface-strong);
+  color: var(--ink);
+}
+
+.find-bar button:disabled {
+  cursor: default;
+  opacity: 0.35;
+}
+
 @keyframes highlight-pulse {
   0% {
     box-shadow: 0 0 0 0 rgba(75, 92, 196, 0.55);
