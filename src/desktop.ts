@@ -74,6 +74,11 @@ export function exportMarkdown(path: string, docId?: string): Promise<string> {
   return invoke('export_markdown', { path, docId: docId ?? null });
 }
 
+/** 导出一份把高亮/下划线/删除线与批注写进去的 PDF 副本。 */
+export function exportAnnotatedPdf(docId: string, path: string): Promise<string> {
+  return invoke('export_annotated_pdf', { docId, path });
+}
+
 export function listCards(): Promise<CardView[]> {
   return invoke('list_cards');
 }

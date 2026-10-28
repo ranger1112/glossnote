@@ -838,6 +838,28 @@ pub fn search(app: &AppHandle, query: String) -> Result<Vec<SearchHit>, String> 
     db::search_annotations(&conn, &query)
 }
 
+/// 导出一份带 GlossNote 标注的 PDF 副本；只读取索引与源文件。
+pub fn export_pdf(app: &AppHandle, doc_id: &str, path: &str) -> Result<String, String> {
+    let state = app.state::<AppState>();
+    let root = state.root();
+
+    let (source, annotations) = {
+        let conn = state
+            .db
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let row = db::find_by_id(&conn, doc_id)?.ok_or_else(|| "文档不存在".to_string())?;
+        let source = root.join(row.rel_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+        if !source.exists() {
+            return Err("文档文件不存在".to_string());
+        }
+        (source, db::list_annotations(&conn, doc_id)?)
+    };
+
+    let count = crate::pdf_export::append_annotations(&source, Path::new(path), &annotations)?;
+    Ok(format!("已导出 {count} 条标注"))
+}
+
 pub fn export_markdown(
     app: &AppHandle,
     path: String,

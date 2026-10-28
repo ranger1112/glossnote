@@ -5,6 +5,7 @@ mod db;
 mod fsrs;
 mod library;
 mod models;
+mod pdf_export;
 mod settings;
 mod state;
 
@@ -75,6 +76,17 @@ fn save_progress(app: AppHandle, doc_id: String, last_page: u32) -> Result<(), S
 #[tauri::command(async)]
 fn search_annotations(app: AppHandle, query: String) -> Result<Vec<SearchHit>, String> {
     library::search(&app, query)
+}
+
+#[tauri::command]
+async fn export_annotated_pdf(
+    app: AppHandle,
+    doc_id: String,
+    path: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || library::export_pdf(&app, &doc_id, &path))
+        .await
+        .map_err(|error| format!("导出 PDF 任务失败：{error}"))?
 }
 
 #[tauri::command]
@@ -285,6 +297,7 @@ fn main() {
             save_cover,
             save_progress,
             search_annotations,
+            export_annotated_pdf,
             export_markdown,
             list_documents,
             upsert_annotation,

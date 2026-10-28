@@ -7,7 +7,14 @@ import { Review } from './Review';
 import { CardEditor, type CardDraft } from './CardEditor';
 import { AiPanel } from './AiPanel';
 import { AiSettingsModal } from './AiSettingsModal';
-import { IconArrowLeft, IconMoon, IconRefresh, IconSparkles, IconSun } from './icons';
+import {
+  IconArrowLeft,
+  IconDownload,
+  IconMoon,
+  IconRefresh,
+  IconSparkles,
+  IconSun,
+} from './icons';
 import type { Anchor } from './anchoring';
 import type {
   AiSettingsView,
@@ -20,13 +27,14 @@ import type {
 } from './types';
 import { loadDoc, saveDoc, sha256Hex } from './storage';
 import { errorText } from './errors';
-import { isTauri } from './platform';
+import { isTauri, pickPdfSavePath } from './platform';
 import { findUpdate, installUpdate, type AvailableUpdate } from './updater';
 import {
   aiSettings,
   assetUrl,
   createCard,
   deleteAnnotation,
+  exportAnnotatedPdf,
   listCards,
   openDocument,
   saveProgress,
@@ -200,6 +208,7 @@ export default function App() {
   const [availableUpdate, setAvailableUpdate] = useState<AvailableUpdate | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [installingUpdate, setInstallingUpdate] = useState(false);
+  const [exportingPdf, setExportingPdf] = useState(false);
 
   const fileRef = useRef<HTMLInputElement>(null);
   const recordRef = useRef<DocRecord | null>(null);
@@ -358,6 +367,26 @@ export default function App() {
       setCheckingUpdate(false);
     }
   }, [availableUpdate, checkingUpdate, desktop, installingUpdate]);
+
+  const handleExportPdf = useCallback(async () => {
+    const current = docRef.current;
+    if (!current || exportingPdf) return;
+
+    const defaultName = `${current.name.replace(/\.pdf$/i, '')}-标注.pdf`;
+    try {
+      const path = await pickPdfSavePath(defaultName);
+      if (!path) return;
+
+      setExportingPdf(true);
+      setMessage('正在导出带标注的 PDF…');
+      const result = await exportAnnotatedPdf(current.id, path);
+      setMessage(`${result}：${path}`);
+    } catch (error) {
+      setMessage(`导出 PDF 失败：${errorText(error)}`);
+    } finally {
+      setExportingPdf(false);
+    }
+  }, [exportingPdf]);
 
   const openAiSettings = useCallback(async () => {
     if (!ai) {
@@ -959,6 +988,19 @@ export default function App() {
               </button>
             </div>
           </div>
+        )}
+
+        {doc && desktop && (
+          <button
+            type="button"
+            className="theme-toggle"
+            title="导出带标注的 PDF"
+            aria-label="导出带标注的 PDF"
+            disabled={exportingPdf}
+            onClick={() => void handleExportPdf()}
+          >
+            <IconDownload size={16} />
+          </button>
         )}
 
         {desktop && (
