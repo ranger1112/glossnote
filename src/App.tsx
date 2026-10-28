@@ -100,6 +100,16 @@ const COLORS: Array<{ key: HighlightColor; label: string }> = [
 
 const EMPTY: Annotation[] = [];
 
+/** 侧栏类型筛选的固定顺序；只显示当前文档里真实存在的类型。 */
+const KIND_ORDER: AnnotationKind[] = [
+  'highlight',
+  'underline',
+  'strikethrough',
+  'note',
+  'area',
+  'ink',
+];
+
 const MIN_SCALE = 0.1;
 const MAX_SCALE = 3;
 /** 撤销栈按整份标注数组存快照；50 步足够覆盖一次阅读里的误操作，内存也不至于失控。 */
@@ -238,6 +248,8 @@ export default function App() {
   const [findProgress, setFindProgress] = useState({ done: 0, total: 0 });
   const [findTruncated, setFindTruncated] = useState(false);
   const [searchTarget, setSearchTarget] = useState<SearchTarget | null>(null);
+  const [filterColor, setFilterColor] = useState<HighlightColor | null>(null);
+  const [filterKind, setFilterKind] = useState<AnnotationKind | null>(null);
 
   const findInputRef = useRef<HTMLInputElement>(null);
   const findTokenRef = useRef(0);
@@ -481,6 +493,37 @@ export default function App() {
     }
     return map;
   }, [visible]);
+
+  const kindsPresent = useMemo(() => {
+    const present = new Set(visible.map((annotation) => annotation.kind));
+    return KIND_ORDER.filter((kind) => present.has(kind));
+  }, [visible]);
+
+  const filtered = useMemo(
+    () =>
+      visible.filter(
+        (annotation) =>
+          (!filterColor || annotation.color === filterColor) &&
+          (!filterKind || annotation.kind === filterKind),
+      ),
+    [visible, filterColor, filterKind],
+  );
+
+  /** 侧栏按页分组，组头可直接跳到对应页。 */
+  const groups = useMemo(() => {
+    const map = new Map<number, Annotation[]>();
+    for (const annotation of filtered) {
+      const list = map.get(annotation.page) ?? [];
+      list.push(annotation);
+      map.set(annotation.page, list);
+    }
+    return [...map.entries()].sort(([left], [right]) => left - right);
+  }, [filtered]);
+
+  const clearFilters = useCallback(() => {
+    setFilterColor(null);
+    setFilterKind(null);
+  }, []);
 
   // 放大后一页可达数千像素；减少同时渲染的页数，避免画布内存再次爆掉。
   const pageHeight = baseSize ? baseSize.height * scale : 0;
@@ -989,7 +1032,7 @@ export default function App() {
     [],
   );
 
-  // 换书或关书时清空搜索缓存与结果。
+  // 换书或关书时清空搜索缓存、结果与侧栏筛选。
   useEffect(() => {
     pageTextsRef.current.clear();
     findTokenRef.current += 1;
@@ -1000,6 +1043,8 @@ export default function App() {
     setSearchTarget(null);
     setFindBusy(false);
     setFindTruncated(false);
+    setFilterColor(null);
+    setFilterKind(null);
   }, [doc?.id]);
 
   useEffect(() => {
@@ -1511,7 +1556,18 @@ export default function App() {
           <aside className="sidebar">
             <div className="sidebar-head">
               <h2>标注</h2>
-              <span className="count">{visible.length}</span>
+              <span
+                className="count"
+                title={
+                  filtered.length === visible.length
+                    ? undefined
+                    : `已筛选 ${filtered.length} 条，共 ${visible.length} 条`
+                }
+              >
+                {filtered.length === visible.length
+                  ? visible.length
+                  : `${filtered.length} / ${visible.length}`}
+              </span>
               <span className="sidebar-progress">
                 {currentPage + 1} / {doc.pageCount}
               </span>
@@ -1528,35 +1584,105 @@ export default function App() {
               )}
             </div>
 
+            {visible.length > 0 && (
+              <div className="sidebar-filters">
+                <button
+                  type="button"
+                  className={`filter-all ${
+                    filterColor === null && filterKind === null ? 'active' : ''
+                  }`}
+                  onClick={clearFilters}
+                >
+                  全部
+                </button>
+                <span className="filter-dots">
+                  {COLORS.map((option) => (
+                    <button
+                      key={option.key}
+                      type="button"
+                      className={`filter-dot ${option.key} ${
+                        filterColor === option.key ? 'active' : ''
+                      }`}
+                      title={`只看${option.label}`}
+                      aria-label={`只看${option.label}`}
+                      aria-pressed={filterColor === option.key}
+                      onClick={() =>
+                        setFilterColor((current) =>
+                          current === option.key ? null : option.key,
+                        )
+                      }
+                    />
+                  ))}
+                </span>
+                {kindsPresent.length > 1 && (
+                  <select
+                    className="filter-kind"
+                    aria-label="按类型筛选"
+                    value={filterKind ?? ''}
+                    onChange={(event) =>
+                      setFilterKind((event.target.value || null) as AnnotationKind | null)
+                    }
+                  >
+                    <option value="">全部类型</option>
+                    {kindsPresent.map((kind) => (
+                      <option key={kind} value={kind}>
+                        {annotationKindLabel(kind)}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            )}
+
             {visible.length === 0 ? (
               <p className="sidebar-hint">
                 选中正文即可高亮；点浮动栏里的「批注」写下你的想法。
                 所有标注会在刷新、缩放后回到原来的位置。
               </p>
+            ) : filtered.length === 0 ? (
+              <p className="sidebar-hint">
+                没有符合筛选条件的标注。
+                <button type="button" className="link-button" onClick={clearFilters}>
+                  清除筛选
+                </button>
+              </p>
             ) : (
               <div className="annotation-list">
-                {visible.map((annotation) => (
-                  <AnnotationCard
-                    key={annotation.id}
-                    annotation={annotation}
-                    card={cards.find(
-                      (view) => view.card.sourceAnnotationId === annotation.id,
-                    )}
-                    editing={editingId === annotation.id}
-                    onJump={() => jumpTo(annotation)}
-                    onBody={(body) => updateBody(doc.id, annotation.id, body)}
-                    onTags={(tags) => updateTags(doc.id, annotation.id, tags)}
-                    onCard={() =>
-                      setCardEditing({
-                        annotation,
-                        existing: cards.find(
+                {groups.map(([page, items]) => (
+                  <section className="annotation-group" key={page}>
+                    <button
+                      type="button"
+                      className="annotation-group-head"
+                      title={`跳到第 ${page + 1} 页`}
+                      onClick={() => goToPage(page)}
+                    >
+                      <span>第 {page + 1} 页</span>
+                      <span className="group-count">{items.length}</span>
+                    </button>
+                    {items.map((annotation) => (
+                      <AnnotationCard
+                        key={annotation.id}
+                        annotation={annotation}
+                        card={cards.find(
                           (view) => view.card.sourceAnnotationId === annotation.id,
-                        ),
-                      })
-                    }
-                    onDelete={() => removeAnnotation(doc.id, annotation.id)}
-                    onColor={(color) => updateColor(doc.id, annotation.id, color)}
-                  />
+                        )}
+                        editing={editingId === annotation.id}
+                        onJump={() => jumpTo(annotation)}
+                        onBody={(body) => updateBody(doc.id, annotation.id, body)}
+                        onTags={(tags) => updateTags(doc.id, annotation.id, tags)}
+                        onCard={() =>
+                          setCardEditing({
+                            annotation,
+                            existing: cards.find(
+                              (view) => view.card.sourceAnnotationId === annotation.id,
+                            ),
+                          })
+                        }
+                        onDelete={() => removeAnnotation(doc.id, annotation.id)}
+                        onColor={(color) => updateColor(doc.id, annotation.id, color)}
+                      />
+                    ))}
+                  </section>
                 ))}
               </div>
             )}
@@ -1833,7 +1959,6 @@ function AnnotationCard({
             </span>
           )}
         </span>
-        <span>第 {annotation.page + 1} 页</span>
         {annotation.kind !== 'highlight' && (
           <span className="annotation-kind">{annotationKindLabel(annotation.kind)}</span>
         )}

@@ -351,11 +351,6 @@ select {
   gap: 2px;
 }
 
-.history-controls .theme-toggle:disabled {
-  opacity: 0.35;
-  cursor: default;
-}
-
 .history-controls .theme-toggle:disabled:hover {
   background: transparent;
   color: var(--muted);
@@ -1318,10 +1313,129 @@ select {
   line-height: 1.75;
 }
 
+.sidebar-filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 18px 10px;
+}
+
+.filter-all {
+  height: 22px;
+  padding: 0 8px;
+  border-radius: var(--radius-full);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.filter-all.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.filter-dots {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.filter-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  transition:
+    transform var(--transition),
+    box-shadow var(--transition);
+}
+
+.filter-dot:hover {
+  transform: scale(1.15);
+}
+
+.filter-dot.active {
+  box-shadow:
+    0 0 0 2px var(--panel),
+    0 0 0 3.5px var(--accent);
+}
+
+.filter-dot.yellow {
+  background: #eab308;
+}
+
+.filter-dot.green {
+  background: #22c55e;
+}
+
+.filter-dot.blue {
+  background: #3b82f6;
+}
+
+.filter-dot.pink {
+  background: #ec4899;
+}
+
+.filter-kind {
+  margin-left: auto;
+  height: 22px;
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-full);
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 10.5px;
+  cursor: pointer;
+}
+
 .annotation-list {
   flex: 1;
   overflow: auto;
   padding: 0 14px 14px;
+}
+
+.annotation-group + .annotation-group {
+  margin-top: 14px;
+}
+
+.annotation-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 2px 7px;
+  color: var(--faint);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-align: left;
+}
+
+.annotation-group-head:hover {
+  color: var(--ink);
+}
+
+.group-count {
+  padding: 0 5px;
+  border-radius: var(--radius-full);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 9.5px;
+  font-weight: 600;
+}
+
+.link-button {
+  margin-left: 4px;
+  color: var(--accent);
+  font-size: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.link-button:hover {
+  color: var(--accent-hover);
 }
 
 .annotation-card {

@@ -135,6 +135,46 @@ test('撤销与重做标注操作', async ({ page }) => {
   await expect(page.locator('.annotation-card')).toHaveCount(1);
 });
 
+test('侧栏按页分组，并按颜色和类型筛选', async ({ page }) => {
+  await page.goto('/?sample');
+  await expect(
+    page.locator('.pdf-page').first().locator('.text-layer span').first(),
+  ).toBeVisible({ timeout: 30_000 });
+
+  await selectSpans(page, 1, 3);
+  await page.locator('.selection-toolbar .swatch.yellow').click();
+  await selectSpans(page, 4, 6);
+  await page.locator('.selection-toolbar .swatch.blue').click();
+  await selectSpans(page, 7, 9);
+  await page.locator('.selection-toolbar button', { hasText: '下划线' }).click();
+  await expect(page.locator('.annotation-card')).toHaveCount(3);
+
+  // 同一页的标注收在同一个分组里，组头显示页码与数量。
+  await expect(page.locator('.annotation-group')).toHaveCount(1);
+  const group = page.locator('.annotation-group').first();
+  await expect(group.locator('.annotation-group-head')).toContainText('第 1 页');
+  await expect(group.locator('.group-count')).toHaveText('3');
+
+  // 颜色筛选。
+  await page.locator('.sidebar-filters .filter-dot.yellow').click();
+  await expect(page.locator('.annotation-card')).toHaveCount(1);
+  await expect(page.locator('.sidebar-head .count')).toHaveText('1 / 3');
+
+  // 颜色与类型叠加时可能没有结果，提示里给出清除入口。
+  await page.locator('.filter-kind').selectOption('underline');
+  await expect(page.locator('.annotation-card')).toHaveCount(0);
+  await expect(page.locator('.sidebar-hint')).toContainText('没有符合筛选条件');
+
+  // 取消颜色筛选后只剩划线。
+  await page.locator('.sidebar-filters .filter-dot.yellow').click();
+  await expect(page.locator('.annotation-card')).toHaveCount(1);
+  await expect(page.locator('.annotation-kind').first()).toHaveText('下划线');
+
+  // 全部：恢复完整列表。
+  await page.locator('.filter-all').click();
+  await expect(page.locator('.annotation-card')).toHaveCount(3);
+});
+
 test('页内查找：Ctrl+F 搜索并定位命中', async ({ page }) => {
   await page.goto('/?sample');
   await expect(
