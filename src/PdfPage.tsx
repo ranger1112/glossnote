@@ -44,6 +44,14 @@ interface Point {
   offset: number;
 }
 
+/** 下划线/删除线不用高亮底色，改用与标注颜色一致的线条。 */
+const MARK_COLORS: Record<Annotation['color'], string> = {
+  yellow: '#d9a400',
+  green: '#1f9d63',
+  blue: '#4b5cc4',
+  pink: '#d4578a',
+};
+
 /**
  * 文本层里的 span 与 textContent.items 一一对应。按顺序拼出页面纯文本，
  * 同时保留「每个 item 的文本节点 + 它在纯文本中的起点」，后续选区与重放都靠它。
@@ -250,16 +258,23 @@ export const PdfPage = memo(function PdfPage({
       // 旧标注存的是逐字形矩形，绘制前同样合并，避免历史高亮出现接缝。
       const rects = computed.length > 0 ? computed : mergeRects(annotation.anchor.rects);
 
+      const lineKind =
+        annotation.kind === 'underline' || annotation.kind === 'strikethrough';
+
       for (const rect of rects) {
         const element = document.createElement('div');
         element.className = [
           'highlight',
           `highlight-${annotation.color}`,
+          lineKind ? `kind-${annotation.kind}` : '',
           annotation.id === focusRef.current ? 'focused' : '',
           resolved.kind === 'estimated' ? 'uncertain' : '',
         ]
           .filter(Boolean)
           .join(' ');
+        if (lineKind) {
+          element.style.setProperty('--mark-color', MARK_COLORS[annotation.color]);
+        }
         element.style.left = `${rect.x * pageRect.width}px`;
         element.style.top = `${rect.y * pageRect.height}px`;
         element.style.width = `${rect.w * pageRect.width}px`;

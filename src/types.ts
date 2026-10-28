@@ -1,7 +1,13 @@
 import type { Anchor } from './anchoring';
 
 export type HighlightColor = 'yellow' | 'green' | 'blue' | 'pink';
-export type AnnotationKind = 'highlight' | 'underline' | 'note' | 'area' | 'ink';
+export type AnnotationKind =
+  | 'highlight'
+  | 'underline'
+  | 'strikethrough'
+  | 'note'
+  | 'area'
+  | 'ink';
 
 export interface Annotation {
   id: string;

@@ -1,11 +1,37 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
+
+/** 在示例 PDF 第一页上选中第 from..to 个非空文本 span。 */
+async function selectSpans(page: Page, from: number, to: number) {
+  await page.evaluate(
+    ({ from, to }) => {
+      const pageElement = document.querySelector<HTMLElement>('.pdf-page');
+      if (!pageElement) throw new Error('没有渲染出页面');
+
+      const spans = [...pageElement.querySelectorAll<HTMLElement>('.text-layer span')].filter(
+        (span) => span.textContent?.trim() && span.firstChild,
+      );
+      const start = spans[from]?.firstChild;
+      const end = spans[to]?.firstChild;
+      if (!start || !end) throw new Error('文本层没有足够的 span');
+
+      const range = document.createRange();
+      range.setStart(start, 0);
+      range.setEnd(end, Math.min(10, end.textContent?.length ?? 0));
+      const selection = window.getSelection();
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+      pageElement.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    },
+    { from, to },
+  );
+}
 
 /**
- * 浏览器模式的冒烟测试：示例文档 → 划词 → 高亮 → 刷新复原。
+ * 浏览器模式的冒烟测试：示例文档 → 划词 → 高亮/下划线 → 刷新复原。
  * 它覆盖 React、pdf.js 文本层、锚定与 localStorage 持久化；
  * Rust / Tauri 命令由 cargo 单测覆盖，WebView2 特有问题仍靠手工 CDP。
  */
-test('示例文档：划词高亮，刷新后复原', async ({ page }) => {
+test('示例文档：划词高亮与下划线，刷新后复原', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
 
@@ -13,34 +39,55 @@ test('示例文档：划词高亮，刷新后复原', async ({ page }) => {
   const firstPage = page.locator('.pdf-page').first();
   await expect(firstPage.locator('.text-layer span').first()).toBeVisible({ timeout: 30_000 });
 
-  await page.evaluate(() => {
-    const pageElement = document.querySelector<HTMLElement>('.pdf-page');
-    if (!pageElement) throw new Error('没有渲染出页面');
-
-    const spans = [...pageElement.querySelectorAll<HTMLElement>('.text-layer span')].filter(
-      (span) => span.textContent?.trim() && span.firstChild,
-    );
-    const start = spans[1]?.firstChild;
-    const end = spans[4]?.firstChild;
-    if (!start || !end) throw new Error('文本层没有足够的 span');
-
-    const range = document.createRange();
-    range.setStart(start, 0);
-    range.setEnd(end, Math.min(10, end.textContent?.length ?? 0));
-    const selection = window.getSelection();
-    selection?.removeAllRanges();
-    selection?.addRange(range);
-    pageElement.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-  });
-
+  await selectSpans(page, 1, 4);
   await page.locator('.selection-toolbar .swatch.yellow').click();
   await expect(page.locator('.highlight').first()).toBeVisible();
   await expect(page.locator('.annotation-card')).toHaveCount(1);
 
+  await selectSpans(page, 7, 9);
+  await page.locator('.selection-toolbar button', { hasText: '下划线' }).click();
+  // 一个选区常跨多行，每行一个矩形；只要第一段画出了线即可。
+  const underline = page.locator('.highlight.kind-underline');
+  await expect(underline.first()).toBeVisible();
+  const line = await underline.first().evaluate((element) => {
+    const after = getComputedStyle(element, '::after');
+    return {
+      height: after.height,
+      background: after.backgroundColor,
+      mark: getComputedStyle(element).getPropertyValue('--mark-color').trim(),
+    };
+  });
+  expect(line.height).toBe('2px');
+  expect(line.background).not.toBe('rgba(0, 0, 0, 0)');
+  expect(line.mark).not.toBe('');
+  await expect(page.locator('.annotation-card')).toHaveCount(2);
+
+  // 改颜色：卡片上的色点打开色板，线条颜色随之变化。
+  const underlineCard = page.locator('.annotation-card').nth(1);
+  await underlineCard.locator('button.color-dot').click();
+  await underlineCard.locator('.color-menu .swatch.green').click();
+  await expect(underlineCard.locator('.color-dot.green')).toBeVisible();
+  await expect
+    .poll(() =>
+      underline.first().evaluate((element) =>
+        getComputedStyle(element).getPropertyValue('--mark-color').trim(),
+      ),
+    )
+    .toBe('#1f9d63');
+
   await page.reload();
   await expect(firstPage.locator('.text-layer span').first()).toBeVisible({ timeout: 30_000 });
   await expect(page.locator('.highlight').first()).toBeVisible();
-  await expect(page.locator('.annotation-card')).toHaveCount(1);
+  await expect(page.locator('.highlight.kind-underline').first()).toBeVisible();
+  await expect(page.locator('.annotation-card')).toHaveCount(2);
+  await expect(page.locator('.annotation-card').nth(1).locator('.color-dot.green')).toBeVisible();
+  await expect
+    .poll(() =>
+      page.locator('.highlight.kind-underline').first().evaluate((element) =>
+        getComputedStyle(element).getPropertyValue('--mark-color').trim(),
+      ),
+    )
+    .toBe('#1f9d63');
 
   expect(errors).toEqual([]);
 });

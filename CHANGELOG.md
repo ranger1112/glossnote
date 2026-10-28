@@ -2,6 +2,13 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 新增
+
+- 划词可直接加下划线或删除线，与高亮共用锚点和颜色模型。
+- 标注卡片上的色点可打开色板改颜色，改动会同步到 SQLite 与 sidecar。
+
 ## [0.1.1] - 2026-10-28
 
 ### 新增

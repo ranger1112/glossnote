@@ -1058,6 +1058,31 @@ select {
   background: #ffc4e1;
 }
 
+.highlight.kind-underline,
+.highlight.kind-strikethrough {
+  background: transparent;
+}
+
+.highlight.kind-underline::after,
+.highlight.kind-strikethrough::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  left: 0;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--mark-color, #d9a400);
+}
+
+.highlight.kind-underline::after {
+  bottom: -1px;
+}
+
+.highlight.kind-strikethrough::after {
+  top: 50%;
+  transform: translateY(-50%);
+}
+
 .highlight.focused {
   animation: highlight-pulse 1.4s ease-out;
 }
@@ -1234,10 +1259,55 @@ select {
   font-size: 10.5px;
 }
 
+.annotation-color {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
 .color-dot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
+}
+
+button.color-dot {
+  padding: 0;
+  border: 0;
+  cursor: pointer;
+  transition: transform var(--transition);
+}
+
+button.color-dot:hover {
+  transform: scale(1.35);
+}
+
+.color-menu {
+  position: absolute;
+  top: 14px;
+  left: -6px;
+  z-index: 20;
+  display: flex;
+  gap: 5px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-full);
+  background: var(--panel);
+  box-shadow: var(--shadow-sm);
+}
+
+.color-menu .swatch {
+  width: 16px;
+  height: 16px;
+  border: 1px solid var(--line-strong);
+}
+
+.annotation-kind {
+  padding: 1px 5px;
+  border-radius: var(--radius-full);
+  background: var(--surface-strong);
+  color: var(--muted);
+  font-size: 9.5px;
 }
 
 .color-dot.yellow {
@@ -1435,6 +1505,15 @@ select {
 
 .swatch.pink {
   background: #ffc4e1;
+}
+
+.kind-preview.underline {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.kind-preview.strike {
+  text-decoration: line-through;
 }
 
 .toolbar-sep {

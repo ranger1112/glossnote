@@ -71,7 +71,7 @@ annotations(
   page INTEGER NOT NULL,
   anchor TEXT NOT NULL,       -- JSON，见「锚定模型」
   color TEXT NOT NULL,
-  kind TEXT NOT NULL,         -- highlight / underline / note / area / ink
+  kind TEXT NOT NULL,         -- highlight / underline / strikethrough / note / area / ink
   body TEXT NOT NULL DEFAULT '',
   tags TEXT NOT NULL DEFAULT '[]',
   created_at INTEGER, updated_at INTEGER,
@@ -257,7 +257,7 @@ chunks(                            -- AI 全文索引，派生数据，不进 si
 - **图标**：内联在 `src/icons.tsx`，统一 1.7 描边、`currentColor`，不引图标库，避免额外依赖与字体加载。
 - **反馈**：状态提示是左下角浮层 `.status-bar`，按文案区分 info / busy / error，成功提示 5 秒自动消失；它不占据文档流，阅读位置不会因提示跳动。删除标注需要在同一按钮上点第二次确认，4 秒内未确认会自动恢复。
 - **书库页头**：标题块固定在 380px，操作组靠右；书库路径单行省略，完整路径放在 tooltip。窗口变窄时操作组整体折到下一行，不压缩搜索框。
-- **高亮**：高亮层用 `mix-blend-mode: multiply` 与下方 canvas 相乘，纸面的字透出来；因此 `.highlight-layer` 不能用 `z-index` 自建层叠上下文（那样只跟空图层混合，字会被整块盖住），改由 `.pdf-page` 的 `isolation: isolate` 建立混合组。pdf.js 的文本项按字形切分且互相压边，绘制前按行合并相邻矩形，避免重叠处乘两次出现深色接缝。
+- **高亮**：高亮层用 `mix-blend-mode: multiply` 与下方 canvas 相乘，纸面的字透出来；因此 `.highlight-layer` 不能用 `z-index` 自建层叠上下文（那样只跟空图层混合，字会被整块盖住），改由 `.pdf-page` 的 `isolation: isolate` 建立混合组。pdf.js 的文本项按字形切分且互相压边，绘制前按行合并相邻矩形，避免重叠处乘两次出现深色接缝。下划线与删除线复用同一组矩形，只把底色换成一条 2px 的线。
 - **可访问性**：所有可聚焦控件有 `:focus-visible` 外圈；`prefers-reduced-motion` 下禁用过渡与动画。
 
 ### 阅读器

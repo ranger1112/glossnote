@@ -12,6 +12,7 @@ import type { Anchor } from './anchoring';
 import type {
   AiSettingsView,
   Annotation,
+  AnnotationKind,
   CardView,
   DocRecord,
   DocumentMeta,
@@ -98,6 +99,23 @@ type AiPanelState =
   | { mode: 'qa' }
   | { mode: 'explain'; page: number; quote: string; context: string }
   | null;
+
+function annotationKindLabel(kind: AnnotationKind): string {
+  switch (kind) {
+    case 'underline':
+      return '下划线';
+    case 'strikethrough':
+      return '删除线';
+    case 'note':
+      return '批注';
+    case 'area':
+      return '区域';
+    case 'ink':
+      return '墨迹';
+    default:
+      return '高亮';
+  }
+}
 
 function defaultCardTitle(annotation: Annotation): string {
   const line = (annotation.anchor.quote || annotation.body).trim().split('\n')[0]?.trim() ?? '';
@@ -666,15 +684,15 @@ export default function App() {
     if (new URLSearchParams(window.location.search).has('sample')) void openSample();
   }, [openSample]);
 
-  const addHighlight = useCallback(
-    (anchor: Anchor, color: HighlightColor, withNote: boolean) => {
+  const addAnnotation = useCallback(
+    (anchor: Anchor, color: HighlightColor, kind: AnnotationKind, withNote: boolean) => {
       const now = Date.now();
       const annotation: Annotation = {
         id: crypto.randomUUID(),
         page: anchor.page,
         anchor,
         color,
-        kind: 'highlight',
+        kind,
         body: '',
         tags: [],
         createdAt: now,
@@ -686,6 +704,22 @@ export default function App() {
       setToolbar(null);
       window.getSelection()?.removeAllRanges();
       if (withNote) setEditingId(annotation.id);
+    },
+    [commit, persistAnnotation],
+  );
+
+  const updateColor = useCallback(
+    (docId: string, id: string, color: HighlightColor) => {
+      const existing = annotationsRef.current.find((annotation) => annotation.id === id);
+      if (!existing || existing.color === color) return;
+
+      const updated: Annotation = { ...existing, color, updatedAt: Date.now() };
+      commit(
+        annotationsRef.current.map((annotation) =>
+          annotation.id === id ? updated : annotation,
+        ),
+      );
+      if (isTauri()) void persistAnnotation(docId, updated);
     },
     [commit, persistAnnotation],
   );
@@ -1088,6 +1122,7 @@ export default function App() {
                       })
                     }
                     onDelete={() => removeAnnotation(doc.id, annotation.id)}
+                    onColor={(color) => updateColor(doc.id, annotation.id, color)}
                   />
                 ))}
               </div>
@@ -1152,14 +1187,31 @@ export default function App() {
               type="button"
               className={`swatch ${color.key}`}
               title={color.label}
-              onClick={() => addHighlight(toolbar.anchor, color.key, false)}
+              onClick={() => addAnnotation(toolbar.anchor, color.key, 'highlight', false)}
             />
           ))}
           <span className="toolbar-sep" />
           <button
             type="button"
             className="toolbar-note"
-            onClick={() => addHighlight(toolbar.anchor, 'yellow', true)}
+            title="在选中文字下方画线"
+            onClick={() => addAnnotation(toolbar.anchor, 'blue', 'underline', false)}
+          >
+            <span className="kind-preview underline">下划线</span>
+          </button>
+          <button
+            type="button"
+            className="toolbar-note"
+            title="给选中文字加删除线"
+            onClick={() => addAnnotation(toolbar.anchor, 'pink', 'strikethrough', false)}
+          >
+            <span className="kind-preview strike">删除线</span>
+          </button>
+          <span className="toolbar-sep" />
+          <button
+            type="button"
+            className="toolbar-note"
+            onClick={() => addAnnotation(toolbar.anchor, 'yellow', 'highlight', true)}
           >
             批注
           </button>
@@ -1236,6 +1288,7 @@ interface AnnotationCardProps {
   onTags: (tags: string[]) => void;
   onCard: () => void;
   onDelete: () => void;
+  onColor: (color: HighlightColor) => void;
 }
 
 function AnnotationCard({
@@ -1247,9 +1300,11 @@ function AnnotationCard({
   onTags,
   onCard,
   onDelete,
+  onColor,
 }: AnnotationCardProps) {
   const [draft, setDraft] = useState(annotation.body);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const [tagDraft, setTagDraft] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const draftRef = useRef(annotation.body);
@@ -1274,6 +1329,13 @@ function AnnotationCard({
     const timer = window.setTimeout(() => setConfirmingDelete(false), 4000);
     return () => window.clearTimeout(timer);
   }, [confirmingDelete]);
+
+  useEffect(() => {
+    if (!paletteOpen) return;
+    const close = () => setPaletteOpen(false);
+    window.addEventListener('click', close);
+    return () => window.removeEventListener('click', close);
+  }, [paletteOpen]);
 
   /** 输入停顿 600ms 或失焦时落盘；组件卸载时也补一次，避免切换文档丢字。 */
   const flush = useCallback(() => {
@@ -1309,8 +1371,39 @@ function AnnotationCard({
   return (
     <article className="annotation-card" onClick={onJump}>
       <header className="annotation-head">
-        <span className={`color-dot ${annotation.color}`} />
+        <span className="annotation-color">
+          <button
+            type="button"
+            className={`color-dot ${annotation.color}`}
+            title="更换颜色"
+            aria-label="更换颜色"
+            onClick={(event) => {
+              event.stopPropagation();
+              setPaletteOpen((open) => !open);
+            }}
+          />
+          {paletteOpen && (
+            <span className="color-menu" onClick={(event) => event.stopPropagation()}>
+              {COLORS.map((option) => (
+                <button
+                  key={option.key}
+                  type="button"
+                  className={`swatch ${option.key}`}
+                  title={option.label}
+                  aria-label={option.label}
+                  onClick={() => {
+                    onColor(option.key);
+                    setPaletteOpen(false);
+                  }}
+                />
+              ))}
+            </span>
+          )}
+        </span>
         <span>第 {annotation.page + 1} 页</span>
+        {annotation.kind !== 'highlight' && (
+          <span className="annotation-kind">{annotationKindLabel(annotation.kind)}</span>
+        )}
         <button
           type="button"
           className={`icon-button ${confirmingDelete ? 'confirming' : ''}`}
