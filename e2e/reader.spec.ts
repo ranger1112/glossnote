@@ -175,6 +175,39 @@ test('侧栏按页分组，并按颜色和类型筛选', async ({ page }) => {
   await expect(page.locator('.annotation-card')).toHaveCount(3);
 });
 
+test('阅读器快捷键：帮助、翻页与缩放', async ({ page }) => {
+  await page.goto('/?sample');
+  await expect(
+    page.locator('.pdf-page').first().locator('.text-layer span').first(),
+  ).toBeVisible({ timeout: 30_000 });
+
+  await page.keyboard.press('Shift+/');
+  await expect(page.locator('.shortcut-card')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.shortcut-card')).toHaveCount(0);
+
+  const pageLabel = page.locator('.doc-id');
+  await expect(pageLabel).toContainText('第 1 /');
+  await page.keyboard.press('End');
+  await expect(pageLabel).toContainText('第 2 /');
+  await page.keyboard.press('Home');
+  await expect(pageLabel).toContainText('第 1 /');
+
+  const viewer = page.locator('.viewer');
+  const before = await viewer.evaluate((element) => element.scrollTop);
+  await page.keyboard.press('PageDown');
+  await expect
+    .poll(() => viewer.evaluate((element) => element.scrollTop))
+    .toBeGreaterThan(before);
+
+  const zoom = page.locator('.zoom-controls > span').first();
+  const original = (await zoom.textContent()) ?? '';
+  await page.keyboard.press('Control+=');
+  await expect(zoom).not.toHaveText(original);
+  await page.keyboard.press('Control+0');
+  await expect(zoom).toHaveText(original);
+});
+
 test('页内查找：Ctrl+F 搜索并定位命中', async ({ page }) => {
   await page.goto('/?sample');
   await expect(

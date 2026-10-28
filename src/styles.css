@@ -530,6 +530,27 @@ select {
   white-space: nowrap;
 }
 
+.save-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--faint);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.save-state::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--success);
+}
+
+.save-state.saving::before {
+  background: var(--warning);
+}
+
 .topbar-spacer {
   flex: 1;
 }
@@ -1993,6 +2014,58 @@ button.color-dot:hover {
 
 :root[data-theme='dark'] .modal-backdrop {
   background: rgba(0, 0, 0, 0.66);
+}
+
+.shortcut-card {
+  width: min(460px, 92vw);
+  max-height: 86vh;
+  overflow: auto;
+  padding: 20px 22px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  box-shadow: var(--shadow-lg);
+}
+
+.shortcut-card dl {
+  margin: 0;
+}
+
+.shortcut-card dl > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 7px 0;
+  border-top: 1px solid var(--line);
+}
+
+.shortcut-card dt {
+  color: var(--ink-soft);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.shortcut-card dd {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  text-align: right;
+}
+
+.shortcut-card kbd {
+  display: inline-block;
+  min-width: 18px;
+  padding: 1px 5px;
+  border: 1px solid var(--line-strong);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--ink-soft);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.5;
+  text-align: center;
 }
 
 .card-editor,

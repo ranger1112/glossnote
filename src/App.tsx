@@ -10,6 +10,7 @@ import { AiSettingsModal } from './AiSettingsModal';
 import {
   IconArrowLeft,
   IconDownload,
+  IconKeyboard,
   IconMoon,
   IconRefresh,
   IconRedo,
@@ -138,6 +139,18 @@ type AiPanelState =
   | { mode: 'explain'; page: number; quote: string; context: string }
   | null;
 
+/** 输入控件内的按键属于文本编辑，阅读器快捷键不能拦截。 */
+function isTypingTarget(target: EventTarget | null): boolean {
+  const element = target as HTMLElement | null;
+  if (!element) return false;
+  return (
+    element.tagName === 'INPUT' ||
+    element.tagName === 'TEXTAREA' ||
+    element.tagName === 'SELECT' ||
+    element.isContentEditable
+  );
+}
+
 function annotationKindLabel(kind: AnnotationKind): string {
   switch (kind) {
     case 'underline':
@@ -250,6 +263,8 @@ export default function App() {
   const [searchTarget, setSearchTarget] = useState<SearchTarget | null>(null);
   const [filterColor, setFilterColor] = useState<HighlightColor | null>(null);
   const [filterKind, setFilterKind] = useState<AnnotationKind | null>(null);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle');
 
   const findInputRef = useRef<HTMLInputElement>(null);
   const findTokenRef = useRef(0);
@@ -261,6 +276,8 @@ export default function App() {
   // 每条记录都是一份完整的标注数组；所有改动都走不可变更新，快照可以安全复用。
   const undoRef = useRef<Annotation[][]>([]);
   const redoRef = useRef<Annotation[][]>([]);
+  const savingRef = useRef(0);
+  const saveTimerRef = useRef<number | null>(null);
   const viewerRef = useRef<HTMLElement | null>(null);
   const currentPageRef = useRef(0);
   const scaleRef = useRef(scale);
@@ -561,21 +578,61 @@ export default function App() {
     [syncHistory],
   );
 
-  const persistAnnotation = useCallback(async (docId: string, annotation: Annotation) => {
-    try {
-      await upsertAnnotation(docId, annotation);
-    } catch (error) {
-      setMessage(`保存标注失败：${errorText(error)}`);
+  const beginSave = useCallback(() => {
+    savingRef.current += 1;
+    if (saveTimerRef.current !== null) {
+      window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
     }
+    setSaveState('saving');
   }, []);
 
-  const removeFromLibrary = useCallback(async (docId: string, id: string) => {
-    try {
-      await deleteAnnotation(docId, id);
-    } catch (error) {
-      setMessage(`删除标注失败：${errorText(error)}`);
-    }
+  const endSave = useCallback(() => {
+    savingRef.current = Math.max(0, savingRef.current - 1);
+    if (savingRef.current > 0) return;
+    setSaveState('saved');
+    saveTimerRef.current = window.setTimeout(() => {
+      saveTimerRef.current = null;
+      setSaveState('idle');
+    }, 1600);
   }, []);
+
+  const resetSaveState = useCallback(() => {
+    savingRef.current = 0;
+    if (saveTimerRef.current !== null) {
+      window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+    setSaveState('idle');
+  }, []);
+
+  const persistAnnotation = useCallback(
+    async (docId: string, annotation: Annotation) => {
+      beginSave();
+      try {
+        await upsertAnnotation(docId, annotation);
+      } catch (error) {
+        setMessage(`保存标注失败：${errorText(error)}`);
+      } finally {
+        endSave();
+      }
+    },
+    [beginSave, endSave],
+  );
+
+  const removeFromLibrary = useCallback(
+    async (docId: string, id: string) => {
+      beginSave();
+      try {
+        await deleteAnnotation(docId, id);
+      } catch (error) {
+        setMessage(`删除标注失败：${errorText(error)}`);
+      } finally {
+        endSave();
+      }
+    },
+    [beginSave, endSave],
+  );
 
   const refreshCards = useCallback(async () => {
     if (!isTauri()) return;
@@ -625,20 +682,25 @@ export default function App() {
       const docId = docRef.current?.id;
       if (!docId) return;
 
+      beginSave();
       void (async () => {
-        for (const item of changed) {
-          try {
-            await upsertAnnotation(docId, item);
-          } catch (error) {
-            setMessage(`保存撤销/重做结果失败：${errorText(error)}`);
-            return;
+        try {
+          for (const item of changed) {
+            try {
+              await upsertAnnotation(docId, item);
+            } catch (error) {
+              setMessage(`保存撤销/重做结果失败：${errorText(error)}`);
+              return;
+            }
           }
+          // 恢复被删标注时 Rust 会让来源卡片重新可用；重新读一次卡片列表。
+          void refreshCards();
+        } finally {
+          endSave();
         }
-        // 恢复被删标注时 Rust 会让来源卡片重新可用；重新读一次卡片列表。
-        void refreshCards();
       })();
     },
-    [refreshCards],
+    [beginSave, endSave, refreshCards],
   );
 
   const undo = useCallback(() => {
@@ -707,6 +769,7 @@ export default function App() {
     setDoc(opened);
     setAnnotations(input.annotations);
     resetHistory();
+    resetSaveState();
     setToolbar(null);
     setFocusId(null);
     setAiPanel(null);
@@ -731,7 +794,7 @@ export default function App() {
         // 元数据是锦上添花，失败不影响阅读与标注。
       }
     }
-  }, [refreshCards, resetHistory]);
+  }, [refreshCards, resetHistory, resetSaveState]);
 
   const openFile = useCallback(
     async (file: File) => {
@@ -827,6 +890,7 @@ export default function App() {
       setDoc(null);
       setAnnotations([]);
       resetHistory();
+      resetSaveState();
       setToolbar(null);
       setFocusId(null);
       setEditingId(null);
@@ -845,7 +909,7 @@ export default function App() {
     } else {
       finish();
     }
-  }, [resetHistory]);
+  }, [resetHistory, resetSaveState]);
 
   const handleViewerScroll = useCallback(() => {
     if (scrollFrame.current !== null) return;
@@ -988,6 +1052,13 @@ export default function App() {
     }
     setZoomMode('custom');
     setScale(next);
+  }, []);
+
+  /** 键盘翻页按视口高度滚动，略小于一屏，保留上一页的上下文。 */
+  const scrollPages = useCallback((direction: 1 | -1) => {
+    const viewer = viewerRef.current;
+    if (!viewer) return;
+    viewer.scrollBy({ top: direction * viewer.clientHeight * 0.92, behavior: 'smooth' });
   }, []);
 
   const goToPage = useCallback((page: number) => {
@@ -1214,31 +1285,71 @@ export default function App() {
       if (event.key === 'Escape') {
         setToolbar(null);
         setFindOpen(false);
+        setHelpOpen(false);
         setSearchTarget(null);
         window.getSelection()?.removeAllRanges();
         return;
       }
 
-      if (!doc || !(event.ctrlKey || event.metaKey)) return;
-      const key = event.key.toLowerCase();
-      if (key !== 'z' && key !== 'y') return;
+      // 输入控件里的按键交给文本自身：撤销、空格与翻页都不拦截。
+      if (isTypingTarget(event.target)) return;
 
-      // 输入框内的 Ctrl+Z 留给文本本身，不撤销标注。
-      const target = event.target as HTMLElement | null;
-      if (
-        target &&
-        (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
-      ) {
+      if (event.ctrlKey || event.metaKey) {
+        const key = event.key.toLowerCase();
+        if (key === 'z') {
+          event.preventDefault();
+          if (event.shiftKey) redo();
+          else undo();
+          return;
+        }
+        if (key === 'y') {
+          event.preventDefault();
+          redo();
+          return;
+        }
+
+        if (!doc) return;
+        if (event.key === '=' || event.key === '+') {
+          event.preventDefault();
+          zoomTo(Math.min(MAX_SCALE, +(scaleRef.current + 0.25).toFixed(2)));
+        } else if (event.key === '-') {
+          event.preventDefault();
+          zoomTo(Math.max(MIN_SCALE, +(scaleRef.current - 0.25).toFixed(2)));
+        } else if (event.key === '0') {
+          event.preventDefault();
+          setZoomMode('fit-width');
+        }
         return;
       }
 
-      event.preventDefault();
-      if (key === 'y' || event.shiftKey) redo();
-      else undo();
+      if (!doc) return;
+      const key = event.key;
+      if (key === 'PageDown' || (key === ' ' && !event.shiftKey)) {
+        // 焦点在按钮/链接上时，空格应当触发控件本身。
+        if (key === ' ' && (event.target as HTMLElement | null)?.closest('button, a')) return;
+        event.preventDefault();
+        scrollPages(1);
+      } else if (key === 'PageUp' || (key === ' ' && event.shiftKey)) {
+        event.preventDefault();
+        scrollPages(-1);
+      } else if (key === 'j') {
+        scrollPages(1);
+      } else if (key === 'k') {
+        scrollPages(-1);
+      } else if (key === 'Home') {
+        event.preventDefault();
+        goToPage(0);
+      } else if (key === 'End') {
+        event.preventDefault();
+        goToPage(doc.pageCount - 1);
+      } else if (key === '?' || (key === '/' && event.shiftKey)) {
+        event.preventDefault();
+        setHelpOpen(true);
+      }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [doc, redo, undo]);
+  }, [doc, goToPage, redo, scrollPages, undo, zoomTo]);
 
   return (
     <div className="app">
@@ -1326,6 +1437,24 @@ export default function App() {
               </button>
             </div>
           </div>
+        )}
+
+        {doc && desktop && saveState !== 'idle' && (
+          <span className={`save-state ${saveState}`} aria-live="polite">
+            {saveState === 'saving' ? '保存中…' : '已保存'}
+          </span>
+        )}
+
+        {doc && (
+          <button
+            type="button"
+            className="theme-toggle"
+            title="快捷键 (?)"
+            aria-label="快捷键"
+            onClick={() => setHelpOpen(true)}
+          >
+            <IconKeyboard size={16} />
+          </button>
         )}
 
         {doc && (
@@ -1808,6 +1937,92 @@ export default function App() {
           onOpenSettings={() => void openAiSettings()}
           onMessage={setMessage}
         />
+      )}
+
+      {helpOpen && (
+        <div className="modal-backdrop" onClick={() => setHelpOpen(false)}>
+          <div
+            className="shortcut-card"
+            role="dialog"
+            aria-modal="true"
+            aria-label="快捷键"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <header className="modal-head">
+              <h2>快捷键</h2>
+              <button
+                type="button"
+                className="icon-button"
+                aria-label="关闭"
+                onClick={() => setHelpOpen(false)}
+              >
+                ×
+              </button>
+            </header>
+            <dl>
+              <div>
+                <dt>
+                  <kbd>Ctrl</kbd> + <kbd>F</kbd>
+                </dt>
+                <dd>页内查找</dd>
+              </div>
+              <div>
+                <dt>
+                  <kbd>Ctrl</kbd> + <kbd>Z</kbd>
+                </dt>
+                <dd>撤销标注操作</dd>
+              </div>
+              <div>
+                <dt>
+                  <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Z</kbd>
+                </dt>
+                <dd>重做标注操作</dd>
+              </div>
+              <div>
+                <dt>
+                  <kbd>PageDown</kbd> / <kbd>Space</kbd>
+                </dt>
+                <dd>向下翻一屏</dd>
+              </div>
+              <div>
+                <dt>
+                  <kbd>PageUp</kbd> / <kbd>Shift</kbd> + <kbd>Space</kbd>
+                </dt>
+                <dd>向上翻一屏</dd>
+              </div>
+              <div>
+                <dt>
+                  <kbd>Home</kbd> / <kbd>End</kbd>
+                </dt>
+                <dd>第一页 / 最后一页</dd>
+              </div>
+              <div>
+                <dt>
+                  <kbd>Ctrl</kbd> + <kbd>+</kbd> / <kbd>−</kbd>
+                </dt>
+                <dd>放大 / 缩小</dd>
+              </div>
+              <div>
+                <dt>
+                  <kbd>Ctrl</kbd> + <kbd>0</kbd>
+                </dt>
+                <dd>适应宽度</dd>
+              </div>
+              <div>
+                <dt>
+                  <kbd>Esc</kbd>
+                </dt>
+                <dd>关闭浮层、清除选区</dd>
+              </div>
+              <div>
+                <dt>
+                  <kbd>?</kbd>
+                </dt>
+                <dd>打开这个列表</dd>
+              </div>
+            </dl>
+          </div>
+        </div>
       )}
 
       {aiSettingsOpen && ai && (
