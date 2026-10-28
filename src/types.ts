@@ -48,12 +48,6 @@ export interface ImportResult {
   annotations: Annotation[];
 }
 
-export interface LibraryInfo {
-  root: string;
-  documents: number;
-  annotations: number;
-}
-
 export interface ScanReport {
   root: string;
   documents: number;

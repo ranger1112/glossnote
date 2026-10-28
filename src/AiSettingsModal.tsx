@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { saveAiSettings, testAi } from './desktop';
+import { errorText } from './errors';
 import type { AiSettingsView } from './types';
 
 interface AiSettingsModalProps {
@@ -7,10 +8,6 @@ interface AiSettingsModalProps {
   onClose: () => void;
   onSaved: (view: AiSettingsView) => void;
   onMessage: (message: string) => void;
-}
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 export function AiSettingsModal({

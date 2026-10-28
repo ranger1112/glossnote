@@ -7,7 +7,6 @@ import type {
   CardView,
   DocumentMeta,
   ImportResult,
-  LibraryInfo,
   PageTextInput,
   ScanReport,
   SearchHit,
@@ -39,16 +38,8 @@ export function openDocument(docId: string): Promise<ImportResult> {
   return invoke('open_document', { docId });
 }
 
-export function getLastDocument(): Promise<ImportResult | null> {
-  return invoke('last_document');
-}
-
 export function listDocuments(): Promise<DocumentMeta[]> {
   return invoke('list_documents');
-}
-
-export function listAnnotations(docId: string): Promise<Annotation[]> {
-  return invoke('list_annotations', { docId });
 }
 
 export function upsertAnnotation(docId: string, annotation: Annotation): Promise<void> {
@@ -81,10 +72,6 @@ export function searchAnnotations(query: string): Promise<SearchHit[]> {
 
 export function exportMarkdown(path: string, docId?: string): Promise<string> {
   return invoke('export_markdown', { path, docId: docId ?? null });
-}
-
-export function libraryInfo(): Promise<LibraryInfo> {
-  return invoke('library_info');
 }
 
 export function listCards(): Promise<CardView[]> {

@@ -20,7 +20,8 @@ pub fn open(path: &Path) -> Result<Connection, String> {
 /// 索引文件实在打不开时的兜底：本次会话用内存库。
 /// PDF 与 sidecar 不受影响，标注照常写入书库，只是阅读进度等本机状态不落盘。
 pub fn open_memory() -> Result<Connection, String> {
-    let conn = Connection::open_in_memory().map_err(|error| format!("创建临时索引失败：{error}"))?;
+    let conn =
+        Connection::open_in_memory().map_err(|error| format!("创建临时索引失败：{error}"))?;
     migrate(&conn)?;
     Ok(conn)
 }
@@ -109,12 +110,8 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         );
         CREATE INDEX IF NOT EXISTS idx_annotations_doc ON annotations(doc_id);
 
-        CREATE VIRTUAL TABLE IF NOT EXISTS annotation_fts USING fts5(
-          annotation_id UNINDEXED,
-          doc_id UNINDEXED,
-          quote,
-          body
-        );
+        -- 搜索用 LIKE 子串匹配；0.4 建的 FTS5 表从未被查询过，删掉以免每次写标注多维护一份索引。
+        DROP TABLE IF EXISTS annotation_fts;
 
         CREATE TABLE IF NOT EXISTS cards (
           id TEXT PRIMARY KEY,
@@ -220,16 +217,6 @@ pub fn find_by_id(conn: &Connection, id: &str) -> Result<Option<DocumentRow>, St
     )
     .optional()
     .map_err(|error| format!("查询文档失败：{error}"))
-}
-
-pub fn find_by_rel_path(conn: &Connection, rel_path: &str) -> Result<Option<DocumentRow>, String> {
-    conn.query_row(
-        &format!("{DOCUMENT_SELECT} WHERE d.rel_path = ?1"),
-        params![rel_path],
-        row_to_document,
-    )
-    .optional()
-    .map_err(|error| format!("查询文档路径失败：{error}"))
 }
 
 pub fn list_documents(conn: &Connection) -> Result<Vec<DocumentRow>, String> {
@@ -423,26 +410,6 @@ pub fn upsert_annotation(
     )
     .map_err(|error| format!("写入标注失败：{error}"))?;
 
-    conn.execute(
-        "DELETE FROM annotation_fts WHERE annotation_id = ?1",
-        params![annotation.id],
-    )
-    .map_err(|error| format!("更新搜索索引失败：{error}"))?;
-
-    if !annotation.deleted {
-        let quote = annotation
-            .anchor
-            .get("quote")
-            .and_then(|value| value.as_str())
-            .unwrap_or("");
-        conn.execute(
-            "INSERT INTO annotation_fts (annotation_id, doc_id, quote, body)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![annotation.id, doc_id, quote, annotation.body],
-        )
-        .map_err(|error| format!("写入搜索索引失败：{error}"))?;
-    }
-
     Ok(())
 }
 
@@ -574,8 +541,7 @@ pub fn list_chunks(conn: &Connection, doc_id: &str) -> Result<Vec<Chunk>, String
 /// 切换书库时清空索引；书库目录里的 PDF 与 sidecar 不受影响。
 pub fn clear_library(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
-        "DELETE FROM annotation_fts;
-         DELETE FROM cards;
+        "DELETE FROM cards;
          DELETE FROM chunks;
          DELETE FROM annotations;
          DELETE FROM documents;",
@@ -807,8 +773,6 @@ pub fn remove_document(conn: &Connection, id: &str, now: i64) -> Result<(), Stri
         params![id, now],
     )
     .map_err(|error| format!("标记失效卡片失败：{error}"))?;
-    conn.execute("DELETE FROM annotation_fts WHERE doc_id = ?1", params![id])
-        .map_err(|error| format!("清理搜索索引失败：{error}"))?;
     conn.execute("DELETE FROM chunks WHERE doc_id = ?1", params![id])
         .map_err(|error| format!("清理全文索引失败：{error}"))?;
     conn.execute("DELETE FROM annotations WHERE doc_id = ?1", params![id])

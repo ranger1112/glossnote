@@ -280,6 +280,15 @@ select {
   color: var(--danger);
 }
 
+.icon-button.confirming {
+  width: auto;
+  padding: 0 8px;
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .theme-toggle {
   width: 32px;
   height: 32px;

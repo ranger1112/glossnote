@@ -103,14 +103,6 @@ pub struct ImportResult {
     pub annotations: Vec<Annotation>,
 }
 
-#[derive(Serialize, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct LibraryInfo {
-    pub root: String,
-    pub documents: usize,
-    pub annotations: usize,
-}
-
 /// 每次扫描书库的结果，用来在界面上显示合并与冲突处理情况。
 #[derive(Serialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]

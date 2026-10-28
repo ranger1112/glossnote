@@ -20,14 +20,11 @@ import {
   IconUpload,
 } from './icons';
 import type { DocumentMeta, ScanReport, SearchHit } from './types';
+import { errorText } from './errors';
 
 interface LibraryProps {
   onOpen: (docId: string, page?: number) => void;
   onMessage: (message: string) => void;
-}
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 interface Inspection {
@@ -81,35 +78,44 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
 
   const ensureCovers = useCallback(async (list: DocumentMeta[]) => {
     const run = ++coverRun.current;
+    const queue = list.filter((doc) => !doc.cover || doc.pageCount === 0);
+    // 每个任务都要把整份 PDF 交给 pdf.js；并发 2 个足够，再多容易顶不住大文件。
+    const CONCURRENCY = 2;
 
-    for (const doc of list) {
-      if (coverRun.current !== run) return;
-      if (doc.cover && doc.pageCount > 0) continue;
+    const worker = async () => {
+      while (coverRun.current === run) {
+        const doc = queue.shift();
+        if (!doc) return;
 
-      try {
-        const inspection = await inspectPdf(doc);
-        if (coverRun.current !== run) return;
+        try {
+          const inspection = await inspectPdf(doc);
+          if (coverRun.current !== run) return;
 
-        let cover = doc.cover;
-        if (inspection.cover) {
-          const updated = await saveCover(doc.id, inspection.cover);
-          cover = updated.cover;
+          let cover = doc.cover;
+          if (inspection.cover) {
+            const updated = await saveCover(doc.id, inspection.cover);
+            cover = updated.cover;
+          }
+          if (doc.pageCount !== inspection.pageCount) {
+            await updateDocumentMeta(doc.id, { pageCount: inspection.pageCount });
+          }
+          if (coverRun.current !== run) return;
+
+          setDocs((current) =>
+            current.map((item) =>
+              item.id === doc.id ? { ...item, cover, pageCount: inspection.pageCount } : item,
+            ),
+          );
+        } catch (error) {
+          // 封面只是展示层：个别 PDF 渲染失败不应阻塞书库。
+          console.warn('生成封面失败', doc.name, error);
         }
-        if (doc.pageCount !== inspection.pageCount) {
-          await updateDocumentMeta(doc.id, { pageCount: inspection.pageCount });
-        }
-        if (coverRun.current !== run) return;
-
-        setDocs((current) =>
-          current.map((item) =>
-            item.id === doc.id ? { ...item, cover, pageCount: inspection.pageCount } : item,
-          ),
-        );
-      } catch (error) {
-        // 封面只是展示层：个别 PDF 渲染失败不应阻塞书库。
-        console.warn('生成封面失败', doc.name, error);
       }
-    }
+    };
+
+    await Promise.all(
+      Array.from({ length: Math.min(CONCURRENCY, queue.length) }, () => worker()),
+    );
   }, []);
 
   const loadDocs = useCallback(async () => {

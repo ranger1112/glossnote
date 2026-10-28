@@ -8,6 +8,7 @@ import {
   indexDocumentText,
 } from './desktop';
 import { extractDocumentText } from './pdfText';
+import { errorText } from './errors';
 import type { AiAnswer } from './types';
 
 type PanelMode = 'qa' | 'explain';
@@ -29,10 +30,6 @@ interface AiPanelProps {
   onJumpPage: (page: number) => void;
   onOpenSettings: () => void;
   onMessage: (message: string) => void;
-}
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 export function AiPanel({

@@ -3,7 +3,7 @@ use crate::{
     fsrs::{self, MemoryState},
     models::{
         Annotation, Card, CardView, Document, DocumentMetaPatch, DocumentRow, ImportResult,
-        LibraryInfo, ScanReport, SearchHit, Sidecar,
+        ScanReport, SearchHit, Sidecar,
     },
     settings,
     state::AppState,
@@ -435,7 +435,10 @@ fn write_sidecar_if_changed(
 ) -> Result<(), String> {
     let bytes = serialized_sidecar(conn, doc_id)?;
     let path = sidecar_path(root, doc_id);
-    if fs::read(&path).map(|existing| existing == bytes).unwrap_or(false) {
+    if fs::read(&path)
+        .map(|existing| existing == bytes)
+        .unwrap_or(false)
+    {
         return Ok(());
     }
     write_sidecar_bytes(&path, &bytes)
@@ -457,16 +460,25 @@ pub fn import_pdf(app: &AppHandle, source: &str) -> Result<ImportResult, String>
 
     let id = hash_file(&source)?;
     let now = now_ms();
-    let conn = state
-        .db
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-    if let Some(existing) = db::find_by_id(&conn, &id)? {
+    // 查重只占一次短锁；复制大文件在锁外做，否则导入期间所有数据库请求都会被堵住。
+    let existing = {
+        let conn = state
+            .db
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        db::find_by_id(&conn, &id)?
+    };
+
+    if let Some(existing) = existing {
         let destination = root.join(&existing.rel_path);
         if !destination.exists() {
             copy_atomic(&source, &destination)?;
         }
+        let conn = state
+            .db
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         db::touch_document(&conn, &id, now)?;
         let document = db::find_by_id(&conn, &id)?.ok_or_else(|| "文档不存在".to_string())?;
         let annotations = merge_document(&conn, &root, &document)?;
@@ -516,6 +528,10 @@ pub fn import_pdf(app: &AppHandle, source: &str) -> Result<ImportResult, String>
         last_page: 0,
         annotation_count: 0,
     };
+    let conn = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     db::upsert_document(&conn, &row)?;
 
     let annotations = merge_document(&conn, &root, &row)?;
@@ -539,19 +555,48 @@ pub fn scan(app: &AppHandle) -> Result<ScanReport, String> {
     };
 
     let books = root.join("books");
-    let mut paths = Vec::new();
+    let mut entries = Vec::new();
     let mut seen_paths = std::collections::HashSet::new();
     for entry in fs::read_dir(&books).map_err(|error| format!("读取书库失败：{error}"))? {
         let entry = entry.map_err(|error| format!("读取书库条目失败：{error}"))?;
         let path = entry.path();
-        if path.is_file() && is_pdf(&path) {
-            if let Ok(relative) = path.strip_prefix(&root) {
-                seen_paths.insert(relative.to_string_lossy().replace('\\', "/"));
-            }
-            paths.push(path);
+        if !path.is_file() || !is_pdf(&path) {
+            continue;
         }
+        let metadata = fs::metadata(&path).map_err(|error| format!("读取书库文件失败：{error}"))?;
+        let relative = path
+            .strip_prefix(&root)
+            .map_err(|_| "无法计算书库相对路径".to_string())?
+            .to_string_lossy()
+            .replace('\\', "/");
+        seen_paths.insert(relative.clone());
+        entries.push((path, relative, metadata.len(), mtime_ms(&metadata)));
     }
-    paths.sort();
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+
+    // 只短暂持锁读一次索引，把哈希放到锁外：大 PDF 的哈希是秒级操作，
+    // 不该在扫描期间挡住保存进度、写入标注这些请求。
+    let known: HashMap<String, DocumentRow> = {
+        let conn = state
+            .db
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        db::list_documents(&conn)?
+            .into_iter()
+            .map(|row| (row.rel_path.clone(), row))
+            .collect()
+    };
+
+    let mut resolved = Vec::with_capacity(entries.len());
+    for (path, relative, size, mtime) in entries {
+        let by_path = known.get(&relative).cloned();
+        // 路径、大小、修改时间都没变就沿用旧哈希，否则重新计算。
+        let id = match &by_path {
+            Some(row) if row.size == size && row.mtime == mtime => row.id.clone(),
+            _ => hash_file(&path)?,
+        };
+        resolved.push((path, relative, size, mtime, id, by_path));
+    }
 
     let conn = state
         .db
@@ -561,22 +606,7 @@ pub fn scan(app: &AppHandle) -> Result<ScanReport, String> {
     let mut seen = std::collections::HashSet::new();
     let mut duplicate_pdfs = 0;
 
-    for path in paths {
-        let metadata = fs::metadata(&path).map_err(|error| format!("读取书库文件失败：{error}"))?;
-        let size = metadata.len();
-        let mtime = mtime_ms(&metadata);
-        let relative = path
-            .strip_prefix(&root)
-            .map_err(|_| "无法计算书库相对路径".to_string())?
-            .to_string_lossy()
-            .replace('\\', "/");
-
-        let by_path = db::find_by_rel_path(&conn, &relative)?;
-        let id = match &by_path {
-            Some(row) if row.size == size && row.mtime == mtime => row.id.clone(),
-            _ => hash_file(&path)?,
-        };
-
+    for (path, relative, size, mtime, id, by_path) in resolved {
         if !seen.insert(id.clone()) {
             duplicate_pdfs += 1;
             continue;
@@ -650,32 +680,6 @@ pub fn scan(app: &AppHandle) -> Result<ScanReport, String> {
         ignored_sidecars: stats.ignored,
         scanned_at: now_ms(),
     })
-}
-
-pub fn last_document(app: &AppHandle) -> Result<Option<ImportResult>, String> {
-    let state = app.state::<AppState>();
-    let root = state.root();
-    ensure_dirs(&root)?;
-
-    let conn = state
-        .db
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-    for row in db::list_documents(&conn)? {
-        if !root.join(&row.rel_path).exists() {
-            continue;
-        }
-        db::touch_document(&conn, &row.id, now_ms())?;
-        let annotations = merge_document(&conn, &root, &row)?;
-        let document = db::find_by_id(&conn, &row.id)?.unwrap_or(row);
-        return Ok(Some(ImportResult {
-            document: document.to_document(&root),
-            annotations,
-        }));
-    }
-
-    Ok(None)
 }
 
 pub fn list_documents(app: &AppHandle) -> Result<Vec<Document>, String> {
@@ -872,15 +876,6 @@ pub fn export_markdown(
 
     fs::write(&path, out).map_err(|error| format!("写入 Markdown 失败：{error}"))?;
     Ok(path)
-}
-
-pub fn list_annotations(app: &AppHandle, doc_id: &str) -> Result<Vec<Annotation>, String> {
-    let state = app.state::<AppState>();
-    let conn = state
-        .db
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    db::list_annotations(&conn, doc_id)
 }
 
 pub fn upsert_annotation(
@@ -1215,21 +1210,6 @@ pub fn review_card(app: &AppHandle, card_id: &str, rating: u8) -> Result<CardVie
     db::upsert_card(&conn, &card)?;
     persist_card_sidecar(&conn, &root, &card)?;
     card_view(&conn, &card.id, now)
-}
-
-pub fn info(app: &AppHandle) -> Result<LibraryInfo, String> {
-    let state = app.state::<AppState>();
-    let root = state.root();
-    let conn = state
-        .db
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (documents, annotations) = db::counts(&conn)?;
-    Ok(LibraryInfo {
-        root: root.to_string_lossy().into_owned(),
-        documents,
-        annotations,
-    })
 }
 
 #[cfg(test)]

@@ -69,16 +69,3 @@ export function loadDoc(docId: string): DocRecord | null {
 export function saveDoc(record: DocRecord): void {
   localStorage.setItem(PREFIX + record.docId, JSON.stringify(record));
 }
-
-export function listDocs(): DocRecord[] {
-  const records: DocRecord[] = [];
-  for (let i = 0; i < localStorage.length; i += 1) {
-    const key = localStorage.key(i);
-    if (!key?.startsWith(PREFIX)) continue;
-
-    const docId = key.slice(PREFIX.length);
-    const record = loadDoc(docId);
-    if (record) records.push(record);
-  }
-  return records;
-}

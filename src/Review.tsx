@@ -2,15 +2,12 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { CardEditor, type CardDraft } from './CardEditor';
 import { deleteCard, listCards, reviewCard, updateCard } from './desktop';
 import { IconRefresh } from './icons';
+import { errorText } from './errors';
 import type { CardView } from './types';
 
 interface ReviewProps {
   onOpenDoc: (docId: string, page?: number) => void;
   onMessage: (message: string) => void;
-}
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function previewInterval(dueAt: number): string {

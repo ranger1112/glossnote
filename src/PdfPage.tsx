@@ -2,7 +2,13 @@ import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist';
 import { pdfjsLib, type PdfTextItem } from './pdfjs';
 import { joinPdfItems } from './pdfText';
-import { buildAnchor, resolveAnchor, type Anchor, type NormRect } from './anchoring';
+import {
+  buildAnchor,
+  resolveAnchor,
+  type Anchor,
+  type NormRect,
+  type Resolution,
+} from './anchoring';
 import type { Annotation } from './types';
 
 interface PdfPageProps {
@@ -15,7 +21,8 @@ interface PdfPageProps {
   active: boolean;
   annotations: Annotation[];
   focusId: string | null;
-  onSelect: (anchor: Anchor, box: { x: number; y: number }) => void;
+  /** context 是选区前后各一段正文，供 AI 解释使用；不写进锚点。 */
+  onSelect: (anchor: Anchor, box: { x: number; y: number }, context: string) => void;
 }
 
 interface ItemInfo {
@@ -28,6 +35,8 @@ interface PageModel {
   text: string;
   items: ItemInfo[];
   byItem: Map<number, ItemInfo>;
+  /** 同一页文本内的锚点解析缓存：焦点或批注变化会反复重绘，模糊匹配不该重跑。 */
+  resolutions: Map<string, Resolution | null>;
 }
 
 interface Point {
@@ -58,7 +67,16 @@ function buildModel(items: PdfTextItem[], divs: HTMLElement[]): PageModel {
     byItem.set(index, info);
   });
 
-  return { text, items: infoList, byItem };
+  return { text, items: infoList, byItem, resolutions: new Map() };
+}
+
+function resolveCached(model: PageModel, anchor: Anchor): Resolution | null {
+  const key = `${anchor.pageHash}:${anchor.start}:${anchor.end}:${anchor.quote}`;
+  if (model.resolutions.has(key)) return model.resolutions.get(key) ?? null;
+
+  const resolved = resolveAnchor(anchor, model.text);
+  model.resolutions.set(key, resolved);
+  return resolved;
 }
 
 function pointAt(model: PageModel, offset: number): Point | null {
@@ -225,7 +243,7 @@ export const PdfPage = memo(function PdfPage({
     if (pageRect.width === 0 || pageRect.height === 0) return;
 
     for (const annotation of annotationsRef.current) {
-      const resolved = resolveAnchor(annotation.anchor, model.text);
+      const resolved = resolveCached(model, annotation.anchor);
       if (!resolved) continue;
 
       const computed = rectsForRange(model, resolved.start, resolved.end, pageElement);
@@ -427,8 +445,17 @@ export const PdfPage = memo(function PdfPage({
       const anchor = buildAnchor(pageIndex, model.text, start, end, rects);
       if (!anchor) return;
 
+      // AI 解释需要比锚点宽得多的上下文；锚点本身仍只存前后 24 字。
+      const CONTEXT_CHARS = 400;
+      const context = [
+        model.text.slice(Math.max(0, start - CONTEXT_CHARS), start).trim(),
+        model.text.slice(end, Math.min(model.text.length, end + CONTEXT_CHARS)).trim(),
+      ]
+        .filter(Boolean)
+        .join('\n…\n');
+
       const box = range.getBoundingClientRect();
-      onSelect(anchor, { x: box.left + box.width / 2, y: box.top });
+      onSelect(anchor, { x: box.left + box.width / 2, y: box.top }, context);
     }, 0);
   }, [pageIndex, onSelect]);
 

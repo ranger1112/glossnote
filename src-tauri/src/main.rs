@@ -11,7 +11,7 @@ mod state;
 use crate::{
     models::{
         AiAnswer, AiSettingsInput, AiSettingsView, Annotation, CardView, Document,
-        DocumentMetaPatch, ImportResult, LibraryInfo, PageTextInput, ScanReport, SearchHit,
+        DocumentMetaPatch, ImportResult, PageTextInput, ScanReport, SearchHit,
     },
     state::AppState,
 };
@@ -20,11 +20,6 @@ use std::{
     sync::{Mutex, RwLock},
 };
 use tauri::{AppHandle, Manager};
-
-#[tauri::command(async)]
-fn library_info(app: AppHandle) -> Result<LibraryInfo, String> {
-    library::info(&app)
-}
 
 /// 启动时的恢复提示只给用户看一次。
 #[tauri::command(async)]
@@ -94,18 +89,8 @@ async fn export_markdown(
 }
 
 #[tauri::command(async)]
-fn last_document(app: AppHandle) -> Result<Option<ImportResult>, String> {
-    library::last_document(&app)
-}
-
-#[tauri::command(async)]
 fn list_documents(app: AppHandle) -> Result<Vec<Document>, String> {
     library::list_documents(&app)
-}
-
-#[tauri::command(async)]
-fn list_annotations(app: AppHandle, doc_id: String) -> Result<Vec<Annotation>, String> {
-    library::list_annotations(&app, &doc_id)
 }
 
 #[tauri::command(async)]
@@ -289,7 +274,6 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            library_info,
             startup_notice,
             scan_library,
             set_library_root,
@@ -299,9 +283,7 @@ fn main() {
             save_progress,
             search_annotations,
             export_markdown,
-            last_document,
             list_documents,
-            list_annotations,
             upsert_annotation,
             delete_annotation,
             list_cards,

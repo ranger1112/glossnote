@@ -23,6 +23,7 @@ import type {
   HighlightColor,
 } from './types';
 import { loadDoc, saveDoc, sha256Hex } from './storage';
+import { errorText } from './errors';
 import { isTauri } from './platform';
 import {
   aiSettings,
@@ -49,6 +50,8 @@ interface OpenedDoc {
 
 interface ToolbarState {
   anchor: Anchor;
+  /** 选区前后各一段正文，只用于 AI 解释，不写入锚点。 */
+  context: string;
   x: number;
   y: number;
 }
@@ -99,10 +102,6 @@ type AiPanelState =
   | { mode: 'qa' }
   | { mode: 'explain'; page: number; quote: string; context: string }
   | null;
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 function defaultCardTitle(annotation: Annotation): string {
   const line = (annotation.anchor.quote || annotation.body).trim().split('\n')[0]?.trim() ?? '';
@@ -316,7 +315,7 @@ export default function App() {
   }, [ai]);
 
   const openAssistant = useCallback(
-    (mode: 'qa' | 'explain', anchor?: Anchor) => {
+    (mode: 'qa' | 'explain', anchor?: Anchor, contextText?: string) => {
       if (!docRef.current) return;
       if (!ai?.ready) {
         setMessage('请先在 AI 设置中启用并填写 API Key。');
@@ -325,9 +324,10 @@ export default function App() {
       }
 
       if (mode === 'explain' && anchor) {
-        const context = [anchor.prefix.trim(), anchor.suffix.trim()]
-          .filter(Boolean)
-          .join('\n…\n');
+        // 优先用阅读器给出的宽上下文；没有时退回锚点自带的前后 24 字。
+        const context =
+          contextText?.trim() ||
+          [anchor.prefix.trim(), anchor.suffix.trim()].filter(Boolean).join('\n…\n');
         setAiPanel({
           mode: 'explain',
           page: anchor.page,
@@ -753,13 +753,17 @@ export default function App() {
     [],
   );
 
-  const handleSelect = useCallback((anchor: Anchor, box: { x: number; y: number }) => {
-    setToolbar({
-      anchor,
-      x: Math.min(Math.max(box.x, 90), window.innerWidth - 90),
-      y: Math.max(box.y, 70),
-    });
-  }, []);
+  const handleSelect = useCallback(
+    (anchor: Anchor, box: { x: number; y: number }, context: string) => {
+      setToolbar({
+        anchor,
+        context,
+        x: Math.min(Math.max(box.x, 90), window.innerWidth - 90),
+        y: Math.max(box.y, 70),
+      });
+    },
+    [],
+  );
 
   const saveCard = useCallback(
     async (draft: CardDraft) => {
@@ -1100,7 +1104,7 @@ export default function App() {
               <button
                 type="button"
                 className="toolbar-note"
-                onClick={() => openAssistant('explain', toolbar.anchor)}
+                onClick={() => openAssistant('explain', toolbar.anchor, toolbar.context)}
               >
                 <IconSparkles size={13} />
                 AI 解释
@@ -1180,6 +1184,7 @@ function AnnotationCard({
   onDelete,
 }: AnnotationCardProps) {
   const [draft, setDraft] = useState(annotation.body);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [tagDraft, setTagDraft] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const draftRef = useRef(annotation.body);
@@ -1197,6 +1202,13 @@ function AnnotationCard({
   useEffect(() => {
     if (editing) textareaRef.current?.focus();
   }, [editing]);
+
+  // 删除标注会同步墓碑到 sidecar，先让用户点第二次确认；4 秒内没点就收回。
+  useEffect(() => {
+    if (!confirmingDelete) return;
+    const timer = window.setTimeout(() => setConfirmingDelete(false), 4000);
+    return () => window.clearTimeout(timer);
+  }, [confirmingDelete]);
 
   /** 输入停顿 600ms 或失焦时落盘；组件卸载时也补一次，避免切换文档丢字。 */
   const flush = useCallback(() => {
@@ -1236,14 +1248,18 @@ function AnnotationCard({
         <span>第 {annotation.page + 1} 页</span>
         <button
           type="button"
-          className="icon-button"
-          title="删除标注"
+          className={`icon-button ${confirmingDelete ? 'confirming' : ''}`}
+          title={confirmingDelete ? '再次点击删除这条标注' : '删除标注'}
           onClick={(event) => {
             event.stopPropagation();
+            if (!confirmingDelete) {
+              setConfirmingDelete(true);
+              return;
+            }
             onDelete();
           }}
         >
-          ×
+          {confirmingDelete ? '确认' : '×'}
         </button>
       </header>
 

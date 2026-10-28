@@ -12,7 +12,7 @@
 ├──────────────────────────────────────────────┤
 │ Rust（Tauri commands）                        │
 │  ├─ 文件：导入、哈希、读取、sidecar 原子写      │
-│  ├─ 索引：SQLite（rusqlite, FTS5）+ AI 文字块   │
+│  ├─ 索引：SQLite（rusqlite）+ AI 文字块         │
 │  ├─ AI：按需请求 Provider，Key 不进入 WebView   │
 │  └─ 系统：原生文件对话框、窗口、更新            │
 ├──────────────────────────────────────────────┤
@@ -78,13 +78,6 @@ annotations(
   deleted INTEGER NOT NULL DEFAULT 0
 );
 
-CREATE VIRTUAL TABLE annotation_fts USING fts5(
-  annotation_id UNINDEXED,
-  doc_id UNINDEXED,
-  quote,
-  body
-);
-
 cards(
   id TEXT PRIMARY KEY,              -- card-<annotation_id>，一条标注一张卡
   title TEXT NOT NULL,
@@ -114,7 +107,7 @@ chunks(                            -- AI 全文索引，派生数据，不进 si
 
 - 删除只写 `deleted = 1` 墓碑，不物理删除；同步、撤销、冲突合并都依赖它。
 - `doc_id` 是文件字节的 SHA-256，不是路径，也不是文件名。
-- `body` 与 `quote` 会同步写入 FTS5；0.4 的书库搜索实际走 `LIKE` 子串匹配（覆盖 quote、正文、标签、文档名与标题），先把中文搜索跑通，FTS5 留待压测后接入。
+- 书库搜索走 `LIKE` 子串匹配（覆盖 quote、正文、标签、文档名与标题），先把中文搜索跑通。0.4 曾建过 FTS5 表但从未被查询，现已删除；需要全文排序时再按实际查询补索引。
 - `last_page` 是本机阅读进度，不写入 sidecar，也不参与跨设备合并。
 - 卡片的 `links` 只存出链 id；反向链接在列表查询时用内存反查，避免维护两张表造成不一致。
 - 卡片删除写墓碑；来源标注删除时卡片不删除，只把 `status` 改为 `orphaned`。
@@ -238,7 +231,7 @@ chunks(                            -- AI 全文索引，派生数据，不进 si
 
 ### 两条使用路径
 
-**划词解释**：选中文字后发送 quote、前后文、页码；系统提示要求只依据这段文字解释，回答带页码来源。
+**划词解释**：选中文字后发送 quote、页码，以及选区所在页前后各约 400 字的正文作为上下文（不写入锚点）；系统提示要求只依据这段文字解释，回答带页码来源。
 
 **问答 / 总结**：
 
@@ -261,7 +254,7 @@ chunks(                            -- AI 全文索引，派生数据，不进 si
 
 - **控件**：按钮统一 34px 高，分 `primary`（墨色/深色下反白）、`ghost`（描边或纯文字）、`icon-button` 三档；危险操作只在文字上使用 `.danger`，不整块涂红。
 - **图标**：内联在 `src/icons.tsx`，统一 1.7 描边、`currentColor`，不引图标库，避免额外依赖与字体加载。
-- **反馈**：状态提示是左下角浮层 `.status-bar`，按文案区分 info / busy / error，成功提示 5 秒自动消失；它不占据文档流，阅读位置不会因提示跳动。
+- **反馈**：状态提示是左下角浮层 `.status-bar`，按文案区分 info / busy / error，成功提示 5 秒自动消失；它不占据文档流，阅读位置不会因提示跳动。删除标注需要在同一按钮上点第二次确认，4 秒内未确认会自动恢复。
 - **书库页头**：标题块固定在 380px，操作组靠右；书库路径单行省略，完整路径放在 tooltip。窗口变窄时操作组整体折到下一行，不压缩搜索框。
 - **高亮**：高亮层用 `mix-blend-mode: multiply` 与下方 canvas 相乘，纸面的字透出来；因此 `.highlight-layer` 不能用 `z-index` 自建层叠上下文（那样只跟空图层混合，字会被整块盖住），改由 `.pdf-page` 的 `isolation: isolate` 建立混合组。pdf.js 的文本项按字形切分且互相压边，绘制前按行合并相邻矩形，避免重叠处乘两次出现深色接缝。
 - **可访问性**：所有可聚焦控件有 `:focus-visible` 外圈；`prefers-reduced-motion` 下禁用过渡与动画。
@@ -287,7 +280,7 @@ chunks(                            -- AI 全文索引，派生数据，不进 si
 | 外壳 | Tauri 2 | 体积小、内存低，Rust 适合做文件与索引 |
 | UI | React + TypeScript | 阅读器状态多，组件化收益明显 |
 | PDF | pdf.js | canvas 渲染 + 可选择的文本层，坐标可得 |
-| 索引 | SQLite（rusqlite bundled）+ FTS5 | 单文件、可重建、全文检索够用 |
+| 索引 | SQLite（rusqlite bundled） | 单文件、可重建；当前数据量用 `LIKE` 子串匹配足够 |
 | 测试 | Vitest | 锚定算法是纯函数，先测算法再测 UI |
 | 可移植数据 | 明文 JSON sidecar | 用户可读、可脚本处理、云盘可搬运 |
 
@@ -304,7 +297,7 @@ pdf.js 的 `cmaps/`、`standard_fonts/`、`wasm/`、`iccs/` 是运行时才取�
 | 打开文件 | Tauri 原生对话框 + Rust 哈希，导入即入库 |
 | 持久化 | SQLite + 哈希 sidecar |
 | 书库 | 封面网格、标注数、阅读进度 |
-| 搜索 | `LIKE` 子串匹配；FTS5 表已维护未接入 |
+| 搜索 | `LIKE` 子串匹配 |
 | 封面 | 前端渲染首页，Rust 落盘 |
 | 导出 | 全库/单文档 Markdown |
 | 同步 | 云盘目录 + sidecar 冲突合并（0.5） |
