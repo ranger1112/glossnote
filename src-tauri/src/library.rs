@@ -1223,6 +1223,19 @@ mod tests {
         dir
     }
 
+    /// 文档 id 是内容地址；换哈希库时这条必须仍然成立。
+    #[test]
+    fn hash_file_matches_known_sha256() {
+        let dir = temp_dir("hash");
+        let path = dir.join("abc.pdf");
+        fs::write(&path, b"abc").unwrap();
+        assert_eq!(
+            hash_file(&path).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     fn document(id: &str, rel_path: &str) -> DocumentRow {
         DocumentRow {
             id: id.to_string(),

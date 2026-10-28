@@ -5,7 +5,7 @@ description = "GlossNote — 在文档上批注，把标注沉淀成知识"
 authors = ["ranger"]
 license = "Apache-2.0"
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.88"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
