@@ -49,7 +49,7 @@ Rust 侧只做 WebView 做不了或做起来不划算的事：文件系统、哈
 
 位置：`%APPDATA%\com.phoebe.glossnote\library.db`，不放在书库目录里，避免云盘多端同时写坏。
 
-0.3 起启动时扫描 `books/` 与 sidecars：命中 path + size + mtime 缓存就跳过哈希，未命中才计算 SHA-256；sidecar 按 `updated_at` 合并进 DB，再回写修复。删除 DB 后可完整重建。0.5 起扫描还负责识别云盘冲突副本、归档冲突文件，并报告合并结果。
+0.3 起启动时扫描 `books/` 与 sidecars：命中 path + size + mtime 缓存就跳过哈希，未命中才计算 SHA-256；sidecar 按 `updated_at` 合并进 DB，内容有变化时才回写修复（内容相同不碰文件，避免云盘把每次启动都当成一次修改）。删除 DB 后可完整重建。0.5 起扫描还负责识别云盘冲突副本、归档冲突文件，并报告合并结果。
 
 ```sql
 documents(
@@ -121,13 +121,13 @@ chunks(                            -- AI 全文索引，派生数据，不进 si
 
 ## 导入流程
 
-1. 用户点「导入」、拖入文件，或 `Ctrl+O`。
+1. 用户点「导入」，或在书库页按 `Ctrl+O`。拖入文件尚未实现。
 2. 流式计算 SHA-256。命中已有 `doc_id` 时直接打开，不重复复制。
 3. 复制到 `books/`，文件名做最小清洗；重名但内容不同则追加 ` (2)`。
 4. 书库首次展示或打开文档时，用 pdf.js 读页数与元数据，渲染首页生成封面（320px JPEG）。
 5. 写 `documents` 与 sidecar，在书库中出现。
 
-大文件先用 Rust 读取字节经 IPC 交给 WebView；超过 50 MB 给出提示，后续改用 Tauri asset protocol，避免一次性复制。
+文件超过 200 MB 时拒绝导入并提示压缩或拆分。PDF 字节不走 IPC：前端用 `convertFileSrc()` 得到 asset URL 交给 pdf.js，Rust 只负责复制、哈希与索引。
 
 ## 锚定模型
 
@@ -147,7 +147,7 @@ chunks(                            -- AI 全文索引，派生数据，不进 si
 }
 ```
 
-- `rects` 是相对页面宽高的归一化坐标（0~1），与缩放、窗口大小、DPI 无关。
+- `rects` 是相对页面宽高的归一化坐标（0~1），与缩放、窗口大小、DPI 无关。入库前按行合并相邻矩形并把坐标收到 5 位小数：pdf.js 的文本层按字形切分，一条 100 字的标注会产生 100 多个矩形（约 12 KB），合并后通常每行 1 个（约 0.5 KB）。
 - `start/end` 是页面纯文本中的字符偏移；纯文本由 pdf.js 文本层按 item 顺序拼接，并用 `hasEOL` 与间距补空格/换行。
 - 重新打开时按四级回退：
 
@@ -172,7 +172,7 @@ chunks(                            -- AI 全文索引，派生数据，不进 si
 0.4 把单文档阅读器扩展成「书库 ↔ 阅读器」两视图：
 
 - **书库**：扫描书库后列出文档卡片；封面与页数在缺失时由前端用 pdf.js 补齐；标注数来自 `annotations` 子查询。
-- **搜索**：输入停顿 240ms 后调用 `search_annotations`，在 quote、`body`、`tags` JSON、文档名与标题上做 `LIKE` 子串匹配，最多返回 100 条，按更新时间倒序。结果点击后打开文档并滚到对应页。
+- **搜索**：输入停顿 240ms 后调用 `search_annotations`，在引文（`json_extract(anchor,'$.quote')`）、`body`、`tags` JSON、文档名与标题上做 `LIKE` 子串匹配，最多返回 100 条，按更新时间倒序。不能直接匹配 `anchor` 整段 JSON——那会把坐标和 `pageHash` 也算进去，搜 `start` 或 `0.5` 会命中所有标注。结果点击后打开文档并滚到对应页。
 - **阅读进度**：滚动时按视口顶部命中页更新，700ms 防抖写 `last_page`；返回书库时再同步写一次，避免扫描读到旧值；打开文档时优先使用调用方传入的页码，其次使用 `last_page`。
 - **标签**：作为标注的 `tags` 数组存储，随标注写入 SQLite 与 sidecar；搜索命中会返回标签。
 - **导出**：`export_markdown(path, docId?)` 在 Rust 侧拼 Markdown 并原子落盘，前端只负责原生保存对话框。
@@ -207,9 +207,10 @@ chunks(                            -- AI 全文索引，派生数据，不进 si
 1. 读取 `.glossnote/annotations/` 下所有 `*.json`，解析失败或 `docId` 为空的计入 `ignoredSidecars`，文件保留不动。
 2. 按文件内的 `docId` 分组，而不是只认 `<sha256>.json`；云盘生成的 `xxx (conflicted copy).json`、`xxx (1).json` 等都会被纳入。
 3. 同一 `annotation.id` 按 `updatedAt` 新者胜；墓碑同样参与比较。规范文件先处理，时间戳相同时规范文件优先，结果确定。
-4. 合并结果回写规范 sidecar；非规范的冲突副本移到 `.glossnote/conflicts/`，文件名冲突时追加毫秒时间戳，不静默删除。
+4. 合并结果回写规范 sidecar；内容与磁盘上的文件完全相同时跳过写盘（否则云盘客户端会把每次启动都当成一次修改）。非规范的冲突副本移到 `.glossnote/conflicts/`，文件名冲突时追加毫秒时间戳，不静默删除。
 5. 同一内容哈希的多个 PDF 只索引路径排序最靠前的一份，其余保留在磁盘上并计入 `duplicatePdfs`，不自动删除。
-6. 返回 `ScanReport`：`merged`、`archived`、`duplicatePdfs`、`ignoredSidecars`、`scannedAt`，书库页展示并提供手动重扫。
+6. 索引里有、但 PDF 已不在 `books/` 的文档不再出现在书库中，只计入 `missingDocuments`；文件同步回来后下一次扫描会自动恢复，标注不受影响。
+7. 返回 `ScanReport`：`merged`、`archived`、`duplicatePdfs`、`missingDocuments`、`ignoredSidecars`、`scannedAt`，书库页展示并提供手动重扫。
 
 约束与边界：
 

@@ -3,7 +3,6 @@ name = "glossnote"
 version = "0.1.0"
 description = "GlossNote — 在文档上批注，把标注沉淀成知识"
 authors = ["ranger"]
-license = "MIT"
 edition = "2021"
 rust-version = "1.77"
 
