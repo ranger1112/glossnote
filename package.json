@@ -4,7 +4,19 @@
   "version": "0.1.0",
   "license": "Apache-2.0",
   "type": "module",
-  "description": "GlossNote — 在文档上批注，把标注沉淀成知识。",
+  "description": "GlossNote — 本地优先的 PDF 阅读与标注客户端。",
+  "author": "ranger",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ranger1112/glossnote.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ranger1112/glossnote/issues"
+  },
+  "homepage": "https://github.com/ranger1112/glossnote#readme",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "pdfjs:assets": "node scripts/copy-pdfjs-assets.mjs",
     "dev": "npm run pdfjs:assets && vite",

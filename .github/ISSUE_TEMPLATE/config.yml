@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 构建与运行文档
+    url: https://github.com/ranger1112/glossnote/blob/master/docs/build.md
+    about: 环境、命令、数据位置与自动验证方式
+  - name: 安全问题
+    url: https://github.com/ranger1112/glossnote/security/advisories/new
+    about: 请私下报告，不要开公开 Issue

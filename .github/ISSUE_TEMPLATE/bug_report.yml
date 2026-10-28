@@ -1,0 +1,54 @@
+name: 报告问题
+description: 安装、阅读、标注、同步或 AI 功能出了错
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请不要粘贴 API Key、私人文档正文或含用户名的完整路径。安全漏洞请按 SECURITY.md 私下报告。
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: 安装包文件名或书库页显示的版本
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: 系统
+      placeholder: Windows 11 23H2
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 越具体越好；涉及 PDF 的话说明它是不是扫描件
+      placeholder: |
+        1. 导入 …
+        2. 选中 …
+        3. 看到 …
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望结果
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志或截图
+      description: 可粘贴开发者工具控制台输出；注意先删掉隐私内容
+      render: text
+    validations:
+      required: false
