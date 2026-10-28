@@ -1,33 +1,66 @@
 # GlossNote · 旁注
 
-在文档上批注，把标注沉淀成知识。
+[![CI](https://github.com/ranger1112/glossnote/actions/workflows/ci.yml/badge.svg)](https://github.com/ranger1112/glossnote/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/ranger1112/glossnote)](https://github.com/ranger1112/glossnote/releases)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-本地优先的桌面阅读与标注客户端：导入 PDF，在页面上划线、批注，之后把标注沉淀成可检索、可复习、可被 AI 引用的知识。中文名暂定「旁注」。
+本地优先的 PDF 阅读与标注客户端：划线、批注、打标签，把标注做成卡片复习，或者让 AI 带着页码回答关于这份文档的问题。
 
-## 当前状态
+## 关于
 
-**0.1 锚定原型 + 0.2 桌面壳 + 0.3 本地持久化 + 0.4 书库体验 + 0.5 云同步 + 0.6 知识沉淀 + 0.7 AI 已完成**：导入 PDF 后进入书库，以封面网格浏览；打开文档可高亮、批注、打标签，搜索标注与原句，导出 Markdown；缩放、刷新、重开文档后，标注回到同一行字上，阅读进度也会恢复。
+读长文档时，真正有价值的东西往往不是「读完了」，而是你划出的那句话和当时写下的想法。但换一个阅读器、换一台设备、过两周再回来，这些痕迹就散了。
 
-标注可以转成卡片，卡片之间可建立双向链接，并按 FSRS-4.5 的到期时间进入复习队列；来源标注删除后卡片保留，只标记为来源失效。
+GlossNote 把「读」和「以后用得上」放在同一个地方：PDF 复制进书库，标注是明文 JSON，索引删了可以从书库重建，不登录、不联网也能用。目标只有一件事——每条标注都能回到原文那一行字，并且在需要时继续被检索、复习和引用。
 
-AI 默认关闭。开启后可对选段做解释、在本地提取全文后提问或总结；回答附带页码/标注来源，点击可跳回原文。支持 Anthropic 与 OpenAI 兼容服务，API Key 只保存在本机。
+当前只发布 Windows 桌面版（Tauri 2）。EPUB / HTML / TXT 多格式计划在 1.x。
 
-导入的 PDF 会复制到 `文档/GlossNote/books/`，标注与卡片写入 SQLite 并镜像到 `.glossnote/annotations/<sha256>.json`；删掉数据库也能从 sidecar 重建。书库位置可在界面切换，指向云盘目录即可多设备同步；云盘产生的冲突副本会在扫描时按记录合并，并归档到 `.glossnote/conflicts/`。下一步是 1.0 多格式。阶段进度与验收证据见 [docs/implementation-plan.md](docs/implementation-plan.md)。
+## 能做什么
 
-## 快速开始
+- **阅读与标注**：四色高亮、批注、标签；缩放、刷新、重开文档后仍锚回同一行字。
+- **书库**：封面网格、阅读进度、标注与批注搜索、Markdown 导出、深色模式。
+- **同步**：书库目录可以指向坚果云 / OneDrive / Syncthing 等同步目录，扫描时按时间戳合并冲突副本；没有账号，也没有服务端。
+- **卡片与复习**：标注一键制卡、卡片双向链接、FSRS-4.5 到期调度。
+- **AI（默认关闭）**：划词解释、本地全文索引后的提问与总结，回答带页码来源，可跳回原文。支持 Anthropic 与 OpenAI 兼容服务。
+
+## 下载与安装
+
+从 [Releases](https://github.com/ranger1112/glossnote/releases) 下载 `GlossNote_0.1.0_x64-setup.exe` 安装。安装包未做代码签名，Windows SmartScreen 可能提示「未知发布者」，选择「更多信息 → 仍要运行」即可。
+
+首次启动的书库默认在 `文档\GlossNote\`，可以在书库页点「书库位置」换到任意目录（包括云盘同步目录）。
+
+## 从源码运行
+
+前置：Node.js 22+、Rust 1.94.1、Visual Studio Build Tools 2022（C++ 桌面开发）。Windows 工具链的细节见 [docs/build.md](docs/build.md)。
 
 ```bash
 npm install
-npm run dev        # 只在浏览器里跑前端
-npm test           # 锚定算法单元测试
-npm run build      # 类型检查 + 生产构建
-
-# Windows 桌面（需要 Rust 与 MSVC，见 docs/build.md）
-scripts\dev.cmd
-scripts\build.cmd
+npm run desktop:dev     # 启动 Tauri 桌面应用
+npm test                # 锚定算法单元测试
+npm run build           # 类型检查 + 前端生产构建
 ```
 
-浏览器模式打开 http://localhost:1420；桌面模式由 `scripts\dev.cmd` 启动 Tauri。两种模式都可以点「先看看示例」。
+只想在浏览器里看前端：`npm run dev`，打开 http://localhost:1420。
+
+## 数据在哪里
+
+| 内容 | 位置 |
+| --- | --- |
+| 书库（PDF + 标注 sidecar + 封面） | `文档\GlossNote\`（可切换） |
+| SQLite 索引（可重建） | `%APPDATA%\com.phoebe.glossnote\library.db` |
+| 设置与 AI 配置 | `%APPDATA%\com.phoebe.glossnote\settings.json` |
+
+标注同时写入 SQLite 与 `.glossnote/annotations/<sha256>.json`。SQLite 只是索引：删掉它后重启，会从书库里的 PDF 与 sidecar 重建。
+
+## 隐私
+
+- 默认不联网、无账号、无遥测。
+- 只有你主动使用 AI 时，才发送当前问题、选中的文字与本地检索到的片段；全文索引本身在本机完成。
+- API Key 明文保存在本机 `settings.json`，不进入书库，也不进入 sidecar。
+- sidecar 是明文 JSON，可靠性优先于保密性；需要保密时请依赖云盘或磁盘加密。
+
+## 技术栈
+
+Tauri 2 + React 19 + TypeScript + pdf.js，索引使用 SQLite（rusqlite）。锚定算法在 [`src/anchoring.ts`](src/anchoring.ts)，是纯函数，有单元测试覆盖四级回退。结构、同步协议与 AI 检索的细节见 [docs/architecture.md](docs/architecture.md)。
 
 ## 文档
 
@@ -38,12 +71,12 @@ scripts\build.cmd
 | [docs/implementation-plan.md](docs/implementation-plan.md) | 先做什么、验收标准、现在到哪 |
 | [docs/build.md](docs/build.md) | 怎么装、怎么跑、怎么自动验证 |
 | [docs/decisions.md](docs/decisions.md) | 为什么这样选、放弃了什么 |
-| [docs/README.md](docs/README.md) | 文档索引与维护约定 |
+| [CHANGELOG.md](CHANGELOG.md) | 每个版本改了什么 |
 
-## 技术栈
+## 参与
 
-Tauri 2 + React + TypeScript + pdf.js。标注锚定算法在 `src/anchoring.ts`，纯函数，先测算法再测 UI。详细结构见 [docs/architecture.md](docs/architecture.md)。
+欢迎提 [Issue](https://github.com/ranger1112/glossnote/issues) 或 PR。提交前请读 [CONTRIBUTING.md](CONTRIBUTING.md)。安全问题请不要公开提交，按 [SECURITY.md](SECURITY.md) 的方式私下报告。
 
 ## 许可
 
-Apache License 2.0，见 [LICENSE](LICENSE)。可自由使用、修改与再分发（含商用），需保留版权声明与许可声明。
+[Apache License 2.0](LICENSE)。可自由使用、修改与再分发（含商用），需保留版权声明与许可声明。
