@@ -139,6 +139,8 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
             merged.length > 0 ? `合并 ${merged.join('、')}` : '',
             report.archived > 0 ? `归档 ${report.archived} 个冲突副本` : '',
             report.duplicatePdfs > 0 ? `${report.duplicatePdfs} 份重复 PDF 已忽略` : '',
+            report.missingDocuments > 0 ? `${report.missingDocuments} 份文档文件缺失` : '',
+            report.ignoredSidecars > 0 ? `${report.ignoredSidecars} 个无效 sidecar` : '',
           ].filter(Boolean);
           onMessage(parts.length > 0 ? `扫描完成：${parts.join('，')}` : '扫描完成，没有需要合并的变更');
         }
@@ -212,6 +214,17 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
     }
   }, [onMessage, onOpen]);
 
+  // 文档里一直写着 Ctrl+O 能导入，这里把它补上。
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'o') return;
+      event.preventDefault();
+      if (!importing) void handleImport();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [handleImport, importing]);
+
   const handleExport = useCallback(async () => {
     try {
       const path = await pickMarkdownPath();
@@ -260,6 +273,8 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
     ? [
         sync.archived > 0 ? `归档 ${sync.archived} 个冲突副本` : '',
         sync.duplicatePdfs > 0 ? `${sync.duplicatePdfs} 份重复 PDF` : '',
+        sync.missingDocuments > 0 ? `${sync.missingDocuments} 份文档文件缺失` : '',
+        sync.ignoredSidecars > 0 ? `${sync.ignoredSidecars} 个无效 sidecar` : '',
       ]
         .filter(Boolean)
         .join(' · ')

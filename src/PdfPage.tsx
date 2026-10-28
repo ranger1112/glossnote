@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
-import type { PDFDocumentProxy } from 'pdfjs-dist';
+import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist';
 import { pdfjsLib, type PdfTextItem } from './pdfjs';
 import { joinPdfItems } from './pdfText';
 import { buildAnchor, resolveAnchor, type Anchor, type NormRect } from './anchoring';
@@ -132,6 +132,16 @@ function mergeRects(rects: NormRect[]): NormRect[] {
   return merged;
 }
 
+/** 合并同行相邻矩形，并把坐标收到 5 位小数：锚点是给重放用的，不需要亚像素精度。 */
+function compactRects(rects: NormRect[]): NormRect[] {
+  return mergeRects(rects).map((rect) => ({
+    x: Math.round(rect.x * 100000) / 100000,
+    y: Math.round(rect.y * 100000) / 100000,
+    w: Math.round(rect.w * 100000) / 100000,
+    h: Math.round(rect.h * 100000) / 100000,
+  }));
+}
+
 function rectsForRange(
   model: PageModel,
   start: number,
@@ -162,7 +172,7 @@ function rectsForRange(
       h: rect.height / pageRect.height,
     }));
 
-  return mergeRects(raw);
+  return compactRects(raw);
 }
 
 function offsetFromDom(node: Node, offset: number, model: PageModel): number | null {
@@ -192,6 +202,8 @@ export const PdfPage = memo(function PdfPage({
   const textRef = useRef<HTMLDivElement>(null);
   const highlightRef = useRef<HTMLDivElement>(null);
   const modelRef = useRef<PageModel | null>(null);
+  // pdf.js 会按页缓存 PDFPageProxy 及其图像数据；释放 canvas 之外还得让它 cleanup。
+  const pageProxyRef = useRef<PDFPageProxy | null>(null);
 
   const annotationsRef = useRef(annotations);
   annotationsRef.current = annotations;
@@ -263,6 +275,10 @@ export const PdfPage = memo(function PdfPage({
       textElement.style.removeProperty('height');
       highlightRef.current?.replaceChildren();
       modelRef.current = null;
+      // 只清 canvas 不够：页对象的操作符表和图像数据还在 pdf.js 的缓存里，
+      // 一本 500 页的书从头翻到尾会一直涨内存。
+      pageProxyRef.current?.cleanup();
+      pageProxyRef.current = null;
       return;
     }
 
@@ -270,6 +286,7 @@ export const PdfPage = memo(function PdfPage({
       try {
         const page = await pdf.getPage(pageIndex + 1);
         if (cancelled) return;
+        pageProxyRef.current = page;
 
         const viewport = page.getViewport({ scale });
         // 正常缩放用设备像素比；高倍或超大页面则压低画布像素数，避免再次 OOM。
@@ -351,6 +368,15 @@ export const PdfPage = memo(function PdfPage({
     };
   }, [active, pdf, pageIndex, scale, paintHighlights]);
 
+  // 组件卸载（关闭文档、切换文档）时同样释放页对象。
+  useEffect(
+    () => () => {
+      pageProxyRef.current?.cleanup();
+      pageProxyRef.current = null;
+    },
+    [],
+  );
+
   useEffect(() => {
     if (ready) paintHighlights();
   }, [ready, annotations, focusId, paintHighlights]);
@@ -385,14 +411,17 @@ export const PdfPage = memo(function PdfPage({
       const pageRect = pageElement.getBoundingClientRect();
       if (pageRect.width === 0 || pageRect.height === 0) return;
 
-      const rects = Array.from(range.getClientRects())
-        .filter((rect) => rect.width > 0.5 && rect.height > 0.5)
-        .map((rect) => ({
-          x: (rect.left - pageRect.left) / pageRect.width,
-          y: (rect.top - pageRect.top) / pageRect.height,
-          w: rect.width / pageRect.width,
-          h: rect.height / pageRect.height,
-        }));
+      // 逐字形矩形合并成每行一条再入库：138 个矩形会变成 4 个，sidecar 小一个数量级。
+      const rects = compactRects(
+        Array.from(range.getClientRects())
+          .filter((rect) => rect.width > 0.5 && rect.height > 0.5)
+          .map((rect) => ({
+            x: (rect.left - pageRect.left) / pageRect.width,
+            y: (rect.top - pageRect.top) / pageRect.height,
+            w: rect.width / pageRect.width,
+            h: rect.height / pageRect.height,
+          })),
+      );
       if (rects.length === 0) return;
 
       const anchor = buildAnchor(pageIndex, model.text, start, end, rects);
