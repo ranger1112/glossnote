@@ -219,6 +219,27 @@ fn update_document_meta(
     library::update_meta(&app, &doc_id, patch)
 }
 
+#[tauri::command(async)]
+fn organize_document(
+    app: AppHandle,
+    doc_id: String,
+    favorite: Option<bool>,
+    tags: Option<Vec<String>>,
+) -> Result<Document, String> {
+    library::organize_document(&app, &doc_id, favorite, tags)
+}
+
+#[tauri::command(async)]
+fn organize_documents(
+    app: AppHandle,
+    doc_ids: Vec<String>,
+    favorite: Option<bool>,
+    add_tags: Vec<String>,
+    remove_tags: Vec<String>,
+) -> Result<Vec<Document>, String> {
+    library::organize_documents(&app, doc_ids, favorite, add_tags, remove_tags)
+}
+
 fn main() {
     tauri::Builder::default()
         // 单实例要最先注册：第二个进程在碰数据库和 sidecar 之前就退出。
@@ -316,6 +337,8 @@ fn main() {
             ai_answer,
             ai_summarize,
             update_document_meta,
+            organize_document,
+            organize_documents,
         ])
         .run(tauri::generate_context!())
         .expect("GlossNote 启动失败");

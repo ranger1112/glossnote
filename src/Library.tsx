@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { pdfjsAssets, pdfjsLib } from './pdfjs';
 import {
   assetUrl,
   exportMarkdown,
   importPdf,
   listDocuments,
+  organizeDocument,
+  organizeDocuments,
   saveCover,
   scanLibrary,
   searchAnnotations,
@@ -17,10 +19,13 @@ import {
   IconFolder,
   IconRefresh,
   IconSearch,
+  IconStar,
   IconUpload,
 } from './icons';
 import type { DocumentMeta, ScanReport, SearchHit } from './types';
 import { errorText } from './errors';
+
+type SortKey = 'recent' | 'added' | 'title' | 'annotations';
 
 interface LibraryProps {
   onOpen: (docId: string, page?: number) => void;
@@ -74,6 +79,12 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [searching, setSearching] = useState(false);
   const [sync, setSync] = useState<ScanReport | null>(null);
+  const [sort, setSort] = useState<SortKey>('recent');
+  const [favoriteOnly, setFavoriteOnly] = useState(false);
+  const [tagFilter, setTagFilter] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [tagDraft, setTagDraft] = useState('');
+  const [tagBusy, setTagBusy] = useState(false);
   const coverRun = useRef(0);
 
   const ensureCovers = useCallback(async (list: DocumentMeta[]) => {
@@ -267,6 +278,100 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
     }
   }, [loadDocs, onMessage, sync?.root]);
 
+  const tagOptions = useMemo(
+    () =>
+      [...new Set(docs.flatMap((doc) => doc.tags))].sort((left, right) =>
+        left.localeCompare(right, 'zh'),
+      ),
+    [docs],
+  );
+
+  const visibleDocs = useMemo(() => {
+    const list = docs.filter(
+      (doc) => (!favoriteOnly || doc.favorite) && (!tagFilter || doc.tags.includes(tagFilter)),
+    );
+    return [...list].sort((left, right) => {
+      switch (sort) {
+        case 'title':
+          return (left.title || left.name).localeCompare(right.title || right.name, 'zh');
+        case 'added':
+          return right.addedAt - left.addedAt;
+        case 'annotations':
+          return right.annotationCount - left.annotationCount || right.addedAt - left.addedAt;
+        default:
+          // 没读过的排在读过的后面，同组内再按添加时间。
+          return (
+            (right.lastOpenedAt || 0) - (left.lastOpenedAt || 0) ||
+            right.addedAt - left.addedAt
+          );
+      }
+    });
+  }, [docs, favoriteOnly, tagFilter, sort]);
+
+  useEffect(() => {
+    if (tagFilter && !tagOptions.includes(tagFilter)) setTagFilter(null);
+  }, [tagFilter, tagOptions]);
+
+  const applyDocs = useCallback((updated: DocumentMeta[]) => {
+    const map = new Map(updated.map((doc) => [doc.id, doc]));
+    setDocs((current) => current.map((doc) => map.get(doc.id) ?? doc));
+  }, []);
+
+  const toggleFavorite = useCallback(
+    async (doc: DocumentMeta) => {
+      try {
+        applyDocs([await organizeDocument(doc.id, { favorite: !doc.favorite })]);
+      } catch (error) {
+        onMessage(`保存收藏失败：${errorText(error)}`);
+      }
+    },
+    [applyDocs, onMessage],
+  );
+
+  const toggleSelected = useCallback((id: string) => {
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const bulkOrganize = useCallback(
+    async (patch: { favorite?: boolean; addTags?: string[]; removeTags?: string[] }) => {
+      if (selected.size === 0) return;
+      setTagBusy(true);
+      try {
+        const updated = await organizeDocuments([...selected], patch);
+        applyDocs(updated);
+        const action =
+          patch.favorite === true
+            ? '已收藏'
+            : patch.favorite === false
+              ? '已取消收藏'
+              : patch.addTags?.length
+                ? '已添加标签'
+                : '已移除标签';
+        onMessage(`${action} ${updated.length} 份文档。`);
+      } catch (error) {
+        onMessage(`批量整理失败：${errorText(error)}`);
+      } finally {
+        setTagBusy(false);
+      }
+    },
+    [applyDocs, onMessage, selected],
+  );
+
+  const applyTag = useCallback(
+    async (mode: 'add' | 'remove') => {
+      const value = tagDraft.trim().replace(/^#+/, '').trim();
+      if (!value) return;
+      await bulkOrganize(mode === 'add' ? { addTags: [value] } : { removeTags: [value] });
+      setTagDraft('');
+    },
+    [bulkOrganize, tagDraft],
+  );
+
   const searchingNow = query.trim().length > 0;
   const mergedBits = sync
     ? [
@@ -359,6 +464,60 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
         </div>
       </div>
 
+      {!searchingNow && !loading && docs.length > 0 && (
+        <div className="library-tools">
+          <div className="library-filters">
+            <button
+              type="button"
+              className={`chip ${!favoriteOnly && !tagFilter ? 'active' : ''}`}
+              onClick={() => {
+                setFavoriteOnly(false);
+                setTagFilter(null);
+              }}
+            >
+              全部
+            </button>
+            <button
+              type="button"
+              className={`chip ${favoriteOnly ? 'active' : ''}`}
+              aria-pressed={favoriteOnly}
+              onClick={() => setFavoriteOnly((value) => !value)}
+            >
+              收藏
+            </button>
+            {tagOptions.length > 0 && (
+              <select
+                className="chip-select"
+                aria-label="按标签筛选"
+                value={tagFilter ?? ''}
+                onChange={(event) => setTagFilter(event.target.value || null)}
+              >
+                <option value="">全部标签</option>
+                {tagOptions.map((tag) => (
+                  <option key={tag} value={tag}>
+                    #{tag}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+
+          <label className="library-sort">
+            <span>排序</span>
+            <select
+              aria-label="排序方式"
+              value={sort}
+              onChange={(event) => setSort(event.target.value as SortKey)}
+            >
+              <option value="recent">最近阅读</option>
+              <option value="added">添加时间</option>
+              <option value="title">标题</option>
+              <option value="annotations">标注数</option>
+            </select>
+          </label>
+        </div>
+      )}
+
       {searchingNow ? (
         <section className="search-results">
           {searching ? (
@@ -413,48 +572,169 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
             导入 PDF
           </button>
         </div>
+      ) : visibleDocs.length === 0 ? (
+        <div className="library-empty-card">
+          <h2>没有符合条件的文档</h2>
+          <p>换个筛选条件，或者导入新的 PDF。</p>
+          <button
+            type="button"
+            className="ghost"
+            onClick={() => {
+              setFavoriteOnly(false);
+              setTagFilter(null);
+            }}
+          >
+            清除筛选
+          </button>
+        </div>
       ) : (
         <div className="library-grid">
-          {docs.map((doc) => {
+          {visibleDocs.map((doc) => {
             const progress =
               doc.pageCount > 0 && doc.lastPage > 0
                 ? Math.min(100, Math.round(((doc.lastPage + 1) / doc.pageCount) * 100))
                 : 0;
+            const picked = selected.has(doc.id);
 
             return (
-              <button
-                key={doc.id}
-                type="button"
-                className="library-card"
-                onClick={() => onOpen(doc.id, doc.lastPage || undefined)}
-              >
-                <div className="cover">
-                  {doc.cover ? (
-                    <img src={assetUrl(doc.cover)} alt="" loading="lazy" />
-                  ) : (
-                    <div className="cover-fallback">PDF</div>
-                  )}
-                  {doc.annotationCount > 0 && (
-                    <span className="cover-badge">{doc.annotationCount}</span>
-                  )}
-                </div>
-                <div className="card-meta">
-                  <strong title={doc.title || doc.name}>{doc.title || doc.name}</strong>
-                  <span>
-                    {doc.pageCount > 0 ? `${doc.pageCount} 页` : '待扫描'}
-                    {doc.lastPage > 0 && doc.pageCount > 0
-                      ? ` · 读到第 ${doc.lastPage + 1} 页`
-                      : ''}
-                  </span>
-                  {progress > 0 && (
-                    <div className="progress" aria-hidden="true">
-                      <i style={{ width: `${progress}%` }} />
-                    </div>
-                  )}
-                </div>
-              </button>
+              <div className={`library-item ${picked ? 'selected' : ''}`} key={doc.id}>
+                <button
+                  type="button"
+                  className="library-card"
+                  onClick={() => onOpen(doc.id, doc.lastPage || undefined)}
+                >
+                  <div className="cover">
+                    {doc.cover ? (
+                      <img src={assetUrl(doc.cover)} alt="" loading="lazy" />
+                    ) : (
+                      <div className="cover-fallback">PDF</div>
+                    )}
+                    {doc.annotationCount > 0 && (
+                      <span className="cover-badge">{doc.annotationCount}</span>
+                    )}
+                  </div>
+                  <div className="card-meta">
+                    <strong title={doc.title || doc.name}>{doc.title || doc.name}</strong>
+                    <span>
+                      {doc.pageCount > 0 ? `${doc.pageCount} 页` : '待扫描'}
+                      {doc.lastPage > 0 && doc.pageCount > 0
+                        ? ` · 读到第 ${doc.lastPage + 1} 页`
+                        : ''}
+                    </span>
+                    {progress > 0 && (
+                      <div className="progress" aria-hidden="true">
+                        <i style={{ width: `${progress}%` }} />
+                      </div>
+                    )}
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  className={`card-star ${doc.favorite ? 'on' : ''}`}
+                  title={doc.favorite ? '取消收藏' : '收藏'}
+                  aria-label={doc.favorite ? '取消收藏' : '收藏'}
+                  aria-pressed={doc.favorite}
+                  onClick={() => void toggleFavorite(doc)}
+                >
+                  <IconStar size={15} filled={doc.favorite} />
+                </button>
+
+                <button
+                  type="button"
+                  className={`card-select ${picked ? 'on' : ''}`}
+                  title={picked ? '取消选择' : '选择文档'}
+                  aria-label={picked ? '取消选择' : '选择文档'}
+                  aria-pressed={picked}
+                  onClick={() => toggleSelected(doc.id)}
+                >
+                  {picked ? '✓' : ''}
+                </button>
+
+                {doc.tags.length > 0 && (
+                  <div className="card-tags">
+                    {doc.tags.map((tag) => (
+                      <button
+                        type="button"
+                        key={tag}
+                        className={`tag ${tagFilter === tag ? 'active' : ''}`}
+                        title={`按 #${tag} 筛选`}
+                        onClick={() => setTagFilter(tagFilter === tag ? null : tag)}
+                      >
+                        #{tag}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
             );
           })}
+        </div>
+      )}
+
+      {selected.size > 0 && (
+        <div className="selection-bar">
+          <span className="selection-count">已选 {selected.size} 份</span>
+          <button
+            type="button"
+            className="ghost"
+            disabled={tagBusy}
+            onClick={() => void bulkOrganize({ favorite: true })}
+          >
+            收藏
+          </button>
+          <button
+            type="button"
+            className="ghost"
+            disabled={tagBusy}
+            onClick={() => void bulkOrganize({ favorite: false })}
+          >
+            取消收藏
+          </button>
+          <form
+            className="selection-tag"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void applyTag('add');
+            }}
+          >
+            <input
+              value={tagDraft}
+              maxLength={24}
+              placeholder="文档标签"
+              aria-label="文档标签"
+              onChange={(event) => setTagDraft(event.target.value)}
+            />
+            <button
+              type="submit"
+              className="ghost"
+              disabled={tagBusy || !tagDraft.trim()}
+            >
+              添加
+            </button>
+            <button
+              type="button"
+              className="ghost"
+              disabled={tagBusy || !tagDraft.trim()}
+              onClick={() => void applyTag('remove')}
+            >
+              移除
+            </button>
+          </form>
+          <button
+            type="button"
+            className="ghost"
+            onClick={() => setSelected(new Set())}
+          >
+            取消选择
+          </button>
+          <button
+            type="button"
+            className="ghost"
+            onClick={() => setSelected(new Set(visibleDocs.map((doc) => doc.id)))}
+          >
+            全选
+          </button>
         </div>
       )}
     </main>

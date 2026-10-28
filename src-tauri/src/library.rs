@@ -320,7 +320,7 @@ fn archive_sidecar(root: &Path, path: &Path) -> Result<(), String> {
 
 fn apply_sidecar(
     conn: &rusqlite::Connection,
-    document: &DocumentRow,
+    document: &mut DocumentRow,
     sidecar: &Sidecar,
     page_count: &mut u32,
     merged: &mut usize,
@@ -329,6 +329,20 @@ fn apply_sidecar(
     if *page_count == 0 && sidecar.page_count > 0 {
         *page_count = sidecar.page_count;
         db::update_meta(conn, &document.id, Some(sidecar.page_count), None, None)?;
+    }
+
+    // 收藏/标签按时间戳做 LWW；旧 sidecar 没有该字段，时间戳为 0，不会覆盖本机设置。
+    if sidecar.meta_updated_at > document.meta_updated_at {
+        document.favorite = sidecar.favorite;
+        document.tags = sidecar.tags.clone();
+        document.meta_updated_at = sidecar.meta_updated_at;
+        db::update_organization(
+            conn,
+            &document.id,
+            Some(document.favorite),
+            Some(&document.tags),
+            document.meta_updated_at,
+        )?;
     }
 
     for annotation in &sidecar.annotations {
@@ -363,7 +377,7 @@ fn apply_sidecar(
 fn reconcile_document(
     conn: &rusqlite::Connection,
     root: &Path,
-    document: &DocumentRow,
+    document: &mut DocumentRow,
     files: &[SidecarEntry],
     stats: &mut MergeStats,
 ) -> Result<Vec<Annotation>, String> {
@@ -414,7 +428,7 @@ fn reconcile_document(
 fn merge_document(
     conn: &rusqlite::Connection,
     root: &Path,
-    document: &DocumentRow,
+    document: &mut DocumentRow,
     files: Vec<SidecarEntry>,
     ignored: usize,
 ) -> Result<Vec<Annotation>, String> {
@@ -437,6 +451,9 @@ fn serialized_sidecar(conn: &rusqlite::Connection, doc_id: &str) -> Result<Vec<u
         page_count: document.page_count,
         annotations,
         cards,
+        favorite: document.favorite,
+        tags: document.tags.clone(),
+        meta_updated_at: document.meta_updated_at,
     };
 
     let bytes =
@@ -526,8 +543,8 @@ pub fn import_pdf(app: &AppHandle, source: &str) -> Result<ImportResult, String>
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         db::touch_document(&conn, &id, now)?;
-        let document = db::find_by_id(&conn, &id)?.ok_or_else(|| "文档不存在".to_string())?;
-        let annotations = merge_document(&conn, &root, &document, files, ignored)?;
+        let mut document = db::find_by_id(&conn, &id)?.ok_or_else(|| "文档不存在".to_string())?;
+        let annotations = merge_document(&conn, &root, &mut document, files, ignored)?;
         let document = db::find_by_id(&conn, &id)?.unwrap_or(document);
         return Ok(ImportResult {
             document: document.to_document(&root),
@@ -559,7 +576,7 @@ pub fn import_pdf(app: &AppHandle, source: &str) -> Result<ImportResult, String>
         .unwrap_or("document.pdf")
         .to_string();
 
-    let row = DocumentRow {
+    let mut row = DocumentRow {
         id: id.clone(),
         name: document_name,
         title: String::new(),
@@ -572,6 +589,9 @@ pub fn import_pdf(app: &AppHandle, source: &str) -> Result<ImportResult, String>
         last_opened_at: now,
         cover: String::new(),
         last_page: 0,
+        favorite: false,
+        tags: Vec::new(),
+        meta_updated_at: 0,
         annotation_count: 0,
     };
     let (files, ignored) = load_sidecars_for(&root, &id)?;
@@ -581,7 +601,7 @@ pub fn import_pdf(app: &AppHandle, source: &str) -> Result<ImportResult, String>
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     db::upsert_document(&conn, &row)?;
 
-    let annotations = merge_document(&conn, &root, &row, files, ignored)?;
+    let annotations = merge_document(&conn, &root, &mut row, files, ignored)?;
     let document = db::find_by_id(&conn, &id)?.unwrap_or(row);
 
     Ok(ImportResult {
@@ -682,7 +702,7 @@ pub fn scan(app: &AppHandle) -> Result<ScanReport, String> {
                     .then_some(relative)
             })
             .unwrap_or_default();
-        let row = DocumentRow {
+        let mut row = DocumentRow {
             id: id.clone(),
             name,
             title: prior
@@ -701,12 +721,18 @@ pub fn scan(app: &AppHandle) -> Result<ScanReport, String> {
             last_opened_at: prior.as_ref().map(|row| row.last_opened_at).unwrap_or(0),
             cover,
             last_page: prior.as_ref().map(|row| row.last_page).unwrap_or(0),
+            favorite: prior.as_ref().map(|row| row.favorite).unwrap_or(false),
+            tags: prior
+                .as_ref()
+                .map(|row| row.tags.clone())
+                .unwrap_or_default(),
+            meta_updated_at: prior.as_ref().map(|row| row.meta_updated_at).unwrap_or(0),
             annotation_count: 0,
         };
 
         db::upsert_document(&conn, &row)?;
         let files = sidecar_groups.remove(&id).unwrap_or_default();
-        reconcile_document(&conn, &root, &row, &files, &mut stats)?;
+        reconcile_document(&conn, &root, &mut row, &files, &mut stats)?;
     }
 
     let (documents, annotations) = db::counts(&conn)?;
@@ -774,9 +800,9 @@ pub fn open_document(app: &AppHandle, doc_id: &str) -> Result<ImportResult, Stri
         .db
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let row = db::find_by_id(&conn, doc_id)?.ok_or_else(|| "文档不存在".to_string())?;
+    let mut row = db::find_by_id(&conn, doc_id)?.ok_or_else(|| "文档不存在".to_string())?;
     db::touch_document(&conn, doc_id, now_ms())?;
-    let annotations = merge_document(&conn, &root, &row, files, ignored)?;
+    let annotations = merge_document(&conn, &root, &mut row, files, ignored)?;
     let document = db::find_by_id(&conn, doc_id)?.unwrap_or(row);
 
     Ok(ImportResult {
@@ -1042,6 +1068,87 @@ pub fn update_meta(
     write_sidecar(&conn, &root, doc_id)?;
     let document = db::find_by_id(&conn, doc_id)?.ok_or_else(|| "文档不存在".to_string())?;
     Ok(document.to_document(&root))
+}
+
+/// 文档标签只做轻量整理：去空白、去 #、去重、限制长度与数量。
+fn clean_tags(tags: Vec<String>) -> Vec<String> {
+    let mut cleaned: Vec<String> = Vec::new();
+    for tag in tags {
+        let value = tag.trim().trim_start_matches('#').trim();
+        if value.is_empty() || value.chars().count() > 24 {
+            continue;
+        }
+        if !cleaned.iter().any(|item| item == value) {
+            cleaned.push(value.to_string());
+        }
+        if cleaned.len() >= 20 {
+            break;
+        }
+    }
+    cleaned
+}
+
+/// 收藏或重设文档标签；结果写回 SQLite 并同步 sidecar。
+pub fn organize_document(
+    app: &AppHandle,
+    doc_id: &str,
+    favorite: Option<bool>,
+    tags: Option<Vec<String>>,
+) -> Result<Document, String> {
+    let state = app.state::<AppState>();
+    let root = state.root();
+    let conn = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let tags = tags.map(clean_tags);
+    db::update_organization(&conn, doc_id, favorite, tags.as_deref(), now_ms())?;
+    write_sidecar(&conn, &root, doc_id)?;
+    let document = db::find_by_id(&conn, doc_id)?.ok_or_else(|| "文档不存在".to_string())?;
+    Ok(document.to_document(&root))
+}
+
+/// 批量设置收藏或追加标签；一次持锁完成，避免逐文档往返 IPC。
+pub fn organize_documents(
+    app: &AppHandle,
+    doc_ids: Vec<String>,
+    favorite: Option<bool>,
+    add_tags: Vec<String>,
+    remove_tags: Vec<String>,
+) -> Result<Vec<Document>, String> {
+    let state = app.state::<AppState>();
+    let root = state.root();
+    let conn = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let add = clean_tags(add_tags);
+    let remove = clean_tags(remove_tags);
+    let now = now_ms();
+    let mut updated = Vec::new();
+    for doc_id in doc_ids {
+        let Some(row) = db::find_by_id(&conn, &doc_id)? else {
+            continue;
+        };
+        let mut tags: Vec<String> = row
+            .tags
+            .iter()
+            .filter(|tag| !remove.contains(tag))
+            .cloned()
+            .collect();
+        for tag in &add {
+            if !tags.contains(tag) {
+                tags.push(tag.clone());
+            }
+        }
+        let tags = clean_tags(tags);
+        let row = db::update_organization(&conn, &doc_id, favorite, Some(&tags), now)?;
+        write_sidecar(&conn, &root, &doc_id)?;
+        updated.push(row.to_document(&root));
+    }
+    Ok(updated)
 }
 
 fn memory_state(card: &Card) -> MemoryState {
@@ -1329,6 +1436,9 @@ mod tests {
             last_opened_at: 1,
             cover: String::new(),
             last_page: 0,
+            favorite: false,
+            tags: Vec::new(),
+            meta_updated_at: 0,
             annotation_count: 0,
         }
     }
@@ -1354,7 +1464,8 @@ mod tests {
         row: &DocumentRow,
     ) -> Vec<Annotation> {
         let (files, ignored) = load_sidecars_for(root, &row.id).unwrap();
-        merge_document(conn, root, row, files, ignored).unwrap()
+        let mut merged_row = row.clone();
+        merge_document(conn, root, &mut merged_row, files, ignored).unwrap()
     }
 
     #[test]
@@ -1409,6 +1520,48 @@ mod tests {
     }
 
     #[test]
+    fn document_tags_follow_sidecar_timestamps() {
+        let dir = temp_dir("doc-tags");
+        let root = dir.join("library");
+        ensure_dirs(&root).unwrap();
+        let conn = db::open(&dir.join("test.db")).unwrap();
+        let row = document("doc1", "books/doc1.pdf");
+        db::upsert_document(&conn, &row).unwrap();
+
+        db::update_organization(&conn, "doc1", Some(true), Some(&["论文".to_string()]), 10)
+            .unwrap();
+        write_sidecar(&conn, &root, "doc1").unwrap();
+        let path = sidecar_path(&root, "doc1");
+        let mut sidecar: Sidecar = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(sidecar.favorite);
+        assert_eq!(sidecar.tags, vec!["论文".to_string()]);
+
+        // 比数据库旧的 sidecar 不得覆盖本机设置。
+        sidecar.favorite = false;
+        sidecar.tags = vec!["旧".to_string()];
+        sidecar.meta_updated_at = 5;
+        fs::write(&path, serde_json::to_vec(&sidecar).unwrap()).unwrap();
+        let current = db::find_by_id(&conn, "doc1").unwrap().unwrap();
+        merge_from_disk(&conn, &root, &current);
+        let fresh = db::find_by_id(&conn, "doc1").unwrap().unwrap();
+        assert!(fresh.favorite);
+        assert_eq!(fresh.tags, vec!["论文".to_string()]);
+
+        // 另一台设备写入了更新的版本：合并时应当采用。
+        sidecar.favorite = false;
+        sidecar.tags = vec!["同步".to_string()];
+        sidecar.meta_updated_at = 20;
+        fs::write(&path, serde_json::to_vec(&sidecar).unwrap()).unwrap();
+        let current = db::find_by_id(&conn, "doc1").unwrap().unwrap();
+        merge_from_disk(&conn, &root, &current);
+        let fresh = db::find_by_id(&conn, "doc1").unwrap().unwrap();
+        assert!(!fresh.favorite);
+        assert_eq!(fresh.tags, vec!["同步".to_string()]);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn sidecar_round_trip_and_last_write_wins() {
         let dir = temp_dir("sidecar");
         let root = dir.join("library");
@@ -1449,6 +1602,9 @@ mod tests {
             page_count: 2,
             annotations,
             cards: Vec::new(),
+            favorite: false,
+            tags: Vec::new(),
+            meta_updated_at: 0,
         }
     }
 
@@ -1487,7 +1643,7 @@ mod tests {
         let root = dir.join("library");
         ensure_dirs(&root).unwrap();
         let conn = db::open(&dir.join("test.db")).unwrap();
-        let row = document("doc1", "books/doc1.pdf");
+        let mut row = document("doc1", "books/doc1.pdf");
 
         db::upsert_document(&conn, &row).unwrap();
         db::upsert_annotation(&conn, &row.id, &annotation("a1", 10, "note")).unwrap();
@@ -1506,7 +1662,7 @@ mod tests {
         let (mut groups, _) = load_sidecars(&root).unwrap();
         let files = groups.remove("doc1").unwrap();
         let mut stats = MergeStats::default();
-        reconcile_document(&conn, &root, &row, &files, &mut stats).unwrap();
+        reconcile_document(&conn, &root, &mut row, &files, &mut stats).unwrap();
 
         assert_eq!(stats.merged_cards, 1);
         assert_eq!(stats.archived, 1);
@@ -1529,7 +1685,7 @@ mod tests {
         let root = dir.join("library");
         ensure_dirs(&root).unwrap();
         let conn = db::open(&dir.join("test.db")).unwrap();
-        let row = document("doc1", "books/doc1.pdf");
+        let mut row = document("doc1", "books/doc1.pdf");
 
         db::upsert_document(&conn, &row).unwrap();
         db::upsert_annotation(&conn, &row.id, &annotation("a1", 10, "note")).unwrap();
@@ -1545,7 +1701,7 @@ mod tests {
         let (mut groups, _) = load_sidecars(&root).unwrap();
         let files = groups.remove("doc1").unwrap();
         let mut stats = MergeStats::default();
-        reconcile_document(&conn, &root, &row, &files, &mut stats).unwrap();
+        reconcile_document(&conn, &root, &mut row, &files, &mut stats).unwrap();
 
         let card = db::get_card(&conn, "c1").unwrap().unwrap();
         assert_eq!(card.title, "要保留的卡片");
@@ -1565,7 +1721,7 @@ mod tests {
         let root = dir.join("library");
         ensure_dirs(&root).unwrap();
         let conn = db::open(&dir.join("test.db")).unwrap();
-        let row = document("doc1", "books/doc1.pdf");
+        let mut row = document("doc1", "books/doc1.pdf");
         db::upsert_document(&conn, &row).unwrap();
 
         let canonical = sidecar_for("doc1", vec![annotation("a1", 10, "old")]);
@@ -1600,7 +1756,7 @@ mod tests {
         assert_eq!(ignored, 1);
         let files = groups.remove("doc1").unwrap();
         let mut stats = MergeStats::default();
-        let merged = reconcile_document(&conn, &root, &row, &files, &mut stats).unwrap();
+        let merged = reconcile_document(&conn, &root, &mut row, &files, &mut stats).unwrap();
 
         // 规范文件里的 a1、冲突副本里的 a1 与 a2 都是从 sidecar 采纳的记录。
         assert_eq!(stats.merged, 3);
@@ -1635,7 +1791,7 @@ mod tests {
         let root = dir.join("library");
         ensure_dirs(&root).unwrap();
         let conn = db::open(&dir.join("test.db")).unwrap();
-        let row = document("doc1", "books/doc1.pdf");
+        let mut row = document("doc1", "books/doc1.pdf");
 
         db::upsert_document(&conn, &row).unwrap();
         db::upsert_annotation(&conn, &row.id, &annotation("a1", 10, "alive")).unwrap();
@@ -1654,7 +1810,7 @@ mod tests {
         let (mut groups, _) = load_sidecars(&root).unwrap();
         let files = groups.remove("doc1").unwrap();
         let mut stats = MergeStats::default();
-        let merged = reconcile_document(&conn, &root, &row, &files, &mut stats).unwrap();
+        let merged = reconcile_document(&conn, &root, &mut row, &files, &mut stats).unwrap();
 
         assert!(merged[0].deleted);
         assert_eq!(stats.archived, 1);

@@ -57,6 +57,27 @@ export function updateDocumentMeta(
   return invoke('update_document_meta', { docId, patch });
 }
 
+/** 设置收藏或替换文档标签；结果同步写 sidecar。 */
+export function organizeDocument(
+  docId: string,
+  patch: { favorite?: boolean; tags?: string[] },
+): Promise<DocumentMeta> {
+  return invoke('organize_document', { docId, ...patch });
+}
+
+/** 批量设置收藏并向选中文档追加标签。 */
+export function organizeDocuments(
+  docIds: string[],
+  patch: { favorite?: boolean; addTags?: string[]; removeTags?: string[] },
+): Promise<DocumentMeta[]> {
+  return invoke('organize_documents', {
+    docIds,
+    favorite: patch.favorite,
+    addTags: patch.addTags ?? [],
+    removeTags: patch.removeTags ?? [],
+  });
+}
+
 /** 前端把首页渲染成 JPEG，Rust 落到书库的 .glossnote/thumbnails 下。 */
 export function saveCover(docId: string, bytes: Uint8Array): Promise<DocumentMeta> {
   return invoke('save_cover', { docId, bytes: Array.from(bytes) });

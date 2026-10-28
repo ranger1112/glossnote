@@ -2,7 +2,7 @@ use crate::models::{Annotation, Card, CardRef, CardView, Chunk, DocumentRow, Sea
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::path::{Path, PathBuf};
 
-const DOCUMENT_SELECT: &str = "SELECT d.id, d.name, d.title, d.author, d.page_count, d.rel_path, d.size, d.mtime, d.added_at, d.last_opened_at, d.cover, d.last_page, (SELECT COUNT(*) FROM annotations a WHERE a.doc_id = d.id AND a.deleted = 0) FROM documents d";
+const DOCUMENT_SELECT: &str = "SELECT d.id, d.name, d.title, d.author, d.page_count, d.rel_path, d.size, d.mtime, d.added_at, d.last_opened_at, d.cover, d.last_page, d.favorite, d.tags, d.meta_updated_at, (SELECT COUNT(*) FROM annotations a WHERE a.doc_id = d.id AND a.deleted = 0) FROM documents d";
 
 pub fn open(path: &Path) -> Result<Connection, String> {
     let conn = Connection::open(path).map_err(|error| format!("打开数据库失败：{error}"))?;
@@ -91,6 +91,9 @@ fn migrate(conn: &Connection) -> Result<(), String> {
           last_opened_at INTEGER NOT NULL DEFAULT 0,
           cover TEXT NOT NULL DEFAULT '',
           last_page INTEGER NOT NULL DEFAULT 0,
+          favorite INTEGER NOT NULL DEFAULT 0,
+          tags TEXT NOT NULL DEFAULT '[]',
+          meta_updated_at INTEGER NOT NULL DEFAULT 0,
           text_indexed_at INTEGER NOT NULL DEFAULT 0
         );
         CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_rel_path ON documents(rel_path);
@@ -151,6 +154,14 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     // 0.3 的库没有 cover / last_page，升级时补列。
     ensure_column(conn, "documents", "cover", "TEXT NOT NULL DEFAULT ''")?;
     ensure_column(conn, "documents", "last_page", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(conn, "documents", "favorite", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(conn, "documents", "tags", "TEXT NOT NULL DEFAULT '[]'")?;
+    ensure_column(
+        conn,
+        "documents",
+        "meta_updated_at",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     ensure_column(
         conn,
         "documents",
@@ -205,7 +216,10 @@ fn row_to_document(row: &Row<'_>) -> rusqlite::Result<DocumentRow> {
         last_opened_at: row.get(9)?,
         cover: row.get(10)?,
         last_page: row.get::<_, i64>(11)? as u32,
-        annotation_count: row.get::<_, i64>(12)? as usize,
+        favorite: row.get::<_, i64>(12)? != 0,
+        tags: serde_json::from_str(&row.get::<_, String>(13)?).unwrap_or_default(),
+        meta_updated_at: row.get(14)?,
+        annotation_count: row.get::<_, i64>(15)? as usize,
     })
 }
 
@@ -235,10 +249,12 @@ pub fn list_documents(conn: &Connection) -> Result<Vec<DocumentRow>, String> {
 }
 
 pub fn upsert_document(conn: &Connection, document: &DocumentRow) -> Result<(), String> {
+    let tags = serde_json::to_string(&document.tags)
+        .map_err(|error| format!("序列化文档标签失败：{error}"))?;
     conn.execute(
         "INSERT INTO documents
-           (id, name, title, author, page_count, rel_path, size, mtime, added_at, last_opened_at, cover, last_page)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+           (id, name, title, author, page_count, rel_path, size, mtime, added_at, last_opened_at, cover, last_page, favorite, tags, meta_updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
          ON CONFLICT(id) DO UPDATE SET
            name = excluded.name,
            title = excluded.title,
@@ -248,7 +264,10 @@ pub fn upsert_document(conn: &Connection, document: &DocumentRow) -> Result<(), 
            size = excluded.size,
            mtime = excluded.mtime,
            cover = excluded.cover,
-           last_page = excluded.last_page",
+           last_page = excluded.last_page,
+           favorite = excluded.favorite,
+           tags = excluded.tags,
+           meta_updated_at = excluded.meta_updated_at",
         params![
             document.id,
             document.name,
@@ -262,10 +281,40 @@ pub fn upsert_document(conn: &Connection, document: &DocumentRow) -> Result<(), 
             document.last_opened_at,
             document.cover,
             document.last_page as i64,
+            document.favorite as i64,
+            tags,
+            document.meta_updated_at,
         ],
     )
     .map_err(|error| format!("写入文档失败：{error}"))?;
     Ok(())
+}
+
+/// 收藏与文档标签：只改组织字段，并推进 sidecar 合并用的时间戳。
+pub fn update_organization(
+    conn: &Connection,
+    id: &str,
+    favorite: Option<bool>,
+    tags: Option<&[String]>,
+    now: i64,
+) -> Result<DocumentRow, String> {
+    let mut row = find_by_id(conn, id)?.ok_or_else(|| "文档不存在".to_string())?;
+    if let Some(value) = favorite {
+        row.favorite = value;
+    }
+    if let Some(value) = tags {
+        row.tags = value.to_vec();
+    }
+    row.meta_updated_at = now;
+
+    let tags_json =
+        serde_json::to_string(&row.tags).map_err(|error| format!("序列化文档标签失败：{error}"))?;
+    conn.execute(
+        "UPDATE documents SET favorite = ?1, tags = ?2, meta_updated_at = ?3 WHERE id = ?4",
+        params![row.favorite as i64, tags_json, row.meta_updated_at, id],
+    )
+    .map_err(|error| format!("保存文档整理信息失败：{error}"))?;
+    Ok(row)
 }
 
 pub fn touch_document(conn: &Connection, id: &str, now: i64) -> Result<(), String> {

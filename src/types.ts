@@ -35,6 +35,8 @@ export interface DocumentMeta {
   addedAt: number;
   lastOpenedAt: number;
   lastPage: number;
+  favorite: boolean;
+  tags: string[];
   annotationCount: number;
 }
 

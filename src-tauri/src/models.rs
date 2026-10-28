@@ -16,6 +16,10 @@ pub struct DocumentRow {
     pub last_opened_at: i64,
     pub cover: String,
     pub last_page: u32,
+    pub favorite: bool,
+    pub tags: Vec<String>,
+    /// 收藏与文档标签的 LWW 时间戳，随 sidecar 同步。
+    pub meta_updated_at: i64,
     pub annotation_count: usize,
 }
 
@@ -42,6 +46,8 @@ impl DocumentRow {
             added_at: self.added_at,
             last_opened_at: self.last_opened_at,
             last_page: self.last_page,
+            favorite: self.favorite,
+            tags: self.tags.clone(),
             annotation_count: self.annotation_count,
         }
     }
@@ -61,6 +67,8 @@ pub struct Document {
     pub added_at: i64,
     pub last_opened_at: i64,
     pub last_page: u32,
+    pub favorite: bool,
+    pub tags: Vec<String>,
     pub annotation_count: usize,
 }
 
@@ -284,4 +292,11 @@ pub struct Sidecar {
     /// 0.6 起随 sidecar 同步卡片；旧文件没有该字段时按空数组处理。
     #[serde(default)]
     pub cards: Vec<Card>,
+    /// 文档级组织信息（收藏、标签）；旧 sidecar 没有这些字段时按默认值处理。
+    #[serde(default)]
+    pub favorite: bool,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub meta_updated_at: i64,
 }

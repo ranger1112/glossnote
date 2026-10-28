@@ -34,8 +34,7 @@ Rust 侧只做 WebView 做不了或做起来不划算的事：文件系统、哈
 └── .glossnote/
     ├── annotations/<sha256>.json     # 每份文档一份 sidecar，按内容哈希命名
     ├── thumbnails/<sha256>.jpg       # 首页封面，320px 宽，可重建
-    ├── conflicts/                    # 合并后的云盘冲突副本，保留原文
-    └── manifest.json                 # 可选：标题、作者、页数、导入时间
+    └── conflicts/                    # 合并后的云盘冲突副本，保留原文
 ```
 
 - 用户可见的只有 `books/`，文件名保持可读。
@@ -51,7 +50,7 @@ Rust 侧只做 WebView 做不了或做起来不划算的事：文件系统、哈
 
 启动时如果 `library.db` 打不开或已损坏，会把旧文件（连同 `-wal` / `-shm`）改名为 `library.db.broken-<时间戳>`，再从空库重建——索引是派生物，`books/` + sidecar 才是真相源。`settings.json` 解析失败同样会改名备份。两种情况都会通过 `startup_notice` 在界面上提示一次。应用启用单实例保护，重复启动会聚焦已有窗口，避免两个进程同时写同一个库和 sidecar。
 
-0.3 起启动时扫描 `books/` 与 sidecars：命中 path + size + mtime 缓存就跳过哈希，未命中才计算 SHA-256；sidecar 按 `updated_at` 合并进 DB，内容有变化时才回写修复（内容相同不碰文件，避免云盘把每次启动都当成一次修改）。删除 DB 后可完整重建。0.5 起扫描还负责识别云盘冲突副本、归档冲突文件，并报告合并结果。
+0.3 起启动时扫描 `books/` 与 sidecars：命中 path + size + mtime 缓存就跳过哈希，未命中才计算 SHA-256；标注按 `updatedAt`、收藏与文档标签按 `metaUpdatedAt` 合并进 DB，内容有变化时才回写修复（内容相同不碰文件，避免云盘把每次启动都当成一次修改）。删除 DB 后可完整重建。0.5 起扫描还负责识别云盘冲突副本、归档冲突文件，并报告合并结果。
 
 ```sql
 documents(
@@ -170,6 +169,8 @@ chunks(                            -- AI 全文索引，派生数据，不进 si
 - **搜索**：输入停顿 240ms 后调用 `search_annotations`，在引文（`json_extract(anchor,'$.quote')`）、`body`、`tags` JSON、文档名与标题上做 `LIKE` 子串匹配，最多返回 100 条，按更新时间倒序。不能直接匹配 `anchor` 整段 JSON——那会把坐标和 `pageHash` 也算进去，搜 `start` 或 `0.5` 会命中所有标注。结果点击后打开文档并滚到对应页。
 - **阅读进度**：滚动时按视口顶部命中页更新，700ms 防抖写 `last_page`；返回书库时再同步写一次，避免扫描读到旧值；打开文档时优先使用调用方传入的页码，其次使用 `last_page`。
 - **标签**：作为标注的 `tags` 数组存储，随标注写入 SQLite 与 sidecar；搜索命中会返回标签。
+- **文档整理**：收藏（`favorite`）与文档级标签（`tags`）存在 `documents` 表，并写进 sidecar 的 `favorite` / `tags` / `metaUpdatedAt`；扫描时按 `metaUpdatedAt` 做 LWW。标签只做去空白、去 `#`、去重、24 字与 20 个的上限，不建目录树，也不移动 `books/` 里的文件。
+- **排序与筛选**：书库列表由前端排序（最近阅读、添加时间、标题、标注数）并按收藏/标签过滤；多选后的收藏与标签增删由 `organize_documents` 一次持锁完成，避免逐文档往返。
 - **导出**：`export_markdown(path, docId?)` 在 Rust 侧拼 Markdown 并原子落盘，前端只负责原生保存对话框。`export_annotated_pdf(doc_id, path)` 用 `lopdf` 把标注写成 PDF 原生对象：高亮/下划线/删除线带 QuadPoints 与 `/C` 颜色，批注正文非空时再加一个 Text 便签；始终另存为新文件，源 PDF 只读。
 - **深色模式**：`data-theme` 作用在 `<html>`，配色全部走 CSS 变量；偏好存 `localStorage`。
 
