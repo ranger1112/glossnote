@@ -349,7 +349,9 @@ fn reconcile_document(
     }
 
     db::orphan_cards_for_document(conn, &document.id, now_ms())?;
-    write_sidecar(conn, root, &document.id)?;
+    // 合并结果没变就不要碰文件：扫描和打开文档都会走到这里，
+    // 每次重写会让云盘客户端把整座书库当成“已修改”。
+    write_sidecar_if_changed(conn, root, &document.id)?;
 
     for (path, sidecar) in &ordered {
         if is_canonical(path, &document.id) || sidecar.schema_version != SIDECAR_VERSION {
@@ -379,7 +381,7 @@ fn merge_document(
     reconcile_document(conn, root, document, &files, &mut stats)
 }
 
-pub fn write_sidecar(conn: &rusqlite::Connection, root: &Path, doc_id: &str) -> Result<(), String> {
+fn serialized_sidecar(conn: &rusqlite::Connection, doc_id: &str) -> Result<Vec<u8>, String> {
     let document = db::find_by_id(conn, doc_id)?.ok_or_else(|| "文档不存在".to_string())?;
     let annotations = db::list_annotations(conn, doc_id)?;
     let cards = db::list_cards_for_document(conn, doc_id)?;
@@ -393,25 +395,50 @@ pub fn write_sidecar(conn: &rusqlite::Connection, root: &Path, doc_id: &str) -> 
         cards,
     };
 
-    let path = sidecar_path(root, doc_id);
+    let bytes =
+        serde_json::to_vec_pretty(&sidecar).map_err(|error| format!("序列化标注失败：{error}"))?;
+    Ok(bytes)
+}
+
+fn write_sidecar_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let directory = path.parent().ok_or_else(|| "标注路径无效".to_string())?;
     fs::create_dir_all(directory).map_err(|error| format!("创建标注目录失败：{error}"))?;
 
     let temp = directory.join(format!(
         "{}.json.tmp-{}-{}",
-        doc_id,
+        path.file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("sidecar"),
         process::id(),
         now_ms()
     ));
-    let bytes =
-        serde_json::to_vec_pretty(&sidecar).map_err(|error| format!("序列化标注失败：{error}"))?;
     fs::write(&temp, bytes).map_err(|error| format!("写入标注失败：{error}"))?;
 
-    if let Err(error) = fs::rename(&temp, &path) {
-        let _ = fs::remove_file(&path);
-        fs::rename(&temp, &path).map_err(|_| format!("保存标注失败：{error}"))?;
+    if let Err(error) = fs::rename(&temp, path) {
+        let _ = fs::remove_file(path);
+        fs::rename(&temp, path).map_err(|_| format!("保存标注失败：{error}"))?;
     }
     Ok(())
+}
+
+pub fn write_sidecar(conn: &rusqlite::Connection, root: &Path, doc_id: &str) -> Result<(), String> {
+    let bytes = serialized_sidecar(conn, doc_id)?;
+    write_sidecar_bytes(&sidecar_path(root, doc_id), &bytes)
+}
+
+/// 扫描/打开文档时会走一遍合并，即使什么都没变也会被调到这里。
+/// 内容相同就跳过写盘，否则云盘客户端会把每次启动都当成一次修改。
+fn write_sidecar_if_changed(
+    conn: &rusqlite::Connection,
+    root: &Path,
+    doc_id: &str,
+) -> Result<(), String> {
+    let bytes = serialized_sidecar(conn, doc_id)?;
+    let path = sidecar_path(root, doc_id);
+    if fs::read(&path).map(|existing| existing == bytes).unwrap_or(false) {
+        return Ok(());
+    }
+    write_sidecar_bytes(&path, &bytes)
 }
 
 pub fn import_pdf(app: &AppHandle, source: &str) -> Result<ImportResult, String> {
@@ -513,10 +540,14 @@ pub fn scan(app: &AppHandle) -> Result<ScanReport, String> {
 
     let books = root.join("books");
     let mut paths = Vec::new();
+    let mut seen_paths = std::collections::HashSet::new();
     for entry in fs::read_dir(&books).map_err(|error| format!("读取书库失败：{error}"))? {
         let entry = entry.map_err(|error| format!("读取书库条目失败：{error}"))?;
         let path = entry.path();
         if path.is_file() && is_pdf(&path) {
+            if let Ok(relative) = path.strip_prefix(&root) {
+                seen_paths.insert(relative.to_string_lossy().replace('\\', "/"));
+            }
             paths.push(path);
         }
     }
@@ -602,10 +633,16 @@ pub fn scan(app: &AppHandle) -> Result<ScanReport, String> {
     }
 
     let (documents, annotations) = db::counts(&conn)?;
+    // 文件被删除或还没同步下来的文档：索引保留，但不再显示成幽灵卡片。
+    let missing_documents = db::list_documents(&conn)?
+        .iter()
+        .filter(|row| !seen_paths.contains(&row.rel_path))
+        .count();
     Ok(ScanReport {
         root: root.to_string_lossy().into_owned(),
         documents,
         annotations,
+        missing_documents,
         merged: stats.merged,
         merged_cards: stats.merged_cards,
         archived: stats.archived,
@@ -648,8 +685,14 @@ pub fn list_documents(app: &AppHandle) -> Result<Vec<Document>, String> {
         .db
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // 文件不在磁盘上时不要返回：点开只会报“文档文件不存在”。
+    // 云端把文件同步回来之后，下一次扫描会重新挂上，标注都还在。
     Ok(db::list_documents(&conn)?
         .iter()
+        .filter(|row| {
+            root.join(row.rel_path.replace('/', std::path::MAIN_SEPARATOR_STR))
+                .exists()
+        })
         .map(|row| row.to_document(&root))
         .collect())
 }
@@ -889,6 +932,31 @@ pub fn update_meta(
         .db
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    // 前端每次打开文档都会回填页数/标题/作者；值没变就不要写库、写 sidecar。
+    let before = db::find_by_id(&conn, doc_id)?.ok_or_else(|| "文档不存在".to_string())?;
+    let page_count_changed = patch
+        .page_count
+        .map(|value| value != before.page_count)
+        .unwrap_or(false);
+    let title_changed = patch
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value != before.title)
+        .unwrap_or(false);
+    let author_changed = patch
+        .author
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value != before.author)
+        .unwrap_or(false);
+
+    if !page_count_changed && !title_changed && !author_changed {
+        return Ok(before.to_document(&root));
+    }
 
     db::update_meta(
         &conn,
@@ -1461,6 +1529,38 @@ mod tests {
         let canonical: Sidecar =
             serde_json::from_slice(&fs::read(sidecar_path(&root, "doc1")).unwrap()).unwrap();
         assert!(canonical.annotations[0].deleted);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sidecar_is_only_rewritten_when_content_changes() {
+        let dir = temp_dir("sidecar-noop");
+        let root = dir.join("library");
+        ensure_dirs(&root).unwrap();
+        let conn = db::open(&dir.join("test.db")).unwrap();
+        let row = document("doc1", "books/doc1.pdf");
+        db::upsert_document(&conn, &row).unwrap();
+        db::upsert_annotation(&conn, &row.id, &annotation("a1", 10, "note")).unwrap();
+
+        write_sidecar(&conn, &root, "doc1").unwrap();
+        let path = sidecar_path(&root, "doc1");
+        let first = fs::metadata(&path).unwrap().modified().unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_sidecar_if_changed(&conn, &root, "doc1").unwrap();
+        assert_eq!(
+            first,
+            fs::metadata(&path).unwrap().modified().unwrap(),
+            "数据库没变时不应重写 sidecar"
+        );
+
+        db::upsert_annotation(&conn, &row.id, &annotation("a1", 20, "newer")).unwrap();
+        write_sidecar_if_changed(&conn, &root, "doc1").unwrap();
+        assert!(
+            fs::metadata(&path).unwrap().modified().unwrap() > first,
+            "数据库变化后应重写 sidecar"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

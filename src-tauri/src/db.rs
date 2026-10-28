@@ -404,7 +404,9 @@ pub fn search_annotations(conn: &Connection, query: &str) -> Result<Vec<SearchHi
              FROM annotations a
              JOIN documents d ON d.id = a.doc_id
              WHERE a.deleted = 0 AND (
-               a.anchor LIKE ?1 ESCAPE '\\'
+               -- 只搜引文本身：整段 anchor JSON 里还有坐标和 pageHash，
+               -- 直接 LIKE 会让 start、pageHash 这类查询命中所有标注。
+               COALESCE(json_extract(a.anchor, '$.quote'), '') LIKE ?1 ESCAPE '\\'
                OR a.body LIKE ?1 ESCAPE '\\'
                OR a.tags LIKE ?1 ESCAPE '\\'
                OR d.name LIKE ?1 ESCAPE '\\'
@@ -768,4 +770,56 @@ pub fn counts(conn: &Connection) -> Result<(usize, usize), String> {
         )
         .map_err(|error| format!("统计标注失败：{error}"))?;
     Ok((documents as usize, annotations as usize))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seeded() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO documents
+               (id, name, title, author, page_count, rel_path, size, mtime, added_at)
+             VALUES ('d1', 'doc.pdf', '', '', 1, 'books/doc.pdf', 1, 1, 1)",
+            [],
+        )
+        .unwrap();
+
+        let annotation = Annotation {
+            id: "a1".to_string(),
+            page: 0,
+            anchor: serde_json::json!({
+                "quote": "标注的价值不在数量",
+                "start": 12,
+                "end": 21,
+                "pageHash": "f1a4122c",
+                "rects": [{ "x": 0.11753, "y": 0.2116, "w": 0.34722, "h": 0.02001 }],
+            }),
+            color: "yellow".to_string(),
+            kind: "highlight".to_string(),
+            body: String::new(),
+            tags: Vec::new(),
+            created_at: 1,
+            updated_at: 1,
+            deleted: false,
+        };
+        upsert_annotation(&conn, "d1", &annotation).unwrap();
+        conn
+    }
+
+    #[test]
+    fn search_matches_quote_only() {
+        let conn = seeded();
+        assert_eq!(search_annotations(&conn, "标注的价值").unwrap().len(), 1);
+
+        // 这些词只出现在 anchor 的 JSON 结构里，不是用户能看到的正文。
+        for query in ["start", "rects", "pageHash", "0.11753"] {
+            assert!(
+                search_annotations(&conn, query).unwrap().is_empty(),
+                "查询 {query} 不应命中任何标注"
+            );
+        }
+    }
 }

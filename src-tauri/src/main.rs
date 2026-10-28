@@ -21,7 +21,7 @@ use std::{
 };
 use tauri::{AppHandle, Manager};
 
-#[tauri::command]
+#[tauri::command(async)]
 fn library_info(app: AppHandle) -> Result<LibraryInfo, String> {
     library::info(&app)
 }
@@ -61,12 +61,12 @@ async fn save_cover(app: AppHandle, doc_id: String, bytes: Vec<u8>) -> Result<Do
         .map_err(|error| format!("封面任务失败：{error}"))?
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn save_progress(app: AppHandle, doc_id: String, last_page: u32) -> Result<(), String> {
     library::save_progress(&app, &doc_id, last_page)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn search_annotations(app: AppHandle, query: String) -> Result<Vec<SearchHit>, String> {
     library::search(&app, query)
 }
@@ -82,37 +82,37 @@ async fn export_markdown(
         .map_err(|error| format!("导出任务失败：{error}"))?
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn last_document(app: AppHandle) -> Result<Option<ImportResult>, String> {
     library::last_document(&app)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn list_documents(app: AppHandle) -> Result<Vec<Document>, String> {
     library::list_documents(&app)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn list_annotations(app: AppHandle, doc_id: String) -> Result<Vec<Annotation>, String> {
     library::list_annotations(&app, &doc_id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn upsert_annotation(app: AppHandle, doc_id: String, annotation: Annotation) -> Result<(), String> {
     library::upsert_annotation(&app, &doc_id, annotation)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn delete_annotation(app: AppHandle, doc_id: String, id: String) -> Result<(), String> {
     library::delete_annotation(&app, &doc_id, &id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn list_cards(app: AppHandle) -> Result<Vec<CardView>, String> {
     library::cards(&app)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn create_card(
     app: AppHandle,
     doc_id: String,
@@ -124,7 +124,7 @@ fn create_card(
     library::create_card(&app, &doc_id, &annotation_id, title, body, links)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn update_card(
     app: AppHandle,
     card_id: String,
@@ -135,22 +135,22 @@ fn update_card(
     library::update_card(&app, &card_id, title, body, links)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn delete_card(app: AppHandle, card_id: String) -> Result<(), String> {
     library::delete_card(&app, &card_id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn review_card(app: AppHandle, card_id: String, rating: u8) -> Result<CardView, String> {
     library::review_card(&app, &card_id, rating)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn ai_settings(app: AppHandle) -> AiSettingsView {
     ai::get_settings(&app)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn save_ai_settings(app: AppHandle, settings: AiSettingsInput) -> Result<AiSettingsView, String> {
     ai::save_settings(&app, settings)
 }
@@ -161,15 +161,18 @@ async fn test_ai(app: AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn index_document_text(
+async fn index_document_text(
     app: AppHandle,
     doc_id: String,
     pages: Vec<PageTextInput>,
 ) -> Result<usize, String> {
-    ai::index_document_text(&app, &doc_id, pages)
+    // 整本书切块 + 两万条插入：放到阻塞线程池，别占着异步运行时。
+    tauri::async_runtime::spawn_blocking(move || ai::index_document_text(&app, &doc_id, pages))
+        .await
+        .map_err(|error| format!("全文索引任务失败：{error}"))?
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn document_index_status(app: AppHandle, doc_id: String) -> Result<bool, String> {
     ai::index_status(&app, &doc_id)
 }
@@ -199,7 +202,7 @@ async fn ai_summarize(
     ai::summarize(&app, &doc_id, annotations_only).await
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn update_document_meta(
     app: AppHandle,
     doc_id: String,

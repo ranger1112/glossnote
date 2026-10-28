@@ -124,6 +124,8 @@ pub struct ScanReport {
     pub archived: usize,
     /// 内容重复、未重复索引的 PDF 数量。
     pub duplicate_pdfs: usize,
+    /// 索引里存在、但文件已经不在书库目录的文档数量。
+    pub missing_documents: usize,
     /// 无法解析或版本不认识的 sidecar 数量。
     pub ignored_sidecars: usize,
     /// 从 sidecar 合并进数据库的卡片数量。

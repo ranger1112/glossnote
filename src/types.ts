@@ -63,6 +63,7 @@ export interface ScanReport {
   /** 合并后归档到 .glossnote/conflicts/ 的冲突副本数量 */
   archived: number;
   duplicatePdfs: number;
+  missingDocuments: number;
   ignoredSidecars: number;
   mergedCards: number;
   scannedAt: number;
