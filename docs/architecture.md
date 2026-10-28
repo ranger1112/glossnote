@@ -289,6 +289,8 @@ chunks(                            -- AI 全文索引，派生数据，不进 si
 
 Tauri 侧注意：pdf.js 的 worker 需要 `worker-src 'self'`；部分扫描件的 JPEG2000 解码需要 WASM，CSP 要允许 `'wasm-unsafe-eval'`。具体值在接入桌面壳时验证，不凭记忆写死。
 
+pdf.js 的 `cmaps/`、`standard_fonts/`、`wasm/`、`iccs/` 是运行时才取的资源，不进 bundle。`scripts/copy-pdfjs-assets.mjs` 在 `dev` 与 `build` 前把它们复制到 `public/pdfjs/`，`src/pdfjs.ts` 的 `pdfjsAssets` 再把这些路径传给每个 `getDocument` 调用。缺了 wasm 时 pdf.js 只打印 `JpxError` 这类警告并把图渲染成黑块，不会抛错，所以判断渲染是否正常不能只看控制台有没有报错。
+
 ## 原型与目标的差距
 
 0.1 原型先跑在浏览器里；0.2 套上 Tauri 2 桌面壳，接入原生文件对话框与 asset protocol；0.3 把持久化换成 SQLite + sidecar，并在启动时扫描书库重建索引；0.4 增加书库网格、封面、搜索、标签、阅读进度、Markdown 导出与深色模式；0.5 增加书库目录切换与云盘冲突副本合并；0.6 增加标注制卡、双向链接与 FSRS 复习；0.7 增加划词解释、全文索引与可溯源问答。

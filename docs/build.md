@@ -56,6 +56,7 @@ VCVARS      = D:\BuildTools\VC\Auxiliary\Build\vcvars64.bat
 - `tauri = { features = ["protocol-asset"] }` 与 `security.assetProtocol.enable = true` 必须同时存在，否则 `cargo check` 会直接报 allowlist 不匹配。
 - PDF 字节不走 IPC：Rust 只返回路径、大小和 SHA-256，前端用 `convertFileSrc()` 得到 asset URL，交给 pdf.js 加载。
 - 生产 CSP 需要 `worker-src 'self' blob:`（pdf.js worker）与 `script-src 'wasm-unsafe-eval'`（部分扫描件的 JPEG2000 解码）；开发时 `devCsp` 为 `null`，避免 HMR 的 WebSocket 被拦。
+- pdf.js 的 `cmaps` / `standard_fonts` / `wasm` / `iccs` 由 `npm run pdfjs:assets` 复制到 `public/pdfjs/`，`dev` 与 `build` 已自动执行。少了 wasm 时 PDF 里的 JPEG2000 插图会渲染成黑块，控制台只有 `JpxError` 警告、不会中断渲染。
 - `assetProtocol.scope` 目前是 `["**"]`，因为 PDF 可能在任何盘符。这是本地应用的取舍；等书库目录固定后应收窄到书库根目录。
 
 ## 自动验证

@@ -5,8 +5,9 @@
   "type": "module",
   "description": "GlossNote — 在文档上批注，把标注沉淀成知识。",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "pdfjs:assets": "node scripts/copy-pdfjs-assets.mjs",
+    "dev": "npm run pdfjs:assets && vite",
+    "build": "tsc --noEmit && npm run pdfjs:assets && vite build",
     "preview": "vite preview",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",

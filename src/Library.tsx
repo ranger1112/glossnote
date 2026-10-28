@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { pdfjsLib } from './pdfjs';
+import { pdfjsAssets, pdfjsLib } from './pdfjs';
 import {
   assetUrl,
   exportMarkdown,
@@ -37,7 +37,7 @@ interface Inspection {
 
 /** 打开 PDF 拿到页数；缺封面时顺便把首页画成 320px 宽的 JPEG。 */
 async function inspectPdf(doc: DocumentMeta): Promise<Inspection> {
-  const task = pdfjsLib.getDocument({ url: assetUrl(doc.path) });
+  const task = pdfjsLib.getDocument({ url: assetUrl(doc.path), ...pdfjsAssets });
   try {
     const pdf = await task.promise;
     if (doc.cover) return { pageCount: pdf.numPages, cover: null };
