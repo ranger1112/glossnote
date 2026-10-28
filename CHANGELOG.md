@@ -2,7 +2,7 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.1.1] - 2026-10-28
 
 ### 新增
 
@@ -13,6 +13,7 @@
 ### 改变
 
 - 打开/导入文档只读取该文档的 sidecar 与云盘冲突副本（文件名以哈希开头），不再遍历整个标注目录；读取也移出了数据库锁。
+- Vite 不再监听 `src-tauri/` 构建产物，Rust 编译时不会触发整页刷新。
 
 ## [0.1.0] - 2026-10-28
 
