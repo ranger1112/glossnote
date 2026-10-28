@@ -27,7 +27,7 @@ GlossNote 把「读」和「以后用得上」放在同一个地方：PDF 复制
 
 从 [Releases](https://github.com/ranger1112/glossnote/releases) 下载最新的 `GlossNote_x.y.z_x64-setup.exe` 安装。安装包未做代码签名，Windows SmartScreen 可能提示「未知发布者」，选择「更多信息 → 仍要运行」即可。
 
-0.1.0 是在更新器接入之前构建的，应用内「检查更新」从后续版本开始生效。
+0.1.0 是在更新器接入之前构建的，应用内「检查更新」从后续版本开始生效。更新检查遵循系统代理设置；如果 GitHub 无法直连，请启用系统代理（或在启动应用前设置 `HTTPS_PROXY`）。
 
 首次启动的书库默认在 `文档\GlossNote\`，可以在书库页点「书库位置」换到任意目录（包括云盘同步目录）。
 
