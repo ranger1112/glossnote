@@ -9,6 +9,7 @@
 ## 验证方式
 
 - [ ] `npm test`
+- [ ] `npm run test:e2e`
 - [ ] `npm run build`
 - [ ] `cargo test`（`src-tauri/`）
 - [ ] `cargo clippy --all-targets -- -D warnings`（`src-tauri/`）

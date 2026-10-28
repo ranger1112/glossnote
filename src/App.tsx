@@ -7,12 +7,7 @@ import { Review } from './Review';
 import { CardEditor, type CardDraft } from './CardEditor';
 import { AiPanel } from './AiPanel';
 import { AiSettingsModal } from './AiSettingsModal';
-import {
-  IconArrowLeft,
-  IconMoon,
-  IconSparkles,
-  IconSun,
-} from './icons';
+import { IconArrowLeft, IconMoon, IconRefresh, IconSparkles, IconSun } from './icons';
 import type { Anchor } from './anchoring';
 import type {
   AiSettingsView,
@@ -25,6 +20,7 @@ import type {
 import { loadDoc, saveDoc, sha256Hex } from './storage';
 import { errorText } from './errors';
 import { isTauri } from './platform';
+import { findUpdate, installUpdate, type AvailableUpdate } from './updater';
 import {
   aiSettings,
   assetUrl,
@@ -183,6 +179,9 @@ export default function App() {
   const [ai, setAi] = useState<AiSettingsView | null>(null);
   const [aiSettingsOpen, setAiSettingsOpen] = useState(false);
   const [aiPanel, setAiPanel] = useState<AiPanelState>(null);
+  const [availableUpdate, setAvailableUpdate] = useState<AvailableUpdate | null>(null);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [installingUpdate, setInstallingUpdate] = useState(false);
 
   const fileRef = useRef<HTMLInputElement>(null);
   const recordRef = useRef<DocRecord | null>(null);
@@ -301,6 +300,46 @@ export default function App() {
       })
       .catch(() => undefined);
   }, [desktop]);
+
+  // 更新只在用户点按钮时联网：应用默认仍然不发任何请求。
+  const handleUpdate = useCallback(async () => {
+    if (!desktop || checkingUpdate || installingUpdate) return;
+
+    if (availableUpdate) {
+      setInstallingUpdate(true);
+      setMessage('正在下载更新…');
+      try {
+        await installUpdate(availableUpdate.update, (percent) => {
+          setMessage(percent === null ? '正在下载更新…' : `正在下载更新 ${percent}%…`);
+        });
+      } catch (error) {
+        setInstallingUpdate(false);
+        setMessage(`更新失败：${errorText(error)}`);
+      }
+      return;
+    }
+
+    setCheckingUpdate(true);
+    try {
+      const found = await findUpdate();
+      if (found) {
+        setAvailableUpdate(found);
+        setMessage(`发现新版本 ${found.version}，再次点击更新按钮开始下载。`);
+      } else {
+        setMessage('已是最新版本。');
+      }
+    } catch (error) {
+      console.error('检查更新失败', error);
+      const detail = errorText(error);
+      setMessage(
+        /request|network|timed? ?out|connect|dns/i.test(detail)
+          ? '检查更新失败：连不上 GitHub，请检查网络或代理后再试。'
+          : `检查更新失败：${detail}`,
+      );
+    } finally {
+      setCheckingUpdate(false);
+    }
+  }, [availableUpdate, checkingUpdate, desktop, installingUpdate]);
 
   const openAiSettings = useCallback(async () => {
     if (!ai) {
@@ -886,6 +925,32 @@ export default function App() {
               </button>
             </div>
           </div>
+        )}
+
+        {desktop && (
+          <button
+            type="button"
+            className={`theme-toggle update-toggle ${availableUpdate ? 'ready' : ''}`}
+            title={
+              availableUpdate
+                ? `更新到 ${availableUpdate.version}`
+                : checkingUpdate
+                  ? '正在检查更新'
+                  : '检查更新'
+            }
+            aria-label={availableUpdate ? `更新到 ${availableUpdate.version}` : '检查更新'}
+            disabled={checkingUpdate || installingUpdate}
+            onClick={() => void handleUpdate()}
+          >
+            {checkingUpdate || installingUpdate ? (
+              <span className="update-spin" aria-hidden="true" />
+            ) : (
+              <IconRefresh size={15} />
+            )}
+            {availableUpdate && !installingUpdate && (
+              <span className="update-dot" aria-hidden="true" />
+            )}
+          </button>
         )}
 
         {desktop && (

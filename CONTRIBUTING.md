@@ -22,6 +22,7 @@
 npm install
 npm run desktop:dev   # Tauri 桌面应用
 npm test              # 前端单元测试
+npm run test:e2e      # 浏览器冒烟 E2E（首次需 npx playwright install chromium）
 npm run build         # 类型检查 + 生产构建
 ```
 

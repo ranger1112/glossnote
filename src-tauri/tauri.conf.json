@@ -33,9 +33,18 @@
       }
     }
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE2RUU2NDk0NDU2M0Y2N0IKUldSNzltTkZsR1R1RmtTQXBVem9kcURJL1JNZTRIYzgxSHdpQ0RnRUs1QnNadFI1UDRUaWJyVk4K",
+      "endpoints": [
+        "https://github.com/ranger1112/glossnote/releases/latest/download/latest.json"
+      ]
+    }
+  },
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

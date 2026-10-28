@@ -21,10 +21,13 @@ GlossNote 把「读」和「以后用得上」放在同一个地方：PDF 复制
 - **同步**：书库目录可以指向坚果云 / OneDrive / Syncthing 等同步目录，扫描时按时间戳合并冲突副本；没有账号，也没有服务端。
 - **卡片与复习**：标注一键制卡、卡片双向链接、FSRS-4.5 到期调度。
 - **AI（默认关闭）**：划词解释、本地全文索引后的提问与总结，回答带页码来源，可跳回原文。支持 Anthropic 与 OpenAI 兼容服务。
+- **更新**：顶栏「检查更新」按需联网，校验签名后下载安装并重启；不自动检查、不上报。
 
 ## 下载与安装
 
-从 [Releases](https://github.com/ranger1112/glossnote/releases) 下载 `GlossNote_0.1.0_x64-setup.exe` 安装。安装包未做代码签名，Windows SmartScreen 可能提示「未知发布者」，选择「更多信息 → 仍要运行」即可。
+从 [Releases](https://github.com/ranger1112/glossnote/releases) 下载最新的 `GlossNote_x.y.z_x64-setup.exe` 安装。安装包未做代码签名，Windows SmartScreen 可能提示「未知发布者」，选择「更多信息 → 仍要运行」即可。
+
+0.1.0 是在更新器接入之前构建的，应用内「检查更新」从后续版本开始生效。
 
 首次启动的书库默认在 `文档\GlossNote\`，可以在书库页点「书库位置」换到任意目录（包括云盘同步目录）。
 
@@ -55,6 +58,7 @@ npm run build           # 类型检查 + 前端生产构建
 
 - 默认不联网、无账号、无遥测。
 - 只有你主动使用 AI 时，才发送当前问题、选中的文字与本地检索到的片段；全文索引本身在本机完成。
+- 只有你点击「检查更新」时才会访问 GitHub Releases，且只下载更新清单与安装包。
 - API Key 明文保存在本机 `settings.json`，不进入书库，也不进入 sidecar。
 - sidecar 是明文 JSON，可靠性优先于保密性；需要保密时请依赖云盘或磁盘加密。
 

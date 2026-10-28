@@ -38,6 +38,16 @@ jobs:
         with:
           workspaces: src-tauri
 
+      - name: 检查更新签名密钥
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "缺少仓库 secret：TAURI_SIGNING_PRIVATE_KEY / TAURI_SIGNING_PRIVATE_KEY_PASSWORD" >&2
+            exit 1
+          fi
+
       - run: npm ci
 
       # beforeBuildCommand 会先跑 npm run build（类型检查 + 前端构建）。
@@ -45,6 +55,8 @@ jobs:
         run: npx tauri build
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: 生成 SHA-256 校验文件
         shell: bash
@@ -52,6 +64,12 @@ jobs:
           cd src-tauri/target/release/bundle/nsis
           sha256sum *.exe > SHA256SUMS.txt
           cat SHA256SUMS.txt
+
+      - name: 生成更新清单
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: node scripts/make-updater-json.mjs "$TAG"
 
       - name: 上传安装包到 Release
         shell: bash
@@ -66,4 +84,5 @@ jobs:
           gh release upload "$TAG" \
             src-tauri/target/release/bundle/nsis/*.exe \
             src-tauri/target/release/bundle/nsis/SHA256SUMS.txt \
+            src-tauri/target/release/bundle/nsis/latest.json \
             --clobber

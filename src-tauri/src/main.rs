@@ -218,6 +218,9 @@ fn main() {
             }
         }))
         .plugin(tauri_plugin_dialog::init())
+        // 更新检查由用户点击触发；应用默认仍然不联网。
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             let handle = app.handle().clone();
             let app_data = handle

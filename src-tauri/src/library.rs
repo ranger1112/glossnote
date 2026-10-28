@@ -196,6 +196,25 @@ struct MergeStats {
     ignored: usize,
 }
 
+/// 读一个 sidecar；无法读取、JSON 无效或 docId 为空时返回 None。
+fn read_sidecar(path: &Path) -> Option<Sidecar> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) => {
+            eprintln!("跳过无法读取的 sidecar {}：{error}", path.display());
+            return None;
+        }
+    };
+    match serde_json::from_str::<Sidecar>(&text) {
+        Ok(sidecar) if !sidecar.doc_id.trim().is_empty() => Some(sidecar),
+        Ok(_) => None,
+        Err(error) => {
+            eprintln!("跳过无效的 sidecar {}：{error}", path.display());
+            None
+        }
+    }
+}
+
 /// 标注目录里的所有 JSON 都可能是别的设备/云盘生成的冲突副本，
 /// 因此按文件里的 docId 分组，而不是只认 `<docId>.json`。
 fn load_sidecars(root: &Path) -> Result<(HashMap<String, Vec<SidecarEntry>>, usize), String> {
@@ -216,26 +235,10 @@ fn load_sidecars(root: &Path) -> Result<(HashMap<String, Vec<SidecarEntry>>, usi
             continue;
         }
 
-        let text = match fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(error) => {
-                eprintln!("跳过无法读取的 sidecar {}：{error}", path.display());
-                ignored += 1;
-                continue;
-            }
-        };
-        let sidecar: Sidecar = match serde_json::from_str(&text) {
-            Ok(sidecar) => sidecar,
-            Err(error) => {
-                eprintln!("跳过无效的 sidecar {}：{error}", path.display());
-                ignored += 1;
-                continue;
-            }
-        };
-        if sidecar.doc_id.trim().is_empty() {
+        let Some(sidecar) = read_sidecar(&path) else {
             ignored += 1;
             continue;
-        }
+        };
 
         groups
             .entry(sidecar.doc_id.clone())
@@ -248,6 +251,47 @@ fn load_sidecars(root: &Path) -> Result<(HashMap<String, Vec<SidecarEntry>>, usi
     }
 
     Ok((groups, ignored))
+}
+
+/// 单文档合并只读与它相关的文件：规范文件与云盘冲突副本都以 docId 开头。
+/// 打开/导入因此不再扫描整个标注目录；名字被改过的 sidecar 由全库扫描兜底。
+fn load_sidecars_for(root: &Path, doc_id: &str) -> Result<(Vec<SidecarEntry>, usize), String> {
+    let directory = root.join(".glossnote").join("annotations");
+    let mut files = Vec::new();
+    let mut ignored = 0;
+
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(_) if !directory.exists() => return Ok((files, ignored)),
+        Err(error) => return Err(format!("读取标注目录失败：{error}")),
+    };
+
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("读取标注条目失败：{error}"))?;
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        if !name.starts_with(doc_id) {
+            continue;
+        }
+
+        let Some(sidecar) = read_sidecar(&path) else {
+            ignored += 1;
+            continue;
+        };
+        // 文件名匹配不代表内容匹配；只合并内部 docId 一致的文件。
+        if sidecar.doc_id == doc_id {
+            files.push((path, sidecar));
+        }
+    }
+
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok((files, ignored))
 }
 
 fn is_canonical(path: &Path, doc_id: &str) -> bool {
@@ -366,14 +410,14 @@ fn reconcile_document(
     db::list_annotations(conn, &document.id)
 }
 
-/// 单文档场景（导入/打开）：现读目录，合并并归档该文档的冲突副本。
+/// 单文档场景（导入/打开）：合并调用方在锁外读到的 sidecar，并归档冲突副本。
 fn merge_document(
     conn: &rusqlite::Connection,
     root: &Path,
     document: &DocumentRow,
+    files: Vec<SidecarEntry>,
+    ignored: usize,
 ) -> Result<Vec<Annotation>, String> {
-    let (mut groups, ignored) = load_sidecars(root)?;
-    let files = groups.remove(&document.id).unwrap_or_default();
     let mut stats = MergeStats {
         ignored,
         ..Default::default()
@@ -475,13 +519,15 @@ pub fn import_pdf(app: &AppHandle, source: &str) -> Result<ImportResult, String>
         if !destination.exists() {
             copy_atomic(&source, &destination)?;
         }
+        // sidecar 读取是文件 I/O，放在锁外；只读与本文档相关的文件。
+        let (files, ignored) = load_sidecars_for(&root, &id)?;
         let conn = state
             .db
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         db::touch_document(&conn, &id, now)?;
         let document = db::find_by_id(&conn, &id)?.ok_or_else(|| "文档不存在".to_string())?;
-        let annotations = merge_document(&conn, &root, &document)?;
+        let annotations = merge_document(&conn, &root, &document, files, ignored)?;
         let document = db::find_by_id(&conn, &id)?.unwrap_or(document);
         return Ok(ImportResult {
             document: document.to_document(&root),
@@ -528,13 +574,14 @@ pub fn import_pdf(app: &AppHandle, source: &str) -> Result<ImportResult, String>
         last_page: 0,
         annotation_count: 0,
     };
+    let (files, ignored) = load_sidecars_for(&root, &id)?;
     let conn = state
         .db
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     db::upsert_document(&conn, &row)?;
 
-    let annotations = merge_document(&conn, &root, &row)?;
+    let annotations = merge_document(&conn, &root, &row, files, ignored)?;
     let document = db::find_by_id(&conn, &id)?.unwrap_or(row);
 
     Ok(ImportResult {
@@ -705,12 +752,15 @@ pub fn open_document(app: &AppHandle, doc_id: &str) -> Result<ImportResult, Stri
     let state = app.state::<AppState>();
     let root = state.root();
     ensure_dirs(&root)?;
-    let conn = state
-        .db
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-    let row = db::find_by_id(&conn, doc_id)?.ok_or_else(|| "文档不存在".to_string())?;
+    // 先短锁取路径，再把 sidecar 读取放到锁外；打开文档不该让整个应用等磁盘。
+    let row = {
+        let conn = state
+            .db
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        db::find_by_id(&conn, doc_id)?.ok_or_else(|| "文档不存在".to_string())?
+    };
     if !root
         .join(row.rel_path.replace('/', std::path::MAIN_SEPARATOR_STR))
         .exists()
@@ -718,8 +768,15 @@ pub fn open_document(app: &AppHandle, doc_id: &str) -> Result<ImportResult, Stri
         return Err("文档文件不存在".to_string());
     }
 
+    let (files, ignored) = load_sidecars_for(&root, doc_id)?;
+
+    let conn = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let row = db::find_by_id(&conn, doc_id)?.ok_or_else(|| "文档不存在".to_string())?;
     db::touch_document(&conn, doc_id, now_ms())?;
-    let annotations = merge_document(&conn, &root, &row)?;
+    let annotations = merge_document(&conn, &root, &row, files, ignored)?;
     let document = db::find_by_id(&conn, doc_id)?.unwrap_or(row);
 
     Ok(ImportResult {
@@ -1269,6 +1326,66 @@ mod tests {
         }
     }
 
+    fn merge_from_disk(
+        conn: &rusqlite::Connection,
+        root: &Path,
+        row: &DocumentRow,
+    ) -> Vec<Annotation> {
+        let (files, ignored) = load_sidecars_for(root, &row.id).unwrap();
+        merge_document(conn, root, row, files, ignored).unwrap()
+    }
+
+    #[test]
+    fn single_document_load_skips_other_sidecars() {
+        let dir = temp_dir("single-sidecar");
+        let root = dir.join("library");
+        ensure_dirs(&root).unwrap();
+        let conn = db::open(&dir.join("test.db")).unwrap();
+        let row = document("doc1", "books/doc1.pdf");
+        db::upsert_document(&conn, &row).unwrap();
+
+        let canonical = sidecar_path(&root, "doc1");
+        let write = |path: &Path, sidecar: &Sidecar| {
+            fs::write(path, serde_json::to_vec(sidecar).unwrap()).unwrap();
+        };
+        write(
+            &canonical,
+            &sidecar_for("doc1", vec![annotation("a1", 10, "canonical")]),
+        );
+        write(
+            &canonical.with_file_name("doc1 (1).json"),
+            &sidecar_for("doc1", vec![annotation("a2", 10, "conflict")]),
+        );
+        write(
+            &canonical.with_file_name("doc2.json"),
+            &sidecar_for("doc2", vec![annotation("b1", 10, "other")]),
+        );
+        // 名字被改过，但仍属于 doc1：单文档读取不认，全库扫描兜底。
+        write(
+            &canonical.with_file_name("renamed.json"),
+            &sidecar_for("doc1", vec![annotation("a3", 10, "renamed")]),
+        );
+
+        let (files, ignored) = load_sidecars_for(&root, "doc1").unwrap();
+        assert_eq!(ignored, 0);
+        assert_eq!(files.len(), 2, "只应读规范文件与冲突副本");
+
+        let (groups, _) = load_sidecars(&root).unwrap();
+        assert_eq!(
+            groups.get("doc1").unwrap().len(),
+            3,
+            "全库扫描仍覆盖改名文件"
+        );
+
+        let merged = merge_from_disk(&conn, &root, &row);
+        let ids: Vec<&str> = merged.iter().map(|item| item.id.as_str()).collect();
+        assert!(ids.contains(&"a1"));
+        assert!(ids.contains(&"a2"));
+        assert!(!ids.contains(&"a3"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn sidecar_round_trip_and_last_write_wins() {
         let dir = temp_dir("sidecar");
@@ -1290,12 +1407,12 @@ mod tests {
         sidecar.annotations[0].body = "newer".to_string();
         sidecar.annotations[0].updated_at = 20;
         fs::write(&path, serde_json::to_vec(&sidecar).unwrap()).unwrap();
-        let merged = merge_document(&conn, &root, &row).unwrap();
+        let merged = merge_from_disk(&conn, &root, &row);
         assert_eq!(merged[0].body, "newer");
 
         // 数据库更新、sidecar 落后：旧 sidecar 不得覆盖新数据。
         db::upsert_annotation(&conn, &row.id, &annotation("a1", 30, "database wins")).unwrap();
-        let merged = merge_document(&conn, &root, &row).unwrap();
+        let merged = merge_from_disk(&conn, &root, &row);
         assert_eq!(merged[0].body, "database wins");
 
         let _ = fs::remove_dir_all(&dir);

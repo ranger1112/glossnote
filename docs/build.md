@@ -62,7 +62,14 @@ VCVARS      = D:\BuildTools\VC\Auxiliary\Build\vcvars64.bat
 ## 自动验证
 
 1. **前端单元测试**：`npm test`，覆盖锚定四级回退。
-2. **浏览器端到端**：启动 `npm run dev`，用 Playwright 打开 `http://localhost:1420`，走「示例 → 选区 → 高亮 → 刷新复原」。
+2. **浏览器冒烟 E2E**：`npm run test:e2e`（首次先 `npx playwright install chromium`），自动启动 Vite，走「示例 → 选区 → 高亮 → 刷新复原」。CI 的 `e2e` job 跑的就是这条。
 3. **Tauri 端到端**：以 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222` 启动 `scripts\dev.cmd`，再用 Playwright `connectOverCDP` 连上 WebView2，可以验证 `invoke('open_document')` 返回的文档与标注、asset protocol 取字节、pdf.js 从 asset URL 打开文档，以及完整的高亮流程。
 
 第 3 条是桌面壳阶段的主要验收手段：原生文件对话框本身无法用 CDP 驱动，但对话框之后的全部链路都能自动验证。
+
+## 更新签名（维护者）
+
+- 私钥：`%USERPROFILE%\.glossnote\updater.key`，密码在同目录 `updater-key-password.txt`；只在本机保存，丢失后已发布版本无法再签名更新。
+- 公钥：写在 `src-tauri/tauri.conf.json` 的 `plugins.updater.pubkey`。
+- GitHub Actions secrets：`TAURI_SIGNING_PRIVATE_KEY`（私钥文件内容）与 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。缺少时 Release workflow 会直接失败，不会产出无法验证的安装包。
+- `createUpdaterArtifacts` 开启后，Release workflow 会生成 `.sig`、`latest.json` 与安装包一起上传；客户端顶栏的「检查更新」读取 `releases/latest/download/latest.json`。
