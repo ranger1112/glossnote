@@ -2075,14 +2075,55 @@ button.color-dot:hover {
 }
 
 .settings-modal {
+  display: flex;
+  flex-direction: column;
   width: min(680px, 94vw);
   max-height: 86vh;
-  overflow: auto;
-  padding: 22px 24px 18px;
+  overflow: hidden;
+  padding: 0;
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   background: var(--panel);
   box-shadow: var(--shadow-lg);
+}
+
+.settings-head {
+  flex: none;
+  margin: 0;
+  padding: 20px 24px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.settings-head > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.settings-head h2 {
+  margin: 0;
+}
+
+.settings-head span {
+  color: var(--faint);
+  font-size: 10.5px;
+}
+
+.settings-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 24px 8px;
+}
+
+.settings-foot {
+  flex: none;
+  display: flex;
+  justify-content: flex-end;
+  padding: 12px 24px 16px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
 }
 
 .settings-section {
@@ -2092,7 +2133,17 @@ button.color-dot:hover {
 
 .settings-section:first-of-type {
   border-top: 0;
-  padding-top: 4px;
+  padding-top: 16px;
+}
+
+.settings-section .ghost {
+  border: 1px solid var(--line);
+  background: var(--panel-strong);
+}
+
+.settings-section .ghost:hover:not(:disabled) {
+  border-color: var(--line-strong);
+  background: var(--surface);
 }
 
 .settings-section h3 {

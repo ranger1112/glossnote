@@ -59,13 +59,23 @@ export function SettingsModal({
         aria-label="设置"
         onClick={(event) => event.stopPropagation()}
       >
-        <header className="modal-head">
-          <h2>设置</h2>
-          <button type="button" className="icon-button" aria-label="关闭" onClick={onClose}>
+        <header className="modal-head settings-head">
+          <div>
+            <h2>设置</h2>
+            <span>修改即时生效</span>
+          </div>
+          <button
+            type="button"
+            className="icon-button"
+            aria-label="关闭"
+            title="关闭"
+            onClick={onClose}
+          >
             ×
           </button>
         </header>
 
+        <div className="settings-body">
         <section className="settings-section">
           <h3>外观</h3>
           <div className="settings-row">
@@ -198,6 +208,13 @@ export function SettingsModal({
             sidecar。许可证 Apache-2.0。
           </p>
         </section>
+        </div>
+
+        <footer className="settings-foot">
+          <button type="button" className="primary" onClick={onClose}>
+            完成
+          </button>
+        </footer>
       </div>
     </div>
   );

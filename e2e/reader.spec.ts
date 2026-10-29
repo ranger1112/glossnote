@@ -230,7 +230,17 @@ test('设置面板：主题切换、快捷键列表与关闭', async ({ page }) 
   await modal.locator('.theme-choice button', { hasText: '浅色' }).click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
 
-  await page.keyboard.press('Escape');
+  // 标题栏和底部按钮固定，只有中间内容滚动。
+  const head = modal.locator('.settings-head');
+  const before = await head.boundingBox();
+  await modal.locator('.settings-body').evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  const after = await head.boundingBox();
+  expect(after?.y).toBe(before?.y);
+  await expect(modal.getByRole('button', { name: '完成' })).toBeVisible();
+
+  await modal.getByRole('button', { name: '完成' }).click();
   await expect(modal).toHaveCount(0);
 });
 

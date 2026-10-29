@@ -1434,7 +1434,8 @@ export default function App() {
         setToolbar(null);
         setFindOpen(false);
         setHelpOpen(false);
-        setSettingsOpen(false);
+        // AI 设置叠在设置面板上时，只关最上层，回到设置。
+        if (!aiSettingsOpen) setSettingsOpen(false);
         setSearchTarget(null);
         window.getSelection()?.removeAllRanges();
         return;
@@ -2083,10 +2084,7 @@ export default function App() {
           theme={theme}
           onTheme={setTheme}
           ai={ai}
-          onOpenAi={() => {
-            setSettingsOpen(false);
-            void openAiSettings();
-          }}
+          onOpenAi={() => void openAiSettings()}
           docOpen={!!doc}
           libraryRoot={settingsRoot}
           libraryBusy={libraryBusy}
