@@ -20,6 +20,10 @@ export function scanLibrary(): Promise<ScanReport> {
   return invoke('scan_library');
 }
 
+export function libraryRoot(): Promise<string> {
+  return invoke('library_root');
+}
+
 /** 启动时如果重建过索引或回退过设置，返回一条提示；只会返回一次。 */
 export function startupNotice(): Promise<string | null> {
   return invoke('startup_notice');

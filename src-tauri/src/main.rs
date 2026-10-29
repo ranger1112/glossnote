@@ -219,6 +219,15 @@ fn update_document_meta(
     library::update_meta(&app, &doc_id, patch)
 }
 
+#[tauri::command]
+fn library_root(app: AppHandle) -> Result<String, String> {
+    Ok(app
+        .state::<AppState>()
+        .root()
+        .to_string_lossy()
+        .into_owned())
+}
+
 #[tauri::command(async)]
 fn load_page_texts(app: AppHandle, doc_id: String) -> Result<Vec<PageTextInput>, String> {
     library::load_page_texts(&app, &doc_id)
@@ -351,6 +360,7 @@ fn main() {
             ai_answer,
             ai_summarize,
             update_document_meta,
+            library_root,
             load_page_texts,
             save_page_texts,
             organize_document,

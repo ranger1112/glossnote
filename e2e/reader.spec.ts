@@ -208,6 +208,32 @@ test('阅读器快捷键：帮助、翻页与缩放', async ({ page }) => {
   await expect(zoom).toHaveText(original);
 });
 
+test('设置面板：主题切换、快捷键列表与关闭', async ({ page }) => {
+  await page.goto('/?sample');
+  await expect(
+    page.locator('.pdf-page').first().locator('.text-layer span').first(),
+  ).toBeVisible({ timeout: 30_000 });
+
+  await page.getByRole('button', { name: '设置' }).click();
+  const modal = page.locator('.settings-modal');
+  await expect(modal).toBeVisible();
+  await expect(modal).toContainText('外观');
+  await expect(modal).toContainText('快捷键');
+  await expect(modal).toContainText('关于');
+  await expect(modal.locator('.shortcut-list > div')).toHaveCount(10);
+
+  // 浏览器模式没有书库命令，相关的设置节不出现。
+  await expect(modal).not.toContainText('书库位置');
+
+  await modal.locator('.theme-choice button', { hasText: '深色' }).click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await modal.locator('.theme-choice button', { hasText: '浅色' }).click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+
+  await page.keyboard.press('Escape');
+  await expect(modal).toHaveCount(0);
+});
+
 test('页内查找：Ctrl+F 搜索并定位命中', async ({ page }) => {
   await page.goto('/?sample');
   await expect(

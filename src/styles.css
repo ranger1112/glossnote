@@ -2027,11 +2027,11 @@ button.color-dot:hover {
   box-shadow: var(--shadow-lg);
 }
 
-.shortcut-card dl {
+.shortcut-list {
   margin: 0;
 }
 
-.shortcut-card dl > div {
+.shortcut-list > div {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
@@ -2040,20 +2040,26 @@ button.color-dot:hover {
   border-top: 1px solid var(--line);
 }
 
-.shortcut-card dt {
+.shortcut-list dt {
   color: var(--ink-soft);
   font-size: 11.5px;
   white-space: nowrap;
 }
 
-.shortcut-card dd {
+.shortcut-list dd {
   margin: 0;
   color: var(--muted);
   font-size: 11.5px;
   text-align: right;
 }
 
-.shortcut-card kbd {
+.shortcut-sep {
+  margin: 0 4px;
+  color: var(--faint);
+}
+
+.shortcut-list kbd,
+.settings-section kbd {
   display: inline-block;
   min-width: 18px;
   padding: 1px 5px;
@@ -2066,6 +2072,124 @@ button.color-dot:hover {
   font-size: 10px;
   line-height: 1.5;
   text-align: center;
+}
+
+.settings-modal {
+  width: min(680px, 94vw);
+  max-height: 86vh;
+  overflow: auto;
+  padding: 22px 24px 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  box-shadow: var(--shadow-lg);
+}
+
+.settings-section {
+  padding: 15px 0;
+  border-top: 1px solid var(--line);
+}
+
+.settings-section:first-of-type {
+  border-top: 0;
+  padding-top: 4px;
+}
+
+.settings-section h3 {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.settings-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+
+.settings-row > div:first-child {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.settings-row strong {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.settings-row span {
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.settings-grow {
+  flex: 1;
+}
+
+.settings-path {
+  display: block;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.settings-actions .ghost {
+  height: 28px;
+  padding: 0 9px;
+  font-size: 11.5px;
+}
+
+.settings-hint {
+  margin: 8px 0 0;
+  color: var(--faint);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.settings-about {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.7;
+}
+
+.theme-choice {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.theme-choice button {
+  height: 26px;
+  padding: 0 10px;
+  border-radius: var(--radius-xs);
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.theme-choice button.active {
+  background: var(--panel);
+  color: var(--ink);
+  box-shadow: var(--shadow-xs);
 }
 
 .card-editor,

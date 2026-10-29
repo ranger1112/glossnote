@@ -7,15 +7,14 @@ import { Review } from './Review';
 import { CardEditor, type CardDraft } from './CardEditor';
 import { AiPanel } from './AiPanel';
 import { AiSettingsModal } from './AiSettingsModal';
+import { SettingsModal } from './SettingsModal';
+import { ShortcutList } from './ShortcutList';
 import {
   IconArrowLeft,
   IconDownload,
-  IconKeyboard,
-  IconMoon,
-  IconRefresh,
   IconRedo,
+  IconSettings,
   IconSparkles,
-  IconSun,
   IconUndo,
 } from './icons';
 import type { Anchor } from './anchoring';
@@ -33,7 +32,8 @@ import { loadDoc, saveDoc, sha256Hex } from './storage';
 import { joinPdfItems } from './pdfText';
 import type { PdfTextItem } from './pdfjs';
 import { errorText } from './errors';
-import { isTauri, pickPdfSavePath } from './platform';
+import { getVersion } from '@tauri-apps/api/app';
+import { isTauri, pickDirectory, pickMarkdownPath, pickPdfSavePath } from './platform';
 import { findUpdate, installUpdate, type AvailableUpdate } from './updater';
 import {
   aiSettings,
@@ -41,11 +41,15 @@ import {
   createCard,
   deleteAnnotation,
   exportAnnotatedPdf,
+  exportMarkdown,
+  libraryRoot,
   listCards,
   loadPageTexts,
   openDocument,
   savePageTexts,
   saveProgress,
+  scanLibrary,
+  setLibraryRoot,
   startupNotice,
   updateCard,
   updateDocumentMeta,
@@ -268,6 +272,14 @@ export default function App() {
   const [filterKind, setFilterKind] = useState<AnnotationKind | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle');
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsRoot, setSettingsRoot] = useState('');
+  const [appVersion, setAppVersion] = useState('');
+  const [libraryBusy, setLibraryBusy] = useState<
+    'scanning' | 'switching' | 'exporting' | null
+  >(null);
+  /** 书库扫描或切换后强制重挂书库/复习视图，重新读取索引。 */
+  const [libraryKey, setLibraryKey] = useState(0);
 
   const findInputRef = useRef<HTMLInputElement>(null);
   const findTokenRef = useRef(0);
@@ -449,6 +461,75 @@ export default function App() {
       setCheckingUpdate(false);
     }
   }, [availableUpdate, checkingUpdate, desktop, installingUpdate]);
+
+  const openSettings = useCallback(() => {
+    setSettingsOpen(true);
+    if (!desktop) return;
+    if (!settingsRoot) {
+      void libraryRoot()
+        .then(setSettingsRoot)
+        .catch(() => undefined);
+    }
+    if (!appVersion) {
+      void getVersion()
+        .then(setAppVersion)
+        .catch(() => undefined);
+    }
+  }, [appVersion, desktop, settingsRoot]);
+
+  const handleSettingsScan = useCallback(async () => {
+    if (!desktop || libraryBusy) return;
+    setLibraryBusy('scanning');
+    setMessage('正在重新扫描书库…');
+    try {
+      const report = await scanLibrary();
+      setSettingsRoot(report.root);
+      setLibraryKey((key) => key + 1);
+      setMessage(`扫描完成：${report.documents} 份文档，${report.annotations} 条标注`);
+    } catch (error) {
+      setMessage(`扫描失败：${errorText(error)}`);
+    } finally {
+      setLibraryBusy(null);
+    }
+  }, [desktop, libraryBusy]);
+
+  const handleSettingsChangeRoot = useCallback(async () => {
+    if (!desktop || libraryBusy) return;
+    try {
+      const path = await pickDirectory('选择书库目录');
+      if (!path) return;
+      if (path === settingsRoot) {
+        setMessage('这个目录已经是当前书库');
+        return;
+      }
+
+      setLibraryBusy('switching');
+      setMessage('正在切换书库并重建索引…');
+      const report = await setLibraryRoot(path);
+      setSettingsRoot(report.root);
+      setLibraryKey((key) => key + 1);
+      setMessage(`书库已切换到 ${report.root}`);
+    } catch (error) {
+      setMessage(`切换书库失败：${errorText(error)}`);
+    } finally {
+      setLibraryBusy(null);
+    }
+  }, [desktop, libraryBusy, settingsRoot]);
+
+  const handleSettingsExport = useCallback(async () => {
+    if (!desktop || libraryBusy) return;
+    try {
+      const path = await pickMarkdownPath();
+      if (!path) return;
+      setLibraryBusy('exporting');
+      await exportMarkdown(path);
+      setMessage(`已导出 Markdown：${path}`);
+    } catch (error) {
+      setMessage(`导出失败：${errorText(error)}`);
+    } finally {
+      setLibraryBusy(null);
+    }
+  }, [desktop, libraryBusy]);
 
   const handleExportPdf = useCallback(async () => {
     const current = docRef.current;
@@ -1353,6 +1434,7 @@ export default function App() {
         setToolbar(null);
         setFindOpen(false);
         setHelpOpen(false);
+        setSettingsOpen(false);
         setSearchTarget(null);
         window.getSelection()?.removeAllRanges();
         return;
@@ -1360,6 +1442,8 @@ export default function App() {
 
       // 输入控件里的按键交给文本自身：撤销、空格与翻页都不拦截。
       if (isTypingTarget(event.target)) return;
+      // 设置、帮助或卡片弹窗打开时，不让快捷键操作后面的文档。
+      if (settingsOpen || helpOpen || aiSettingsOpen || cardEditing) return;
 
       if (event.ctrlKey || event.metaKey) {
         const key = event.key.toLowerCase();
@@ -1416,7 +1500,18 @@ export default function App() {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [doc, goToPage, redo, scrollPages, undo, zoomTo]);
+  }, [
+    aiSettingsOpen,
+    cardEditing,
+    doc,
+    goToPage,
+    helpOpen,
+    redo,
+    scrollPages,
+    settingsOpen,
+    undo,
+    zoomTo,
+  ]);
 
   return (
     <div className="app">
@@ -1513,18 +1608,6 @@ export default function App() {
         )}
 
         {doc && (
-          <button
-            type="button"
-            className="theme-toggle"
-            title="快捷键 (?)"
-            aria-label="快捷键"
-            onClick={() => setHelpOpen(true)}
-          >
-            <IconKeyboard size={16} />
-          </button>
-        )}
-
-        {doc && (
           <div className="history-controls">
             <button
               type="button"
@@ -1562,52 +1645,14 @@ export default function App() {
           </button>
         )}
 
-        {desktop && (
-          <button
-            type="button"
-            className={`theme-toggle update-toggle ${availableUpdate ? 'ready' : ''}`}
-            title={
-              availableUpdate
-                ? `更新到 ${availableUpdate.version}`
-                : checkingUpdate
-                  ? '正在检查更新'
-                  : '检查更新'
-            }
-            aria-label={availableUpdate ? `更新到 ${availableUpdate.version}` : '检查更新'}
-            disabled={checkingUpdate || installingUpdate}
-            onClick={() => void handleUpdate()}
-          >
-            {checkingUpdate || installingUpdate ? (
-              <span className="update-spin" aria-hidden="true" />
-            ) : (
-              <IconRefresh size={15} />
-            )}
-            {availableUpdate && !installingUpdate && (
-              <span className="update-dot" aria-hidden="true" />
-            )}
-          </button>
-        )}
-
-        {desktop && (
-          <button
-            type="button"
-            className={`theme-toggle ai-topbutton ${ai?.ready ? 'ready' : ''}`}
-            title={ai?.ready ? 'AI 阅读助手设置' : '配置 AI'}
-            aria-label="AI 阅读助手设置"
-            onClick={() => void openAiSettings()}
-          >
-            <IconSparkles size={15} />
-          </button>
-        )}
-
         <button
           type="button"
           className="theme-toggle"
-          title={theme === 'dark' ? '切换到浅色' : '切换到深色'}
-          aria-label={theme === 'dark' ? '切换到浅色' : '切换到深色'}
-          onClick={() => setTheme((current) => (current === 'dark' ? 'light' : 'dark'))}
+          title="设置"
+          aria-label="设置"
+          onClick={openSettings}
         >
-          {theme === 'dark' ? <IconSun size={16} /> : <IconMoon size={16} />}
+          <IconSettings size={16} />
         </button>
 
         {doc ? (
@@ -1893,9 +1938,9 @@ export default function App() {
         </main>
       ) : desktop ? (
         view === 'review' ? (
-          <Review onOpenDoc={openById} onMessage={setMessage} />
+          <Review key={libraryKey} onOpenDoc={openById} onMessage={setMessage} />
         ) : (
-          <Library onOpen={openById} onMessage={setMessage} />
+          <Library key={libraryKey} onOpen={openById} onMessage={setMessage} />
         )
       ) : (
         <main className="workspace welcome">
@@ -2027,70 +2072,34 @@ export default function App() {
                 ×
               </button>
             </header>
-            <dl>
-              <div>
-                <dt>
-                  <kbd>Ctrl</kbd> + <kbd>F</kbd>
-                </dt>
-                <dd>页内查找</dd>
-              </div>
-              <div>
-                <dt>
-                  <kbd>Ctrl</kbd> + <kbd>Z</kbd>
-                </dt>
-                <dd>撤销标注操作</dd>
-              </div>
-              <div>
-                <dt>
-                  <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Z</kbd>
-                </dt>
-                <dd>重做标注操作</dd>
-              </div>
-              <div>
-                <dt>
-                  <kbd>PageDown</kbd> / <kbd>Space</kbd>
-                </dt>
-                <dd>向下翻一屏</dd>
-              </div>
-              <div>
-                <dt>
-                  <kbd>PageUp</kbd> / <kbd>Shift</kbd> + <kbd>Space</kbd>
-                </dt>
-                <dd>向上翻一屏</dd>
-              </div>
-              <div>
-                <dt>
-                  <kbd>Home</kbd> / <kbd>End</kbd>
-                </dt>
-                <dd>第一页 / 最后一页</dd>
-              </div>
-              <div>
-                <dt>
-                  <kbd>Ctrl</kbd> + <kbd>+</kbd> / <kbd>−</kbd>
-                </dt>
-                <dd>放大 / 缩小</dd>
-              </div>
-              <div>
-                <dt>
-                  <kbd>Ctrl</kbd> + <kbd>0</kbd>
-                </dt>
-                <dd>适应宽度</dd>
-              </div>
-              <div>
-                <dt>
-                  <kbd>Esc</kbd>
-                </dt>
-                <dd>关闭浮层、清除选区</dd>
-              </div>
-              <div>
-                <dt>
-                  <kbd>?</kbd>
-                </dt>
-                <dd>打开这个列表</dd>
-              </div>
-            </dl>
+            <ShortcutList />
           </div>
         </div>
+      )}
+
+      {settingsOpen && (
+        <SettingsModal
+          desktop={desktop}
+          theme={theme}
+          onTheme={setTheme}
+          ai={ai}
+          onOpenAi={() => {
+            setSettingsOpen(false);
+            void openAiSettings();
+          }}
+          docOpen={!!doc}
+          libraryRoot={settingsRoot}
+          libraryBusy={libraryBusy}
+          onScanLibrary={() => void handleSettingsScan()}
+          onChangeLibrary={() => void handleSettingsChangeRoot()}
+          onExportMarkdown={() => void handleSettingsExport()}
+          version={appVersion}
+          update={availableUpdate}
+          checkingUpdate={checkingUpdate}
+          installingUpdate={installingUpdate}
+          onCheckUpdate={() => void handleUpdate()}
+          onClose={() => setSettingsOpen(false)}
+        />
       )}
 
       {aiSettingsOpen && ai && (

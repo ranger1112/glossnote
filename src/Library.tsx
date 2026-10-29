@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { pdfjsAssets, pdfjsLib } from './pdfjs';
 import {
   assetUrl,
-  exportMarkdown,
   importPdf,
   listDocuments,
   organizeDocument,
@@ -10,18 +9,10 @@ import {
   saveCover,
   scanLibrary,
   searchAnnotations,
-  setLibraryRoot,
   updateDocumentMeta,
 } from './desktop';
-import { pickDirectory, pickMarkdownPath, pickPdfPath } from './platform';
-import {
-  IconDownload,
-  IconFolder,
-  IconRefresh,
-  IconSearch,
-  IconStar,
-  IconUpload,
-} from './icons';
+import { pickPdfPath } from './platform';
+import { IconSearch, IconStar, IconUpload } from './icons';
 import type { DocumentMeta, ScanReport, SearchHit } from './types';
 import { errorText } from './errors';
 
@@ -73,8 +64,6 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
   const [docs, setDocs] = useState<DocumentMeta[]>([]);
   const [loading, setLoading] = useState(true);
   const [importing, setImporting] = useState(false);
-  const [scanning, setScanning] = useState(false);
-  const [switching, setSwitching] = useState(false);
   const [query, setQuery] = useState('');
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [searching, setSearching] = useState(false);
@@ -135,41 +124,17 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
     void ensureCovers(list);
   }, [ensureCovers]);
 
-  const refresh = useCallback(
-    async (announce = false) => {
-      if (announce) {
-        setScanning(true);
-        onMessage('正在重新扫描书库…');
-      }
-      try {
-        const report = await scanLibrary();
-        setSync(report);
-        await loadDocs();
-        setLoading(false);
-
-        if (announce) {
-          const merged = [
-            report.merged > 0 ? `${report.merged} 条标注` : '',
-            report.mergedCards > 0 ? `${report.mergedCards} 张卡片` : '',
-          ].filter(Boolean);
-          const parts = [
-            merged.length > 0 ? `合并 ${merged.join('、')}` : '',
-            report.archived > 0 ? `归档 ${report.archived} 个冲突副本` : '',
-            report.duplicatePdfs > 0 ? `${report.duplicatePdfs} 份重复 PDF 已忽略` : '',
-            report.missingDocuments > 0 ? `${report.missingDocuments} 份文档文件缺失` : '',
-            report.ignoredSidecars > 0 ? `${report.ignoredSidecars} 个无效 sidecar` : '',
-          ].filter(Boolean);
-          onMessage(parts.length > 0 ? `扫描完成：${parts.join('，')}` : '扫描完成，没有需要合并的变更');
-        }
-      } catch (error) {
-        setLoading(false);
-        onMessage(`读取书库失败：${errorText(error)}`);
-      } finally {
-        if (announce) setScanning(false);
-      }
-    },
-    [loadDocs, onMessage],
-  );
+  const refresh = useCallback(async () => {
+    try {
+      const report = await scanLibrary();
+      setSync(report);
+      await loadDocs();
+      setLoading(false);
+    } catch (error) {
+      setLoading(false);
+      onMessage(`读取书库失败：${errorText(error)}`);
+    }
+  }, [loadDocs, onMessage]);
 
   useEffect(() => {
     void refresh();
@@ -241,42 +206,6 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [handleImport, importing]);
-
-  const handleExport = useCallback(async () => {
-    try {
-      const path = await pickMarkdownPath();
-      if (!path) return;
-      await exportMarkdown(path);
-      onMessage(`已导出 Markdown：${path}`);
-    } catch (error) {
-      onMessage(`导出失败：${errorText(error)}`);
-    }
-  }, [onMessage]);
-
-  const handleChangeRoot = useCallback(async () => {
-    try {
-      const path = await pickDirectory('选择书库目录');
-      if (!path) return;
-      if (sync?.root === path) {
-        onMessage('这个目录已经是当前书库');
-        return;
-      }
-
-      setSwitching(true);
-      onMessage('正在切换书库并重建索引…');
-      const report = await setLibraryRoot(path);
-      setSync(report);
-      setQuery('');
-      setHits([]);
-      await loadDocs();
-      setLoading(false);
-      onMessage(`书库已切换到 ${report.root}`);
-    } catch (error) {
-      onMessage(`切换书库失败：${errorText(error)}`);
-    } finally {
-      setSwitching(false);
-    }
-  }, [loadDocs, onMessage, sync?.root]);
 
   const tagOptions = useMemo(
     () =>
@@ -425,33 +354,6 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
               onChange={(event) => setQuery(event.target.value)}
             />
           </div>
-          <button
-            type="button"
-            className="ghost"
-            disabled={scanning || switching}
-            onClick={() => void refresh(true)}
-          >
-            <IconRefresh size={14} />
-            {scanning ? '扫描中…' : '重新扫描'}
-          </button>
-          <button
-            type="button"
-            className="ghost"
-            disabled={switching}
-            onClick={() => void handleChangeRoot()}
-          >
-            <IconFolder size={14} />
-            {switching ? '切换中…' : '书库位置'}
-          </button>
-          <button
-            type="button"
-            className="ghost"
-            disabled={docs.length === 0}
-            onClick={() => void handleExport()}
-          >
-            <IconDownload size={14} />
-            导出 Markdown
-          </button>
           <button
             type="button"
             className="primary"
