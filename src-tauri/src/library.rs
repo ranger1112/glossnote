@@ -3,7 +3,7 @@ use crate::{
     fsrs::{self, MemoryState},
     models::{
         Annotation, Card, CardView, Document, DocumentMetaPatch, DocumentRow, ImportResult,
-        ScanReport, SearchHit, Sidecar,
+        PageTextInput, ScanReport, SearchHit, Sidecar,
     },
     settings,
     state::AppState,
@@ -853,6 +853,33 @@ pub fn save_progress(app: &AppHandle, doc_id: &str, last_page: u32) -> Result<()
         return Err("文档不存在".to_string());
     }
     db::save_progress(&conn, doc_id, last_page)
+}
+
+/// 读取页内查找的文字缓存；没有缓存时返回空数组。
+pub fn load_page_texts(app: &AppHandle, doc_id: &str) -> Result<Vec<PageTextInput>, String> {
+    let state = app.state::<AppState>();
+    let conn = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    db::load_page_texts(&conn, doc_id)
+}
+
+/// 把本次搜索新提取的页面文字写回缓存，下次搜索无需再跑 pdf.js。
+pub fn save_page_texts(
+    app: &AppHandle,
+    doc_id: &str,
+    pages: Vec<PageTextInput>,
+) -> Result<usize, String> {
+    let state = app.state::<AppState>();
+    let conn = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if db::find_by_id(&conn, doc_id)?.is_none() {
+        return Err("文档不存在".to_string());
+    }
+    db::save_page_texts(&conn, doc_id, &pages)
 }
 
 pub fn search(app: &AppHandle, query: String) -> Result<Vec<SearchHit>, String> {

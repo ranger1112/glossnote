@@ -219,7 +219,7 @@ pub struct SearchHit {
     pub tags: Vec<String>,
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct PageTextInput {
     pub page: u32,

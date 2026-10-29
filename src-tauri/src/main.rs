@@ -220,6 +220,20 @@ fn update_document_meta(
 }
 
 #[tauri::command(async)]
+fn load_page_texts(app: AppHandle, doc_id: String) -> Result<Vec<PageTextInput>, String> {
+    library::load_page_texts(&app, &doc_id)
+}
+
+#[tauri::command(async)]
+fn save_page_texts(
+    app: AppHandle,
+    doc_id: String,
+    pages: Vec<PageTextInput>,
+) -> Result<usize, String> {
+    library::save_page_texts(&app, &doc_id, pages)
+}
+
+#[tauri::command(async)]
 fn organize_document(
     app: AppHandle,
     doc_id: String,
@@ -337,6 +351,8 @@ fn main() {
             ai_answer,
             ai_summarize,
             update_document_meta,
+            load_page_texts,
+            save_page_texts,
             organize_document,
             organize_documents,
         ])

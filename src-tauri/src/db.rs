@@ -1,4 +1,6 @@
-use crate::models::{Annotation, Card, CardRef, CardView, Chunk, DocumentRow, SearchHit};
+use crate::models::{
+    Annotation, Card, CardRef, CardView, Chunk, DocumentRow, PageTextInput, SearchHit,
+};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::path::{Path, PathBuf};
 
@@ -147,6 +149,14 @@ fn migrate(conn: &Connection) -> Result<(), String> {
           text TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id, page);
+
+        -- 页内查找的逐页原文缓存：按 PDF 内容哈希存，重复搜索不必再跑 pdf.js。
+        CREATE TABLE IF NOT EXISTS page_texts (
+          doc_id TEXT NOT NULL,
+          page INTEGER NOT NULL,
+          text TEXT NOT NULL,
+          PRIMARY KEY (doc_id, page)
+        );
         "#,
     )
     .map_err(|error| format!("初始化数据库失败：{error}"))?;
@@ -597,11 +607,56 @@ pub fn list_chunks(conn: &Connection, doc_id: &str) -> Result<Vec<Chunk>, String
         .map_err(|error| format!("读取全文失败：{error}"))
 }
 
+/// 页内查找的文字缓存；与 chunks 分开，保留完整分页原文与精确偏移。
+pub fn load_page_texts(conn: &Connection, doc_id: &str) -> Result<Vec<PageTextInput>, String> {
+    let mut statement = conn
+        .prepare("SELECT page, text FROM page_texts WHERE doc_id = ?1 ORDER BY page ASC")
+        .map_err(|error| format!("准备页面文字查询失败：{error}"))?;
+    let rows = statement
+        .query_map(params![doc_id], |row| {
+            Ok(PageTextInput {
+                page: row.get::<_, i64>(0)? as u32,
+                text: row.get(1)?,
+            })
+        })
+        .map_err(|error| format!("查询页面文字失败：{error}"))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error| format!("读取页面文字失败：{error}"))
+}
+
+pub fn save_page_texts(
+    conn: &Connection,
+    doc_id: &str,
+    pages: &[PageTextInput],
+) -> Result<usize, String> {
+    let transaction = conn
+        .unchecked_transaction()
+        .map_err(|error| format!("开始页面文字事务失败：{error}"))?;
+    {
+        let mut statement = transaction
+            .prepare(
+                "INSERT INTO page_texts (doc_id, page, text) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(doc_id, page) DO UPDATE SET text = excluded.text",
+            )
+            .map_err(|error| format!("准备页面文字写入失败：{error}"))?;
+        for page in pages {
+            statement
+                .execute(params![doc_id, page.page as i64, &page.text])
+                .map_err(|error| format!("写入页面文字失败：{error}"))?;
+        }
+    }
+    transaction
+        .commit()
+        .map_err(|error| format!("提交页面文字失败：{error}"))?;
+    Ok(pages.len())
+}
+
 /// 切换书库时清空索引；书库目录里的 PDF 与 sidecar 不受影响。
 pub fn clear_library(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
         "DELETE FROM cards;
          DELETE FROM chunks;
+         DELETE FROM page_texts;
          DELETE FROM annotations;
          DELETE FROM documents;",
     )
@@ -834,6 +889,8 @@ pub fn remove_document(conn: &Connection, id: &str, now: i64) -> Result<(), Stri
     .map_err(|error| format!("标记失效卡片失败：{error}"))?;
     conn.execute("DELETE FROM chunks WHERE doc_id = ?1", params![id])
         .map_err(|error| format!("清理全文索引失败：{error}"))?;
+    conn.execute("DELETE FROM page_texts WHERE doc_id = ?1", params![id])
+        .map_err(|error| format!("清理页面文字缓存失败：{error}"))?;
     conn.execute("DELETE FROM annotations WHERE doc_id = ?1", params![id])
         .map_err(|error| format!("清理标注失败：{error}"))?;
     conn.execute("DELETE FROM documents WHERE id = ?1", params![id])
@@ -910,6 +967,49 @@ mod tests {
 
         drop(conn);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn page_text_cache_round_trips_and_clears_with_document() {
+        let conn = seeded();
+        save_page_texts(
+            &conn,
+            "d1",
+            &[
+                PageTextInput {
+                    page: 0,
+                    text: "第一页".to_string(),
+                },
+                PageTextInput {
+                    page: 1,
+                    text: String::new(),
+                },
+            ],
+        )
+        .unwrap();
+
+        let pages = load_page_texts(&conn, "d1").unwrap();
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0].text, "第一页");
+        assert_eq!(pages[1].page, 1);
+        assert!(pages[1].text.is_empty());
+
+        // 同一页再次提取时覆盖旧值，空页也要留着，避免下次重复提取。
+        save_page_texts(
+            &conn,
+            "d1",
+            &[PageTextInput {
+                page: 0,
+                text: "改过".to_string(),
+            }],
+        )
+        .unwrap();
+        let pages = load_page_texts(&conn, "d1").unwrap();
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0].text, "改过");
+
+        remove_document(&conn, "d1", 2).unwrap();
+        assert!(load_page_texts(&conn, "d1").unwrap().is_empty());
     }
 
     #[test]

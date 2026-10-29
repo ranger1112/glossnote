@@ -27,6 +27,7 @@ import type {
   DocRecord,
   DocumentMeta,
   HighlightColor,
+  PageTextInput,
 } from './types';
 import { loadDoc, saveDoc, sha256Hex } from './storage';
 import { joinPdfItems } from './pdfText';
@@ -41,7 +42,9 @@ import {
   deleteAnnotation,
   exportAnnotatedPdf,
   listCards,
+  loadPageTexts,
   openDocument,
+  savePageTexts,
   saveProgress,
   startupNotice,
   updateCard,
@@ -269,6 +272,7 @@ export default function App() {
   const findInputRef = useRef<HTMLInputElement>(null);
   const findTokenRef = useRef(0);
   const pageTextsRef = useRef<Map<number, string>>(new Map());
+  const textCacheLoadedRef = useRef(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const recordRef = useRef<DocRecord | null>(null);
   const docRef = useRef<OpenedDoc | null>(null);
@@ -281,6 +285,9 @@ export default function App() {
   const viewerRef = useRef<HTMLElement | null>(null);
   const currentPageRef = useRef(0);
   const scaleRef = useRef(scale);
+  /** 缩放目标：连按时按目标累加，渲染等 140ms 空闲后只做一次。 */
+  const zoomTargetRef = useRef(scale);
+  const zoomTimerRef = useRef<number | null>(null);
   const pendingAnchor = useRef<{
     index: number;
     offset?: number;
@@ -297,6 +304,11 @@ export default function App() {
 
   useEffect(() => applyTheme(theme), [theme]);
 
+  // 自适应缩放或文档切换会直接改 scale；此时目标值跟着同步。
+  useEffect(() => {
+    zoomTargetRef.current = scale;
+  }, [scale]);
+
   // 自适应缩放：首屏按页面尺寸算出比例，窗口变化时重算。
   useLayoutEffect(() => {
     const viewer = viewerRef.current;
@@ -306,6 +318,12 @@ export default function App() {
 
     const update = () => {
       const next = fitScale(viewer, baseSize, zoomMode);
+      // 切回适宽/整页时取消待执行的缩放，避免防抖计时器随后覆盖。
+      if (zoomTimerRef.current !== null) {
+        window.clearTimeout(zoomTimerRef.current);
+        zoomTimerRef.current = null;
+      }
+      zoomTargetRef.current = next;
       // ResizeObserver 会在缩放生效后再通知一次；比例没变就不要重新锚定。
       if (Math.abs(scaleRef.current - next) < 0.002) return;
 
@@ -734,6 +752,10 @@ export default function App() {
       cancelAnimationFrame(scrollFrame.current);
       scrollFrame.current = null;
     }
+    if (zoomTimerRef.current !== null) {
+      window.clearTimeout(zoomTimerRef.current);
+      zoomTimerRef.current = null;
+    }
     pendingAnchor.current = null;
     pinnedPage.current = null;
     docRef.current?.dispose();
@@ -878,6 +900,10 @@ export default function App() {
     if (scrollFrame.current !== null) {
       cancelAnimationFrame(scrollFrame.current);
       scrollFrame.current = null;
+    }
+    if (zoomTimerRef.current !== null) {
+      window.clearTimeout(zoomTimerRef.current);
+      zoomTimerRef.current = null;
     }
 
     const finish = () => {
@@ -1038,20 +1064,29 @@ export default function App() {
   );
 
   const zoomTo = useCallback((next: number) => {
+    const clamped = Math.min(MAX_SCALE, Math.max(MIN_SCALE, next));
+    zoomTargetRef.current = clamped;
+
     const viewer = viewerRef.current;
     const visible = viewer ? visiblePage(viewer) : null;
-    if (viewer && visible && Math.abs(next - scaleRef.current) >= 0.002) {
+    if (viewer && visible && Math.abs(clamped - scaleRef.current) >= 0.002) {
       const rect = visible.element.getBoundingClientRect();
       if (rect.height > 0) {
         pendingAnchor.current = {
           index: visible.index,
           offset: (viewer.getBoundingClientRect().top - rect.top) / rect.height,
-          scale: next,
+          scale: clamped,
         };
       }
     }
     setZoomMode('custom');
-    setScale(next);
+
+    // 连按缩放只渲染最终比例：每一步都重绘三张大页会明显卡顿。
+    if (zoomTimerRef.current !== null) window.clearTimeout(zoomTimerRef.current);
+    zoomTimerRef.current = window.setTimeout(() => {
+      zoomTimerRef.current = null;
+      setScale(zoomTargetRef.current);
+    }, 140);
   }, []);
 
   /** 键盘翻页按视口高度滚动，略小于一屏，保留上一页的上下文。 */
@@ -1116,7 +1151,25 @@ export default function App() {
     setFindTruncated(false);
     setFilterColor(null);
     setFilterKind(null);
+    textCacheLoadedRef.current = false;
   }, [doc?.id]);
+
+  // 页内查找的文字缓存按文档懒加载：打开查找栏时才读，不拖慢打开文档。
+  useEffect(() => {
+    if (!findOpen || !doc || !desktop || textCacheLoadedRef.current) return;
+    textCacheLoadedRef.current = true;
+    const docId = doc.id;
+    void loadPageTexts(docId)
+      .then((pages) => {
+        if (docRef.current?.id !== docId) return;
+        for (const page of pages) {
+          if (!pageTextsRef.current.has(page.page)) {
+            pageTextsRef.current.set(page.page, page.text);
+          }
+        }
+      })
+      .catch(() => undefined);
+  }, [desktop, doc, findOpen]);
 
   useEffect(() => {
     if (!findOpen || !doc) return;
@@ -1139,10 +1192,22 @@ export default function App() {
       void (async () => {
         const needle = query.toLowerCase();
         const matches: FindMatch[] = [];
+        const docId = doc.id;
+        const fresh: PageTextInput[] = [];
         let truncated = false;
 
+        // 本轮新提取的文字写回 SQLite；重复搜索直接走缓存。
+        const flush = () => {
+          if (fresh.length === 0 || !isTauri()) return;
+          const pages = fresh.splice(0);
+          void savePageTexts(docId, pages).catch(() => undefined);
+        };
+
         for (let pageIndex = 0; pageIndex < doc.pageCount; pageIndex += 1) {
-          if (findTokenRef.current !== token) return;
+          if (findTokenRef.current !== token) {
+            flush();
+            return;
+          }
 
           let text = pageTextsRef.current.get(pageIndex);
           if (text === undefined) {
@@ -1154,6 +1219,7 @@ export default function App() {
               );
               text = joinPdfItems(items).text;
               pageTextsRef.current.set(pageIndex, text);
+              fresh.push({ page: pageIndex, text });
             } catch (error) {
               console.warn('提取页面文字失败', pageIndex + 1, error);
               text = '';
@@ -1185,6 +1251,7 @@ export default function App() {
           }
         }
 
+        flush();
         if (findTokenRef.current !== token) return;
         setFindBusy(false);
         setFindTruncated(truncated);
@@ -1311,10 +1378,10 @@ export default function App() {
         if (!doc) return;
         if (event.key === '=' || event.key === '+') {
           event.preventDefault();
-          zoomTo(Math.min(MAX_SCALE, +(scaleRef.current + 0.25).toFixed(2)));
+          zoomTo(Math.min(MAX_SCALE, +(zoomTargetRef.current + 0.25).toFixed(2)));
         } else if (event.key === '-') {
           event.preventDefault();
-          zoomTo(Math.max(MIN_SCALE, +(scaleRef.current - 0.25).toFixed(2)));
+          zoomTo(Math.max(MIN_SCALE, +(zoomTargetRef.current - 0.25).toFixed(2)));
         } else if (event.key === '0') {
           event.preventDefault();
           setZoomMode('fit-width');
@@ -1396,7 +1463,7 @@ export default function App() {
             <button
               type="button"
               title="缩小"
-              onClick={() => zoomTo(Math.max(MIN_SCALE, +(scaleRef.current - 0.25).toFixed(2)))}
+              onClick={() => zoomTo(Math.max(MIN_SCALE, +(zoomTargetRef.current - 0.25).toFixed(2)))}
             >
               −
             </button>
@@ -1414,7 +1481,7 @@ export default function App() {
             <button
               type="button"
               title="放大"
-              onClick={() => zoomTo(Math.min(MAX_SCALE, +(scaleRef.current + 0.25).toFixed(2)))}
+              onClick={() => zoomTo(Math.min(MAX_SCALE, +(zoomTargetRef.current + 0.25).toFixed(2)))}
             >
               +
             </button>
@@ -1666,6 +1733,7 @@ export default function App() {
                   scale={scale}
                   baseSize={baseSize}
                   active={Math.abs(index - currentPage) <= activeRadius}
+                  priority={index === currentPage ? 0 : 1}
                   annotations={byPage.get(index) ?? EMPTY}
                   focusId={focusId}
                   onSelect={handleSelect}

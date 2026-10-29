@@ -154,6 +154,16 @@ export function documentIndexStatus(docId: string): Promise<boolean> {
   return invoke('document_index_status', { docId });
 }
 
+/** 读取页内查找的逐页文字缓存；没有缓存时返回空数组。 */
+export function loadPageTexts(docId: string): Promise<PageTextInput[]> {
+  return invoke('load_page_texts', { docId });
+}
+
+/** 把本次搜索新提取的页面文字写回缓存。 */
+export function savePageTexts(docId: string, pages: PageTextInput[]): Promise<number> {
+  return invoke('save_page_texts', { docId, pages });
+}
+
 export function aiExplain(
   docId: string,
   page: number,
