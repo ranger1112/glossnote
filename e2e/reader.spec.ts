@@ -166,6 +166,87 @@ test('已标注文字悬停快捷工具，取消选择后浮动工具收起', as
   await expect(page.locator('.selection-toolbar')).toHaveCount(0);
 });
 
+test('触摸屏长按标注弹出快捷工具', async ({ page }) => {
+  await page.goto('/?sample');
+  await expect(
+    page.locator('.pdf-page').first().locator('.text-layer span').first(),
+  ).toBeVisible({ timeout: 30_000 });
+
+  await selectSpans(page, 1, 4);
+  await page.locator('.selection-toolbar .swatch.yellow').click();
+  const highlight = page.locator('.highlight').first();
+  await expect(highlight).toBeVisible();
+  const box = await highlight.boundingBox();
+  if (!box) throw new Error('高亮没有布局');
+
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+  const touchStart = (x: number, y: number) =>
+    cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchStart',
+      touchPoints: [{ x, y, id: 1, radiusX: 8, radiusY: 8, force: 1 }],
+    });
+  const touchEnd = () =>
+    cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+
+  await touchStart(box.x + box.width / 2, box.y + box.height / 2);
+  await page.waitForTimeout(650);
+  const hover = page.locator('.annotation-toolbar');
+  await expect(hover).toBeVisible();
+  // 长按不应同时弹出选区工具。
+  await expect(page.locator('.selection-toolbar:not(.annotation-toolbar)')).toHaveCount(0);
+  await touchEnd();
+  await expect(hover).toBeVisible();
+
+  // 点页面空白处收起。
+  await touchStart(5, 300);
+  await touchEnd();
+  await expect(hover).toHaveCount(0);
+
+  await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: false, maxTouchPoints: 1 });
+});
+
+test('标注很多时侧栏分批渲染，可继续加载', async ({ page }) => {
+  await page.goto('/?sample');
+  await expect(
+    page.locator('.pdf-page').first().locator('.text-layer span').first(),
+  ).toBeVisible({ timeout: 30_000 });
+
+  await selectSpans(page, 1, 4);
+  await page.locator('.selection-toolbar .swatch.yellow').click();
+  await expect(page.locator('.annotation-card')).toHaveCount(1);
+
+  // 用同一份锚点造 150 条标注，模拟批量导入后的侧栏规模。
+  const total = await page.evaluate(() => {
+    const key = Object.keys(localStorage).find((item) => item.startsWith('glossnote:doc:'));
+    const raw = key ? localStorage.getItem(key) : null;
+    if (!key || !raw) throw new Error('没有浏览器标注记录');
+    const record = JSON.parse(raw);
+    const base = record.annotations[0];
+    const now = Date.now();
+    record.annotations = Array.from({ length: 150 }, (_, index) => ({
+      ...base,
+      id: `bulk-${index}`,
+      createdAt: now + index,
+      updatedAt: now + index,
+    }));
+    localStorage.setItem(key, JSON.stringify(record));
+    return record.annotations.length;
+  });
+  expect(total).toBe(150);
+
+  await page.reload();
+  await expect(
+    page.locator('.pdf-page').first().locator('.text-layer span').first(),
+  ).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator('.annotation-card')).toHaveCount(100);
+  const more = page.locator('.annotation-more');
+  await expect(more).toBeVisible();
+  await more.click();
+  await expect(page.locator('.annotation-card')).toHaveCount(150);
+  await expect(more).toHaveCount(0);
+});
+
 test('侧栏按页分组，并按颜色和类型筛选', async ({ page }) => {
   await page.goto('/?sample');
   await expect(

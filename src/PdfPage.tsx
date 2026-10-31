@@ -258,6 +258,10 @@ export const PdfPage = memo(function PdfPage({
   const hitRectsRef = useRef<{ id: string; rect: NormRect }[]>([]);
   const contextsRef = useRef(new Map<string, string>());
   const hoverIdRef = useRef<string | null>(null);
+  // 触摸屏没有 hover：长按标注 480ms 弹出同一组快捷工具。
+  const longPressTimerRef = useRef<number | null>(null);
+  const longPressPointRef = useRef<{ x: number; y: number } | null>(null);
+  const longPressFiredAtRef = useRef(0);
 
   const [size, setSize] = useState(baseSize);
   const [ready, setReady] = useState(false);
@@ -474,11 +478,12 @@ export const PdfPage = memo(function PdfPage({
     };
   }, [active, pdf, pageIndex, scale, paintHighlights, onHover]);
 
-  // 组件卸载（关闭文档、切换文档）时同样释放页对象。
+  // 组件卸载（关闭文档、切换文档）时同样释放页对象与长按计时器。
   useEffect(
     () => () => {
       pageProxyRef.current?.cleanup();
       pageProxyRef.current = null;
+      if (longPressTimerRef.current !== null) window.clearTimeout(longPressTimerRef.current);
     },
     [],
   );
@@ -488,8 +493,12 @@ export const PdfPage = memo(function PdfPage({
   }, [ready, annotations, focusId, searchMatch, paintHighlights]);
 
   const handleMouseUp = useCallback(() => {
+    // 长按快捷工具已经接管这次触摸，别再弹选区工具。
+    if (Date.now() - longPressFiredAtRef.current < 1200) return;
+
     // 等浏览器完成本次选区的收尾，再读取 range。
     window.setTimeout(() => {
+      if (Date.now() - longPressFiredAtRef.current < 1200) return;
       const selection = window.getSelection();
       const pageElement = pageRef.current;
       const model = modelRef.current;
@@ -547,24 +556,44 @@ export const PdfPage = memo(function PdfPage({
     }, 0);
   }, [pageIndex, onSelect]);
 
+  /** 把屏幕坐标换成页面内最近的标注；鼠标与长按共用。 */
+  const hitAt = useCallback((clientX: number, clientY: number) => {
+    const pageElement = pageRef.current;
+    if (!pageElement) return null;
+
+    const pageRect = pageElement.getBoundingClientRect();
+    if (pageRect.width === 0 || pageRect.height === 0) return null;
+
+    const x = (clientX - pageRect.left) / pageRect.width;
+    const y = (clientY - pageRect.top) / pageRect.height;
+    const hit = hitRectsRef.current.find(
+      ({ rect }) => x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h,
+    );
+    if (!hit) return null;
+
+    const annotation = annotationsRef.current.find((item) => item.id === hit.id);
+    if (!annotation) return null;
+
+    const top = pageRect.top + hit.rect.y * pageRect.height;
+    return {
+      annotation,
+      box: {
+        x: pageRect.left + (hit.rect.x + hit.rect.w / 2) * pageRect.width,
+        y: top,
+        below: top < 96,
+      },
+      context: contextsRef.current.get(annotation.id) ?? '',
+    };
+  }, []);
+
   /** 鼠标悬停在标注上时上报位置；只在命中的标注变化时通知，避免每帧触发 React。 */
   const handleMouseMove = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
       if (event.buttons !== 0) return;
-      const pageElement = pageRef.current;
-      if (!pageElement) return;
 
-      const pageRect = pageElement.getBoundingClientRect();
-      if (pageRect.width === 0 || pageRect.height === 0) return;
-
-      const x = (event.clientX - pageRect.left) / pageRect.width;
-      const y = (event.clientY - pageRect.top) / pageRect.height;
-      const hit = hitRectsRef.current.find(
-        ({ rect }) => x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h,
-      );
-
+      const hit = hitAt(event.clientX, event.clientY);
       if (hit) onHoverKeepAlive();
-      const id = hit?.id ?? null;
+      const id = hit?.annotation.id ?? null;
       if (id === hoverIdRef.current && id === hoverId) return;
       hoverIdRef.current = id;
 
@@ -572,25 +601,9 @@ export const PdfPage = memo(function PdfPage({
         onHover(null);
         return;
       }
-      const annotation = annotationsRef.current.find((item) => item.id === hit.id);
-      if (!annotation) {
-        hoverIdRef.current = null;
-        onHover(null);
-        return;
-      }
-
-      const top = pageRect.top + hit.rect.y * pageRect.height;
-      onHover(
-        annotation,
-        {
-          x: pageRect.left + (hit.rect.x + hit.rect.w / 2) * pageRect.width,
-          y: top,
-          below: top < 96,
-        },
-        contextsRef.current.get(annotation.id) ?? '',
-      );
+      onHover(hit.annotation, hit.box, hit.context);
     },
-    [hoverId, onHover, onHoverKeepAlive],
+    [hitAt, hoverId, onHover, onHoverKeepAlive],
   );
 
   const handleMouseLeave = useCallback(() => {
@@ -598,6 +611,64 @@ export const PdfPage = memo(function PdfPage({
     hoverIdRef.current = null;
     onHover(null);
   }, [onHover]);
+
+  const clearLongPress = useCallback(() => {
+    if (longPressTimerRef.current !== null) {
+      window.clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+    longPressPointRef.current = null;
+  }, []);
+
+  const handleTouchStart = useCallback(
+    (event: React.TouchEvent<HTMLDivElement>) => {
+      clearLongPress();
+      if (event.touches.length !== 1) return;
+
+      const touch = event.touches[0];
+      longPressPointRef.current = { x: touch.clientX, y: touch.clientY };
+      longPressTimerRef.current = window.setTimeout(() => {
+        const point = longPressPointRef.current;
+        if (!point) return;
+
+        const hit = hitAt(point.x, point.y);
+        if (!hit) return;
+
+        longPressFiredAtRef.current = Date.now();
+        hoverIdRef.current = hit.annotation.id;
+        // 长按选中了文字时会和快捷工具打架；清掉选区，只留工具条。
+        window.getSelection()?.removeAllRanges();
+        onHover(hit.annotation, hit.box, hit.context);
+      }, 480);
+    },
+    [clearLongPress, hitAt, onHover],
+  );
+
+  const handleTouchMove = useCallback(
+    (event: React.TouchEvent<HTMLDivElement>) => {
+      const point = longPressPointRef.current;
+      if (!point || longPressTimerRef.current === null) return;
+      if (event.touches.length !== 1) {
+        clearLongPress();
+        return;
+      }
+
+      const touch = event.touches[0];
+      if (Math.hypot(touch.clientX - point.x, touch.clientY - point.y) > 8) {
+        clearLongPress();
+      }
+    },
+    [clearLongPress],
+  );
+
+  const handleTouchEnd = useCallback(() => {
+    clearLongPress();
+  }, [clearLongPress]);
+
+  const handleContextMenu = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    // 长按已弹出快捷工具时，压掉浏览器的右键/长按菜单。
+    if (Date.now() - longPressFiredAtRef.current < 1200) event.preventDefault();
+  }, []);
 
   return (
     <div
@@ -608,6 +679,11 @@ export const PdfPage = memo(function PdfPage({
       onMouseUp={handleMouseUp}
       onMouseMove={handleMouseMove}
       onMouseLeave={handleMouseLeave}
+      onTouchStart={handleTouchStart}
+      onTouchMove={handleTouchMove}
+      onTouchEnd={handleTouchEnd}
+      onTouchCancel={handleTouchEnd}
+      onContextMenu={handleContextMenu}
     >
       <canvas ref={canvasRef} className="pdf-canvas" />
       <div ref={highlightRef} className="highlight-layer" />

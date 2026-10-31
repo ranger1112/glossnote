@@ -34,7 +34,10 @@ import {
   annotationKey,
   buildImportedAnnotations,
   draftsToAnnotations,
+  PDF_IMPORT_TAG,
   scanNativeAnnotations,
+  scanNativePage,
+  type NativePage,
   type NativeScan,
 } from './pdfAnnotations';
 import type { PdfTextItem } from './pdfjs';
@@ -96,6 +99,19 @@ interface PdfImportSummary {
   annotatedPages: number;
   byKind: NativeScan['byKind'];
   pages: { page: number; count: number }[];
+}
+
+/** 侧栏一次渲染的卡片数；滚动到底部再追加，避免上千条标注一次挂载。 */
+const SIDEBAR_PAGE = 100;
+
+function groupAnnotations(list: Annotation[]): [number, Annotation[]][] {
+  const map = new Map<number, Annotation[]>();
+  for (const annotation of list) {
+    const items = map.get(annotation.page) ?? [];
+    items.push(annotation);
+    map.set(annotation.page, items);
+  }
+  return [...map.entries()].sort(([left], [right]) => left - right);
 }
 
 interface FindMatch {
@@ -272,6 +288,10 @@ export default function App() {
   const [pdfImportBusy, setPdfImportBusy] = useState(false);
   const [pdfImportProgress, setPdfImportProgress] = useState('');
   const pdfScanRef = useRef<NativeScan | null>(null);
+  const [rowLimit, setRowLimit] = useState(SIDEBAR_PAGE);
+  const pendingRevealRef = useRef<string | null>(null);
+  const [pageNativeCount, setPageNativeCount] = useState(0);
+  const [pageHintDismissed, setPageHintDismissed] = useState<Set<number>>(new Set());
   const [focusId, setFocusId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [message, setMessage] = useState('');
@@ -302,6 +322,7 @@ export default function App() {
   const [searchTarget, setSearchTarget] = useState<SearchTarget | null>(null);
   const [filterColor, setFilterColor] = useState<HighlightColor | null>(null);
   const [filterKind, setFilterKind] = useState<AnnotationKind | null>(null);
+  const [filterSource, setFilterSource] = useState<'all' | 'manual' | 'imported'>('all');
   const [helpOpen, setHelpOpen] = useState(false);
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle');
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -665,30 +686,110 @@ export default function App() {
     return KIND_ORDER.filter((kind) => present.has(kind));
   }, [visible]);
 
+  const hasImported = useMemo(
+    () => visible.some((annotation) => annotation.tags.includes(PDF_IMPORT_TAG)),
+    [visible],
+  );
+
   const filtered = useMemo(
     () =>
       visible.filter(
         (annotation) =>
           (!filterColor || annotation.color === filterColor) &&
-          (!filterKind || annotation.kind === filterKind),
+          (!filterKind || annotation.kind === filterKind) &&
+          (filterSource === 'all' ||
+            (filterSource === 'imported') === annotation.tags.includes(PDF_IMPORT_TAG)),
       ),
-    [visible, filterColor, filterKind],
+    [visible, filterColor, filterKind, filterSource],
+  );
+
+  const currentPageHasImported = useMemo(
+    () =>
+      visible.some(
+        (annotation) =>
+          annotation.page === currentPage && annotation.tags.includes(PDF_IMPORT_TAG),
+      ),
+    [visible, currentPage],
   );
 
   /** 侧栏按页分组，组头可直接跳到对应页。 */
-  const groups = useMemo(() => {
-    const map = new Map<number, Annotation[]>();
-    for (const annotation of filtered) {
-      const list = map.get(annotation.page) ?? [];
-      list.push(annotation);
-      map.set(annotation.page, list);
+  const allGroups = useMemo(() => groupAnnotations(visible), [visible]);
+  const groups = useMemo(() => groupAnnotations(filtered), [filtered]);
+  const allGroupsRef = useRef(allGroups);
+  allGroupsRef.current = allGroups;
+
+  /** 严格按卡片上限渲染；同一页标注很多时先显示前一部分，组头仍显示总数。 */
+  const visibleGroups = useMemo(() => {
+    const result: { page: number; total: number; items: Annotation[] }[] = [];
+    let remaining = rowLimit;
+    for (const [page, items] of groups) {
+      if (remaining <= 0) break;
+      const take = Math.min(items.length, remaining);
+      result.push({ page, total: items.length, items: items.slice(0, take) });
+      remaining -= take;
     }
-    return [...map.entries()].sort(([left], [right]) => left - right);
-  }, [filtered]);
+    return result;
+  }, [groups, rowLimit]);
+
+  const renderedCards = useMemo(
+    () => visibleGroups.reduce((total, group) => total + group.items.length, 0),
+    [visibleGroups],
+  );
+  const hasMoreGroups = renderedCards < filtered.length;
+
+  const loadMoreAnnotations = useCallback(() => {
+    setRowLimit((current) => (current >= filtered.length ? current : current + SIDEBAR_PAGE));
+  }, [filtered.length]);
+
+  /** 从悬停工具或新批注跳到侧栏卡片时，确保它已经渲染；被筛选隐藏时先清筛选。 */
+  const revealAnnotation = useCallback(
+    (id: string) => {
+      const inFiltered = groups.some(([, items]) => items.some((item) => item.id === id));
+      if (!inFiltered) {
+        const inAll = allGroups.some(([, items]) => items.some((item) => item.id === id));
+        if (!inAll) return;
+        if (filterColor || filterKind || filterSource !== 'all') {
+          pendingRevealRef.current = id;
+          setFilterColor(null);
+          setFilterKind(null);
+          setFilterSource('all');
+          return;
+        }
+      }
+
+      let cards = 0;
+      for (const [, items] of inFiltered ? groups : allGroups) {
+        cards += items.length;
+        if (items.some((item) => item.id === id)) {
+          setRowLimit((current) => Math.max(current, cards));
+          return;
+        }
+      }
+    },
+    [allGroups, filterColor, filterKind, filterSource, groups],
+  );
+
+  // 编辑某条批注时，用最新分组把卡片渲染出来；只在 editingId 变化时触发，
+  // 避免用户随后改筛选又被强行清掉。
+  const revealRef = useRef(revealAnnotation);
+  revealRef.current = revealAnnotation;
+  useEffect(() => {
+    if (editingId) revealRef.current(editingId);
+  }, [editingId]);
+
+  const handleAnnotationScroll = useCallback(
+    (event: React.UIEvent<HTMLDivElement>) => {
+      const element = event.currentTarget;
+      if (element.scrollTop + element.clientHeight < element.scrollHeight - 600) return;
+      loadMoreAnnotations();
+    },
+    [loadMoreAnnotations],
+  );
 
   const clearFilters = useCallback(() => {
     setFilterColor(null);
     setFilterKind(null);
+    setFilterSource('all');
   }, []);
 
   // 放大后一页可达数千像素；减少同时渲染的页数，避免画布内存再次爆掉。
@@ -1302,8 +1403,44 @@ export default function App() {
     setFindTruncated(false);
     setFilterColor(null);
     setFilterKind(null);
+    setFilterSource('all');
+    setPageHintDismissed(new Set());
     textCacheLoadedRef.current = false;
   }, [doc?.id]);
+
+  // 换书或改筛选后从第一批重新渲染；若刚才是为了显示某张卡片清掉筛选，再补足到它。
+  useEffect(() => {
+    setRowLimit(SIDEBAR_PAGE);
+    const pending = pendingRevealRef.current;
+    if (!pending) return;
+    pendingRevealRef.current = null;
+
+    let cards = 0;
+    for (const [, items] of allGroupsRef.current) {
+      cards += items.length;
+      if (items.some((item) => item.id === pending)) {
+        setRowLimit(Math.max(SIDEBAR_PAGE, cards));
+        return;
+      }
+    }
+  }, [doc?.id, filterColor, filterKind, filterSource]);
+
+  // 只查当前页的内嵌标注，给“本页有 N 条可导入”提示用；不扫整本。
+  useEffect(() => {
+    setPageNativeCount(0);
+    if (!doc) return;
+
+    let cancelled = false;
+    void scanNativePage(doc.pdf, currentPage)
+      .then((page) => {
+        if (!cancelled && docRef.current?.id === doc.id) setPageNativeCount(page.marks.length);
+      })
+      .catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [doc, currentPage]);
 
   // 页内查找的文字缓存按文档懒加载：打开查找栏时才读，不拖慢打开文档。
   useEffect(() => {
@@ -1566,6 +1703,14 @@ export default function App() {
     [currentPage, pdfImport],
   );
 
+  const showPageHint =
+    pageNativeCount > 0 &&
+    !currentPageHasImported &&
+    !pageHintDismissed.has(currentPage) &&
+    !pdfImport &&
+    !pdfImportProgress &&
+    !pdfImportBusy;
+
   /** 先只扫描注解，不读页面文字；用户确认范围后再建锚点。 */
   const dismissPdfImport = useCallback(() => {
     pdfScanRef.current = null;
@@ -1607,20 +1752,11 @@ export default function App() {
     }
   }, [doc, pdfImportBusy]);
 
-  const runPdfImport = useCallback(
-    async (scope: 'all' | 'current') => {
-      const scan = pdfScanRef.current;
+  /** 把选定页面落成文本锚点并批量保存；全量导入与“导入本页”共用。 */
+  const persistNativePages = useCallback(
+    async (pages: NativePage[]) => {
       const active = doc;
-      if (!scan || !active || pdfImportBusy) return;
-
-      const pages =
-        scope === 'all'
-          ? scan.pages
-          : scan.pages.filter((page) => page.page === currentPageRef.current);
-      if (pages.length === 0) {
-        setMessage('当前页没有可导入的 PDF 标注。');
-        return;
-      }
+      if (!active || pages.length === 0) return;
 
       setPdfImportBusy(true);
       setPdfImportProgress('正在读取页面文字…');
@@ -1660,8 +1796,8 @@ export default function App() {
         commit([...annotationsRef.current, ...created]);
         setFilterColor(null);
         setFilterKind(null);
-        setPdfImport(null);
-        setPdfImportProgress('');
+        setFilterSource('all');
+        dismissPdfImport();
         setMessage(
           `已导入 ${created.length} 条 PDF 标注${
             skipped > 0 ? `，跳过 ${skipped} 条重复或无法定位` : ''
@@ -1674,8 +1810,52 @@ export default function App() {
         setPdfImportBusy(false);
       }
     },
-    [beginSave, commit, dismissPdfImport, doc, endSave, pdfImportBusy],
+    [beginSave, commit, dismissPdfImport, doc, endSave],
   );
+
+  const runPdfImport = useCallback(
+    async (scope: 'all' | 'current') => {
+      const scan = pdfScanRef.current;
+      if (!scan || !doc || pdfImportBusy) return;
+
+      const pages =
+        scope === 'all'
+          ? scan.pages
+          : scan.pages.filter((page) => page.page === currentPageRef.current);
+      if (pages.length === 0) {
+        setMessage('当前页没有可导入的 PDF 标注。');
+        return;
+      }
+
+      await persistNativePages(pages);
+    },
+    [doc, pdfImportBusy, persistNativePages],
+  );
+
+  /** 当前页提示条只读这一页；点“导入本页”直接落库，不先扫整本。 */
+  const importCurrentPageNative = useCallback(async () => {
+    const active = doc;
+    if (!active || pdfImportBusy) return;
+
+    const pageIndex = currentPageRef.current;
+    setPdfImportBusy(true);
+    setPdfImportProgress('正在检查本页 PDF 自带标注…');
+    try {
+      const page = await scanNativePage(active.pdf, pageIndex);
+      if (docRef.current?.id !== active.id) return;
+      if (page.marks.length === 0) {
+        setMessage('这一页没有 PDF 自带标注。');
+        setPdfImportProgress('');
+        return;
+      }
+      await persistNativePages([page]);
+    } catch (error) {
+      setMessage(`导入 PDF 标注失败：${errorText(error)}`);
+      setPdfImportProgress('');
+    } finally {
+      setPdfImportBusy(false);
+    }
+  }, [doc, persistNativePages, pdfImportBusy]);
 
   const saveCard = useCallback(
     async (draft: CardDraft) => {
@@ -2167,12 +2347,38 @@ export default function App() {
               </div>
             )}
 
+            {showPageHint && (
+              <div className="pdf-page-hint">
+                <span>本页有 {pageNativeCount} 条 PDF 自带标注</span>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => void importCurrentPageNative()}
+                >
+                  导入本页
+                </button>
+                <button
+                  type="button"
+                  className="icon-button"
+                  title="不再提示本页"
+                  aria-label="忽略本页提示"
+                  onClick={() =>
+                    setPageHintDismissed((current) => new Set(current).add(currentPage))
+                  }
+                >
+                  ×
+                </button>
+              </div>
+            )}
+
             {visible.length > 0 && (
               <div className="sidebar-filters">
                 <button
                   type="button"
                   className={`filter-all ${
-                    filterColor === null && filterKind === null ? 'active' : ''
+                    filterColor === null && filterKind === null && filterSource === 'all'
+                      ? 'active'
+                      : ''
                   }`}
                   onClick={clearFilters}
                 >
@@ -2214,6 +2420,22 @@ export default function App() {
                     ))}
                   </select>
                 )}
+                {hasImported && (
+                  <select
+                    className="filter-source"
+                    aria-label="按来源筛选"
+                    value={filterSource}
+                    onChange={(event) =>
+                      setFilterSource(
+                        event.target.value as 'all' | 'manual' | 'imported',
+                      )
+                    }
+                  >
+                    <option value="all">全部来源</option>
+                    <option value="manual">手工标注</option>
+                    <option value="imported">PDF 导入</option>
+                  </select>
+                )}
               </div>
             )}
 
@@ -2231,8 +2453,8 @@ export default function App() {
                 </button>
               </p>
             ) : (
-              <div className="annotation-list">
-                {groups.map(([page, items]) => (
+              <div className="annotation-list" onScroll={handleAnnotationScroll}>
+                {visibleGroups.map(({ page, total, items }) => (
                   <section className="annotation-group" key={page}>
                     <button
                       type="button"
@@ -2241,7 +2463,7 @@ export default function App() {
                       onClick={() => goToPage(page)}
                     >
                       <span>第 {page + 1} 页</span>
-                      <span className="group-count">{items.length}</span>
+                      <span className="group-count">{total}</span>
                     </button>
                     {items.map((annotation) => (
                       <AnnotationCard
@@ -2268,6 +2490,15 @@ export default function App() {
                     ))}
                   </section>
                 ))}
+                {hasMoreGroups && (
+                  <button
+                    type="button"
+                    className="annotation-more"
+                    onClick={loadMoreAnnotations}
+                  >
+                    加载更多标注…
+                  </button>
+                )}
               </div>
             )}
 

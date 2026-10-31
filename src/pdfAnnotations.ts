@@ -60,6 +60,9 @@ export interface ImportedDraft {
   tags: string[];
 }
 
+/** 导入标注带这个标签，用来区分来源；用户可以像普通标签一样删除。 */
+export const PDF_IMPORT_TAG = 'PDF导入';
+
 const KIND_BY_SUBTYPE: Record<string, AnnotationKind> = {
   Highlight: 'highlight',
   Underline: 'underline',
@@ -248,6 +251,20 @@ function markFromAnnotation(
   };
 }
 
+/** 扫描单页，返回该页支持的原生标注；没有时 marks 为空。 */
+export async function scanNativePage(
+  pdf: PDFDocumentProxy,
+  pageIndex: number,
+): Promise<NativePage> {
+  const page = await pdf.getPage(pageIndex + 1);
+  const viewport = page.getViewport({ scale: 1 });
+  const raw = (await page.getAnnotations()) as PdfAnnotationLike[];
+  const marks = raw
+    .map((annotation) => markFromAnnotation(annotation, viewport))
+    .filter((mark): mark is NativeMark => mark !== null);
+  return { page: pageIndex, marks };
+}
+
 /** 扫描整份 PDF，只取高亮、下划线与删除线；不读取文字内容。 */
 export async function scanNativeAnnotations(
   pdf: PDFDocumentProxy,
@@ -258,20 +275,14 @@ export async function scanNativeAnnotations(
   let total = 0;
 
   for (let index = 0; index < pdf.numPages; index += 1) {
-    const page = await pdf.getPage(index + 1);
-    const viewport = page.getViewport({ scale: 1 });
-    const raw = (await page.getAnnotations()) as PdfAnnotationLike[];
-    const marks: NativeMark[] = [];
-
-    for (const annotation of raw) {
-      const mark = markFromAnnotation(annotation, viewport);
-      if (!mark) continue;
-      marks.push(mark);
-      total += 1;
-      byKind[mark.kind as keyof NativeScan['byKind']] += 1;
+    const scanned = await scanNativePage(pdf, index);
+    if (scanned.marks.length > 0) {
+      pages.push(scanned);
+      total += scanned.marks.length;
+      for (const mark of scanned.marks) {
+        byKind[mark.kind as keyof NativeScan['byKind']] += 1;
+      }
     }
-
-    if (marks.length > 0) pages.push({ page: index, marks });
     if (index === 0 || index === pdf.numPages - 1 || (index + 1) % 25 === 0) {
       onProgress?.(index + 1, pdf.numPages);
     }
@@ -330,7 +341,7 @@ export async function buildImportedAnnotations(
           color: mark.color,
           kind: mark.kind,
           body: mark.contents,
-          tags: [],
+          tags: [PDF_IMPORT_TAG],
         });
       }
     }
