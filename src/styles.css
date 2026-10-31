@@ -1219,6 +1219,14 @@ select {
   padding: 32px 26px 96px;
   background: var(--viewer);
   scroll-behavior: smooth;
+  /* 触摸屏上只允许纵向滑动，避免斜滑时页面横向漂移或回弹。 */
+  touch-action: pan-y;
+  overscroll-behavior: none;
+}
+
+/* 高倍缩放后页面确实超出阅读区，才允许触摸横向平移。 */
+.viewer[data-pan-x='true'] {
+  touch-action: pan-x pan-y;
 }
 
 .pdf-page {

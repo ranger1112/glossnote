@@ -280,6 +280,8 @@ export default function App() {
   >(null);
   /** 书库扫描或切换后强制重挂书库/复习视图，重新读取索引。 */
   const [libraryKey, setLibraryKey] = useState(0);
+  /** 只在页面比阅读区宽（高倍缩放）时允许触摸横向平移，避免平时滑动误触横移。 */
+  const [panXAllowed, setPanXAllowed] = useState(false);
 
   const findInputRef = useRef<HTMLInputElement>(null);
   const findTokenRef = useRef(0);
@@ -315,6 +317,21 @@ export default function App() {
   scaleRef.current = scale;
 
   useEffect(() => applyTheme(theme), [theme]);
+
+  // 适宽时锁死横向触摸；只有页面真的超出阅读区才放开横向平移。
+  useEffect(() => {
+    if (!doc) {
+      setPanXAllowed(false);
+      return;
+    }
+    const viewer = viewerRef.current;
+    if (!viewer) return;
+
+    const frame = requestAnimationFrame(() => {
+      setPanXAllowed(viewer.scrollWidth > viewer.clientWidth + 1);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [baseSize, doc, scale]);
 
   // 自适应缩放或文档切换会直接改 scale；此时目标值跟着同步。
   useEffect(() => {
@@ -1769,7 +1786,12 @@ export default function App() {
 
       {doc ? (
         <main className="workspace">
-          <section className="viewer" ref={viewerRef} onScroll={handleViewerScroll}>
+          <section
+            className="viewer"
+            ref={viewerRef}
+            onScroll={handleViewerScroll}
+            data-pan-x={panXAllowed ? 'true' : 'false'}
+          >
             {baseSize &&
               Array.from({ length: doc.pageCount }, (_, index) => (
                 <PdfPage
