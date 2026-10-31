@@ -104,6 +104,17 @@ interface PdfImportSummary {
 /** 侧栏一次渲染的卡片数；滚动到底部再追加，避免上千条标注一次挂载。 */
 const SIDEBAR_PAGE = 100;
 
+type RenderQuality = 'standard' | 'high';
+const RENDER_QUALITY_KEY = 'glossnote:render-quality';
+
+function initialRenderQuality(): RenderQuality {
+  try {
+    return localStorage.getItem(RENDER_QUALITY_KEY) === 'high' ? 'high' : 'standard';
+  } catch {
+    return 'standard';
+  }
+}
+
 function groupAnnotations(list: Annotation[]): [number, Annotation[]][] {
   const map = new Map<number, Annotation[]>();
   for (const annotation of list) {
@@ -274,6 +285,17 @@ function visiblePage(viewer: HTMLElement): VisiblePage | null {
 export default function App() {
   const desktop = isTauri();
   const [theme, setTheme] = useState<Theme>(initialTheme);
+  const [renderQuality, setRenderQuality] =
+    useState<RenderQuality>(initialRenderQuality);
+
+  const changeRenderQuality = useCallback((quality: RenderQuality) => {
+    setRenderQuality(quality);
+    try {
+      localStorage.setItem(RENDER_QUALITY_KEY, quality);
+    } catch {
+      // 隐私模式或存储被禁用时只影响下次启动，不阻止当前切换。
+    }
+  }, []);
 
   const [doc, setDoc] = useState<OpenedDoc | null>(null);
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
@@ -2240,6 +2262,7 @@ export default function App() {
                   baseSize={baseSize}
                   active={Math.abs(index - currentPage) <= activeRadius}
                   priority={index === currentPage}
+                  pixelBudget={renderQuality === 'high' ? 32_000_000 : 16_000_000}
                   annotations={byPage.get(index) ?? EMPTY}
                   focusId={focusId}
                   onSelect={handleSelect}
@@ -2733,6 +2756,8 @@ export default function App() {
           desktop={desktop}
           theme={theme}
           onTheme={setTheme}
+          renderQuality={renderQuality}
+          onRenderQuality={changeRenderQuality}
           ai={ai}
           onOpenAi={() => void openAiSettings()}
           docOpen={!!doc}

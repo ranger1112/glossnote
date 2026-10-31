@@ -21,6 +21,8 @@ interface PdfPageProps {
   active: boolean;
   /** 当前页优先开画；相邻页延后一点，避免首屏和远跳时一起抢资源。 */
   priority: boolean;
+  /** 单页画布像素上限；高清模式放大上限以保留更多文字细节。 */
+  pixelBudget: number;
   annotations: Annotation[];
   focusId: string | null;
   /** context 是选区前后各一段正文，供 AI 解释使用；不写进锚点。 */
@@ -234,6 +236,7 @@ export const PdfPage = memo(function PdfPage({
   baseSize,
   active,
   priority,
+  pixelBudget,
   annotations,
   focusId,
   onSelect,
@@ -404,7 +407,7 @@ export const PdfPage = memo(function PdfPage({
         const deviceRatio = Math.min(window.devicePixelRatio || 1, 3);
         const pixelRatio = Math.min(
           deviceRatio,
-          Math.sqrt(16_000_000 / Math.max(1, viewport.width * viewport.height)),
+          Math.sqrt(pixelBudget / Math.max(1, viewport.width * viewport.height)),
         );
 
         // 首页尺寸只是占位估计；本页实际尺寸不同时再修正占位。
@@ -493,7 +496,7 @@ export const PdfPage = memo(function PdfPage({
         onHover(null);
       }
     };
-  }, [active, pdf, pageIndex, scale, paintHighlights, onHover]);
+  }, [active, pdf, pageIndex, scale, pixelBudget, paintHighlights, onHover]);
 
   // 组件卸载（关闭文档、切换文档）时同样释放页对象与长按计时器。
   useEffect(

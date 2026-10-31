@@ -7,6 +7,8 @@ interface SettingsModalProps {
   desktop: boolean;
   theme: 'light' | 'dark';
   onTheme: (theme: 'light' | 'dark') => void;
+  renderQuality: 'standard' | 'high';
+  onRenderQuality: (quality: 'standard' | 'high') => void;
   ai: AiSettingsView | null;
   onOpenAi: () => void;
   docOpen: boolean;
@@ -27,6 +29,8 @@ export function SettingsModal({
   desktop,
   theme,
   onTheme,
+  renderQuality,
+  onRenderQuality,
   ai,
   onOpenAi,
   docOpen,
@@ -102,6 +106,38 @@ export function SettingsModal({
               </button>
             </div>
           </div>
+        </section>
+
+        <section className="settings-section">
+          <h3>阅读</h3>
+          <div className="settings-row">
+            <div>
+              <strong>渲染清晰度</strong>
+              <span>
+                高清模式提高单页画布像素上限，高倍缩放时文字更清楚，占用更多内存。
+              </span>
+            </div>
+            <div className="theme-choice">
+              <button
+                type="button"
+                className={renderQuality === 'standard' ? 'active' : ''}
+                onClick={() => onRenderQuality('standard')}
+              >
+                标准
+              </button>
+              <button
+                type="button"
+                className={renderQuality === 'high' ? 'active' : ''}
+                onClick={() => onRenderQuality('high')}
+              >
+                高清
+              </button>
+            </div>
+          </div>
+          <p className="settings-hint">
+            标准约 1600 万像素/页，高清约 3200 万；扫描件或低分辨率图片组成的 PDF
+            受源图限制，放大后仍可能模糊。
+          </p>
         </section>
 
         {desktop && (

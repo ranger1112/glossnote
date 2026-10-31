@@ -347,6 +347,17 @@ test('设置面板：主题切换、快捷键列表与关闭', async ({ page }) 
   await modal.locator('.theme-choice button', { hasText: '浅色' }).click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
 
+  // 阅读清晰度可切换并持久化。
+  const reading = modal.locator('.settings-section', { hasText: '渲染清晰度' });
+  await reading.getByRole('button', { name: '高清' }).click();
+  await expect
+    .poll(() => page.evaluate(() => localStorage.getItem('glossnote:render-quality')))
+    .toBe('high');
+  await reading.getByRole('button', { name: '标准' }).click();
+  await expect
+    .poll(() => page.evaluate(() => localStorage.getItem('glossnote:render-quality')))
+    .toBe('standard');
+
   // 标题栏和底部按钮固定，只有中间内容滚动。
   const head = modal.locator('.settings-head');
   const before = await head.boundingBox();
