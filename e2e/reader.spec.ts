@@ -242,7 +242,12 @@ test('标注很多时侧栏分批渲染，可继续加载', async ({ page }) => 
   await expect(page.locator('.annotation-card')).toHaveCount(100, { timeout: 20_000 });
   const more = page.locator('.annotation-more');
   await expect(more).toBeVisible();
-  await more.click();
+
+  // 直接滚到底部触发自动追加；点按钮时 Playwright 的滚动会先触发同一逻辑，
+  // 按钮随即被移除，反而造成 detached 竞态。
+  await page.locator('.annotation-list').evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
   await expect(page.locator('.annotation-card')).toHaveCount(150, { timeout: 20_000 });
   await expect(more).toHaveCount(0);
 });
