@@ -2008,6 +2008,7 @@ button.color-dot:hover {
   display: grid;
   place-items: center;
   padding: 24px;
+  overscroll-behavior: contain;
   background: rgba(20, 17, 12, 0.5);
   backdrop-filter: blur(3px);
 }
@@ -2115,6 +2116,8 @@ button.color-dot:hover {
   min-height: 0;
   overflow: auto;
   padding: 0 24px 8px;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .settings-foot {
@@ -2256,7 +2259,34 @@ button.color-dot:hover {
 }
 
 .ai-settings {
+  display: flex;
+  flex-direction: column;
   width: min(620px, 94vw);
+  overflow: hidden;
+  padding: 0;
+}
+
+.ai-settings .modal-head {
+  flex: none;
+  margin: 0;
+  padding: 22px 24px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.ai-settings .modal-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px 24px 8px;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.ai-settings .modal-foot {
+  flex: none;
+  margin: 0;
+  padding: 12px 24px 16px;
+  border-top: 1px solid var(--line);
 }
 
 .modal-head {

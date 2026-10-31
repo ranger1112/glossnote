@@ -2,6 +2,12 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 修复
+
+- 设置与 AI 设置弹窗固定标题和底部操作栏，只有中间内容滚动；滚动不再传给背景，滚动条槽位固定，避免滚动时窗口漂移或横向跳动。
+
 ## [0.2.0] - 2026-10-31
 
 ### 新增

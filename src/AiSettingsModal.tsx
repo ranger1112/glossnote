@@ -113,6 +113,7 @@ export function AiSettingsModal({
           </button>
         </header>
 
+        <div className="modal-body">
         <label className="check-row">
           <input
             type="checkbox"
@@ -192,6 +193,7 @@ export function AiSettingsModal({
         </p>
 
         {testResult && <p className="ai-test-result">{testResult}</p>}
+        </div>
 
         <footer className="modal-foot">
           <button
