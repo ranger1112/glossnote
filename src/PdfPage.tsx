@@ -19,8 +19,6 @@ interface PdfPageProps {
   baseSize: { width: number; height: number };
   /** 只渲染当前页附近的页面；整本书一次渲染会占掉数 GB 画布内存。 */
   active: boolean;
-  /** 0 表示当前页，先渲染；相邻页延后，避免和当前页抢渲染资源。 */
-  priority?: number;
   annotations: Annotation[];
   focusId: string | null;
   /** context 是选区前后各一段正文，供 AI 解释使用；不写进锚点。 */
@@ -223,7 +221,6 @@ export const PdfPage = memo(function PdfPage({
   scale,
   baseSize,
   active,
-  priority = 0,
   annotations,
   focusId,
   onSelect,
@@ -352,12 +349,6 @@ export const PdfPage = memo(function PdfPage({
 
     const run = async () => {
       try {
-        // 相邻页晚 150ms 再取页：跳页时当前页先拿到渲染资源。
-        if (priority > 0) {
-          await new Promise((resolve) => window.setTimeout(resolve, 150));
-          if (cancelled) return;
-        }
-
         const page = await pdf.getPage(pageIndex + 1);
         if (cancelled) return;
         pageProxyRef.current = page;
@@ -440,7 +431,7 @@ export const PdfPage = memo(function PdfPage({
       highlightRef.current?.replaceChildren();
       modelRef.current = null;
     };
-  }, [active, pdf, pageIndex, priority, scale, paintHighlights]);
+  }, [active, pdf, pageIndex, scale, paintHighlights]);
 
   // 组件卸载（关闭文档、切换文档）时同样释放页对象。
   useEffect(
