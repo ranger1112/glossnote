@@ -9,9 +9,9 @@ use crate::{
     settings::{self, AiSettings},
     state::AppState,
 };
-use serde::Deserialize;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Manager};
+use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tauri::{AppHandle, Emitter, Manager};
 
 const MAX_CONTEXT_CHARS: usize = 12_000;
 const MAX_SOURCE_CHARS: usize = 1_200;
@@ -111,6 +111,251 @@ fn truncate(value: &str, limit: usize) -> String {
 fn http_error(status: reqwest::StatusCode, body: &str) -> String {
     let detail = body.split_whitespace().collect::<Vec<_>>().join(" ");
     format!("AI 请求失败（HTTP {status}）：{}", truncate(&detail, 300))
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AiStreamPayload {
+    request_id: String,
+    text: String,
+}
+
+fn emit_stream(app: &AppHandle, request_id: &str, text: &str) -> Result<(), String> {
+    app.emit(
+        "ai-stream",
+        AiStreamPayload {
+            request_id: request_id.to_string(),
+            text: text.to_string(),
+        },
+    )
+    .map_err(|error| format!("发送流式回答失败：{error}"))
+}
+
+fn sse_error(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("error")
+        .and_then(|error| error.get("message"))
+        .and_then(|message| message.as_str())
+        .map(|message| message.to_string())
+}
+
+fn stream_delta(value: &serde_json::Value, anthropic: bool) -> Option<String> {
+    if anthropic {
+        if value.get("type").and_then(|kind| kind.as_str()) != Some("content_block_delta") {
+            return None;
+        }
+        value
+            .get("delta")
+            .and_then(|delta| delta.get("text"))
+            .and_then(|text| text.as_str())
+            .map(|text| text.to_string())
+    } else {
+        value
+            .get("choices")
+            .and_then(|choices| choices.get(0))
+            .and_then(|choice| choice.get("delta"))
+            .and_then(|delta| delta.get("content"))
+            .and_then(|content| content.as_str())
+            .map(|text| text.to_string())
+    }
+}
+
+/// 调用 Provider 的流式接口，把增量文本通过 `ai-stream` 事件推给前端。
+/// 返回完整回答；事件里的 request_id 用来区分并发的请求。
+async fn complete_stream(
+    app: &AppHandle,
+    request_id: &str,
+    settings: &AiSettings,
+    system: &str,
+    user: &str,
+) -> Result<String, String> {
+    if !settings.enabled {
+        return Err("AI 尚未启用，请先在 AI 设置中开启".to_string());
+    }
+    let base = settings.base_url.trim_end_matches('/');
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|error| format!("创建 AI 客户端失败：{error}"))?;
+
+    let anthropic = settings.provider == "anthropic";
+    let (url, body) = if anthropic {
+        if settings.api_key.trim().is_empty() {
+            return Err("请先填写 Anthropic API Key".to_string());
+        }
+        let url = if base.ends_with("/messages") {
+            base.to_string()
+        } else if base.ends_with("/v1") {
+            format!("{base}/messages")
+        } else {
+            format!("{base}/v1/messages")
+        };
+        let body = serde_json::json!({
+            "model": &settings.model,
+            "max_tokens": 1400,
+            "stream": true,
+            "system": system,
+            "messages": [{ "role": "user", "content": user }]
+        });
+        (url, body)
+    } else if settings.provider == "openai" {
+        let url = if base.ends_with("/chat/completions") {
+            base.to_string()
+        } else if base.ends_with("/v1") {
+            format!("{base}/chat/completions")
+        } else {
+            format!("{base}/v1/chat/completions")
+        };
+        let body = serde_json::json!({
+            "model": &settings.model,
+            "stream": true,
+            "messages": [
+                { "role": "system", "content": system },
+                { "role": "user", "content": user }
+            ]
+        });
+        (url, body)
+    } else {
+        return Err("未知的 AI 服务商".to_string());
+    };
+
+    let mut request = client.post(url).json(&body);
+    if anthropic {
+        request = request
+            .header("x-api-key", settings.api_key.trim())
+            .header("anthropic-version", "2023-06-01");
+    } else if !settings.api_key.trim().is_empty() {
+        request = request.bearer_auth(settings.api_key.trim());
+    }
+
+    let mut response = request
+        .send()
+        .await
+        .map_err(|error| format!("连接 AI 服务失败：{error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let raw = response.text().await.unwrap_or_default();
+        return Err(http_error(status, &raw));
+    }
+
+    // 部分 OpenAI 兼容服务会忽略 stream 参数，直接返回整段 JSON；按普通响应收下。
+    let is_event_stream = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.contains("text/event-stream"))
+        .unwrap_or(false);
+    if !is_event_stream {
+        let raw = response
+            .text()
+            .await
+            .map_err(|error| format!("读取 AI 响应失败：{error}"))?;
+        let text = if anthropic {
+            let parsed: AnthropicResponse =
+                serde_json::from_str(&raw).map_err(|error| format!("解析 AI 响应失败：{error}"))?;
+            parsed
+                .content
+                .iter()
+                .filter_map(|block| block.text.as_deref())
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            let parsed: OpenAiResponse =
+                serde_json::from_str(&raw).map_err(|error| format!("解析 AI 响应失败：{error}"))?;
+            parsed
+                .choices
+                .first()
+                .and_then(|choice| choice.message.content.clone())
+                .unwrap_or_default()
+        };
+        if text.trim().is_empty() {
+            return Err("AI 返回了空内容".to_string());
+        }
+        emit_stream(app, request_id, &text)?;
+        return Ok(text);
+    }
+
+    let mut buffer = String::new();
+    let mut full = String::new();
+    let mut pending = String::new();
+    let mut last_emit = Instant::now();
+
+    while let Some(bytes) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("读取流式回答失败：{error}"))?
+    {
+        buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+        while let Some(index) = buffer.find('\n') {
+            let line = buffer[..index].trim().to_string();
+            buffer.drain(..=index);
+            let Some(data) = line.strip_prefix("data:") else {
+                continue;
+            };
+            let data = data.trim();
+            if data.is_empty() || data == "[DONE]" {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
+                continue;
+            };
+            if let Some(message) = sse_error(&value) {
+                return Err(format!("AI 流式回答出错：{message}"));
+            }
+            if let Some(delta) = stream_delta(&value, anthropic) {
+                if !delta.is_empty() {
+                    full.push_str(&delta);
+                    pending.push_str(&delta);
+                }
+            }
+        }
+
+        if !pending.is_empty() && last_emit.elapsed() >= Duration::from_millis(50) {
+            emit_stream(app, request_id, &pending)?;
+            pending.clear();
+            last_emit = Instant::now();
+        }
+    }
+
+    if !pending.is_empty() {
+        emit_stream(app, request_id, &pending)?;
+    }
+    if full.trim().is_empty() {
+        return Err("AI 返回了空内容".to_string());
+    }
+    Ok(full)
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+
+    #[test]
+    fn parses_anthropic_delta() {
+        let value: serde_json::Value = serde_json::from_str(
+            r#"{"type":"content_block_delta","delta":{"type":"text_delta","text":"你好"}}"#,
+        )
+        .unwrap();
+        assert_eq!(stream_delta(&value, true), Some("你好".to_string()));
+        assert_eq!(stream_delta(&value, false), None);
+    }
+
+    #[test]
+    fn parses_openai_delta() {
+        let value: serde_json::Value =
+            serde_json::from_str(r#"{"choices":[{"delta":{"content":"Hi"}}]}"#).unwrap();
+        assert_eq!(stream_delta(&value, false), Some("Hi".to_string()));
+        assert_eq!(stream_delta(&value, true), None);
+    }
+
+    #[test]
+    fn parses_sse_error_message() {
+        let value: serde_json::Value =
+            serde_json::from_str(r#"{"type":"error","error":{"message":"overloaded"}}"#).unwrap();
+        assert_eq!(sse_error(&value), Some("overloaded".to_string()));
+        assert_eq!(sse_error(&serde_json::json!({"type":"ping"})), None);
+    }
 }
 
 async fn complete(settings: &AiSettings, system: &str, user: &str) -> Result<String, String> {
@@ -476,13 +721,19 @@ fn chunk_text(text: &str) -> Vec<String> {
     chunks
 }
 
-pub async fn explain(
+struct PreparedAnswer {
+    ai: AiSettings,
+    prompt: String,
+    citations: Vec<AiCitation>,
+}
+
+fn prepare_explain(
     app: &AppHandle,
     doc_id: &str,
     page: u32,
     quote: String,
     context: String,
-) -> Result<AiAnswer, String> {
+) -> Result<PreparedAnswer, String> {
     let quote = quote.trim().to_string();
     if quote.is_empty() {
         return Err("没有选中的文字".to_string());
@@ -520,17 +771,56 @@ pub async fn explain(
         "请解释这段文字在上下文中的含义。如果出现术语，用一两句话说明。\n\n{}",
         build_prompt("解释这段话", &sources)
     );
-    let text = complete(&ai, SYSTEM_PROMPT, &prompt).await?;
+    Ok(PreparedAnswer {
+        ai,
+        prompt,
+        citations,
+    })
+}
+
+pub async fn explain(
+    app: &AppHandle,
+    doc_id: &str,
+    page: u32,
+    quote: String,
+    context: String,
+) -> Result<AiAnswer, String> {
+    let prepared = prepare_explain(app, doc_id, page, quote, context)?;
+    let text = complete(&prepared.ai, SYSTEM_PROMPT, &prepared.prompt).await?;
     Ok(AiAnswer {
         text,
-        citations,
-        model: ai.model,
+        citations: prepared.citations,
+        model: prepared.ai.model,
+    })
+}
+
+pub async fn explain_stream(
+    app: &AppHandle,
+    request_id: &str,
+    doc_id: &str,
+    page: u32,
+    quote: String,
+    context: String,
+) -> Result<AiAnswer, String> {
+    let prepared = prepare_explain(app, doc_id, page, quote, context)?;
+    let text = complete_stream(
+        app,
+        request_id,
+        &prepared.ai,
+        SYSTEM_PROMPT,
+        &prepared.prompt,
+    )
+    .await?;
+    Ok(AiAnswer {
+        text,
+        citations: prepared.citations,
+        model: prepared.ai.model,
     })
 }
 
 /// 追问：沿用选段（解释模式）或重新检索（问答模式）的资料，并带上最近的对话。
 #[allow(clippy::too_many_arguments)]
-pub async fn followup(
+fn prepare_followup(
     app: &AppHandle,
     doc_id: &str,
     mode: String,
@@ -539,7 +829,7 @@ pub async fn followup(
     context: String,
     question: String,
     history: Vec<ChatTurn>,
-) -> Result<AiAnswer, String> {
+) -> Result<PreparedAnswer, String> {
     let question = question.trim().to_string();
     if question.is_empty() {
         return Err("请先输入问题".to_string());
@@ -602,16 +892,66 @@ pub async fn followup(
         build_prompt(&question, &sources),
         history_block(&history)
     );
-    let text = complete(&ai, SYSTEM_PROMPT, &prompt).await?;
-
-    Ok(AiAnswer {
-        text,
+    Ok(PreparedAnswer {
+        ai,
+        prompt,
         citations,
-        model: ai.model,
     })
 }
 
-pub async fn answer(app: &AppHandle, doc_id: &str, question: String) -> Result<AiAnswer, String> {
+#[allow(clippy::too_many_arguments)]
+pub async fn followup(
+    app: &AppHandle,
+    doc_id: &str,
+    mode: String,
+    page: Option<u32>,
+    quote: String,
+    context: String,
+    question: String,
+    history: Vec<ChatTurn>,
+) -> Result<AiAnswer, String> {
+    let prepared = prepare_followup(app, doc_id, mode, page, quote, context, question, history)?;
+    let text = complete(&prepared.ai, SYSTEM_PROMPT, &prepared.prompt).await?;
+    Ok(AiAnswer {
+        text,
+        citations: prepared.citations,
+        model: prepared.ai.model,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn followup_stream(
+    app: &AppHandle,
+    request_id: &str,
+    doc_id: &str,
+    mode: String,
+    page: Option<u32>,
+    quote: String,
+    context: String,
+    question: String,
+    history: Vec<ChatTurn>,
+) -> Result<AiAnswer, String> {
+    let prepared = prepare_followup(app, doc_id, mode, page, quote, context, question, history)?;
+    let text = complete_stream(
+        app,
+        request_id,
+        &prepared.ai,
+        SYSTEM_PROMPT,
+        &prepared.prompt,
+    )
+    .await?;
+    Ok(AiAnswer {
+        text,
+        citations: prepared.citations,
+        model: prepared.ai.model,
+    })
+}
+
+fn prepare_answer(
+    app: &AppHandle,
+    doc_id: &str,
+    question: String,
+) -> Result<PreparedAnswer, String> {
     let question = question.trim().to_string();
     if question.is_empty() {
         return Err("请先输入问题".to_string());
@@ -637,12 +977,42 @@ pub async fn answer(app: &AppHandle, doc_id: &str, question: String) -> Result<A
         .map(|(index, source)| citation_for(index + 1, source))
         .collect::<Vec<_>>();
     let prompt = build_prompt(&question, &sources);
-    let text = complete(&ai, SYSTEM_PROMPT, &prompt).await?;
+    Ok(PreparedAnswer {
+        ai,
+        prompt,
+        citations,
+    })
+}
 
+pub async fn answer(app: &AppHandle, doc_id: &str, question: String) -> Result<AiAnswer, String> {
+    let prepared = prepare_answer(app, doc_id, question)?;
+    let text = complete(&prepared.ai, SYSTEM_PROMPT, &prepared.prompt).await?;
     Ok(AiAnswer {
         text,
-        citations,
-        model: ai.model,
+        citations: prepared.citations,
+        model: prepared.ai.model,
+    })
+}
+
+pub async fn answer_stream(
+    app: &AppHandle,
+    request_id: &str,
+    doc_id: &str,
+    question: String,
+) -> Result<AiAnswer, String> {
+    let prepared = prepare_answer(app, doc_id, question)?;
+    let text = complete_stream(
+        app,
+        request_id,
+        &prepared.ai,
+        SYSTEM_PROMPT,
+        &prepared.prompt,
+    )
+    .await?;
+    Ok(AiAnswer {
+        text,
+        citations: prepared.citations,
+        model: prepared.ai.model,
     })
 }
 
@@ -706,11 +1076,11 @@ fn collect_sources(
     Ok(sources)
 }
 
-pub async fn summarize(
+fn prepare_summarize(
     app: &AppHandle,
     doc_id: &str,
     annotations_only: bool,
-) -> Result<AiAnswer, String> {
+) -> Result<PreparedAnswer, String> {
     let ai = settings::load(app).ai;
     let (sources, title) = {
         let state = app.state::<AppState>();
@@ -805,12 +1175,46 @@ pub async fn summarize(
         format!("请总结《{title}》的核心内容、主要论点与结论。")
     };
     let prompt = build_prompt(&question, &selected);
-    let text = complete(&ai, SYSTEM_PROMPT, &prompt).await?;
+    Ok(PreparedAnswer {
+        ai,
+        prompt,
+        citations,
+    })
+}
 
+pub async fn summarize(
+    app: &AppHandle,
+    doc_id: &str,
+    annotations_only: bool,
+) -> Result<AiAnswer, String> {
+    let prepared = prepare_summarize(app, doc_id, annotations_only)?;
+    let text = complete(&prepared.ai, SYSTEM_PROMPT, &prepared.prompt).await?;
     Ok(AiAnswer {
         text,
-        citations,
-        model: ai.model,
+        citations: prepared.citations,
+        model: prepared.ai.model,
+    })
+}
+
+pub async fn summarize_stream(
+    app: &AppHandle,
+    request_id: &str,
+    doc_id: &str,
+    annotations_only: bool,
+) -> Result<AiAnswer, String> {
+    let prepared = prepare_summarize(app, doc_id, annotations_only)?;
+    let text = complete_stream(
+        app,
+        request_id,
+        &prepared.ai,
+        SYSTEM_PROMPT,
+        &prepared.prompt,
+    )
+    .await?;
+    Ok(AiAnswer {
+        text,
+        citations: prepared.citations,
+        model: prepared.ai.model,
     })
 }
 

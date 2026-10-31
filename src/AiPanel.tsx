@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import {
-  aiAnswer,
-  aiExplain,
-  aiFollowup,
-  aiSummarize,
+  aiAnswerStream,
+  aiExplainStream,
+  aiFollowupStream,
+  aiSummarizeStream,
   documentIndexStatus,
   indexDocumentText,
 } from './desktop';
@@ -57,6 +57,7 @@ export function AiPanel({
   const [busy, setBusy] = useState(false);
   const [question, setQuestion] = useState('');
   const [pending, setPending] = useState('');
+  const [streaming, setStreaming] = useState('');
   const [indexed, setIndexed] = useState(false);
   const [indexing, setIndexing] = useState(false);
   const [progress, setProgress] = useState('');
@@ -75,13 +76,23 @@ export function AiPanel({
     setError('');
     setQuestion('');
     setPending('');
+    setStreaming('');
 
     if (mode === 'explain' && explainPage !== undefined && explainQuote !== undefined) {
       setBusy(true);
-      aiExplain(docId, explainPage, explainQuote, explainContext ?? '')
+      aiExplainStream(
+        docId,
+        explainPage,
+        explainQuote,
+        explainContext ?? '',
+        (chunk) => {
+          if (!cancelled) setStreaming((current) => current + chunk);
+        },
+      )
         .then((result) => {
           if (cancelled) return;
           setTurns([{ role: 'assistant', text: result.text, answer: result }]);
+          setStreaming('');
         })
         .catch((cause) => {
           if (!cancelled) setError(errorText(cause));
@@ -107,7 +118,7 @@ export function AiPanel({
   useEffect(() => {
     const body = bodyRef.current;
     if (body) body.scrollTop = body.scrollHeight;
-  }, [turns.length, busy]);
+  }, [turns.length, busy, streaming]);
 
   const handleIndex = useCallback(async () => {
     setIndexing(true);
@@ -146,11 +157,14 @@ export function AiPanel({
       setError('');
       setPending(text);
       setQuestion('');
+      setStreaming('');
       try {
+        const onChunk = (chunk: string) =>
+          setStreaming((current) => current + chunk);
         const result =
           mode === 'qa' && turns.length === 0
-            ? await aiAnswer(docId, text)
-            : await aiFollowup(
+            ? await aiAnswerStream(docId, text, onChunk)
+            : await aiFollowupStream(
                 docId,
                 mode,
                 mode === 'explain' ? (explainPage ?? null) : null,
@@ -158,12 +172,14 @@ export function AiPanel({
                 mode === 'explain' ? (explainContext ?? '') : '',
                 text,
                 history,
+                onChunk,
               );
         setTurns((current) => [
           ...current,
           { role: 'user', text },
           { role: 'assistant', text: result.text, answer: result },
         ]);
+        setStreaming('');
       } catch (cause) {
         setError(errorText(cause));
         // 失败时把问题放回输入框，方便修改后重试。
@@ -188,13 +204,17 @@ export function AiPanel({
       setBusy(true);
       setError('');
       setPending(label);
+      setStreaming('');
       try {
-        const result = await aiSummarize(docId, annotationsOnly);
+        const result = await aiSummarizeStream(docId, annotationsOnly, (chunk) =>
+          setStreaming((current) => current + chunk),
+        );
         setTurns((current) => [
           ...current,
           { role: 'user', text: label },
           { role: 'assistant', text: result.text, answer: result },
         ]);
+        setStreaming('');
       } catch (cause) {
         setError(errorText(cause));
       } finally {
@@ -206,6 +226,20 @@ export function AiPanel({
   );
 
   const lastAnswer = [...turns].reverse().find((turn) => turn.answer)?.answer;
+
+  // 流式过程中先显示用户问题与正在增长的助手回答；完成后再换到正式 turn。
+  const live = (
+    <>
+      {pending && <div className="ai-turn-user">{pending}</div>}
+      {streaming && (
+        <div className="ai-turn-assistant">
+          <div className="ai-answer-text">
+            <Markdown text={streaming} />
+          </div>
+        </div>
+      )}
+    </>
+  );
 
   const thread = turns.map((turn, index) =>
     turn.role === 'user' ? (
@@ -249,7 +283,8 @@ export function AiPanel({
           <>
             {explain?.quote && <blockquote className="ai-quote">{explain.quote}</blockquote>}
             {thread}
-            {busy && (
+            {live}
+            {busy && !streaming && (
               <p className="ai-loading">
                 {pending ? '回答中…' : '正在解释…'}
               </p>
@@ -298,7 +333,8 @@ export function AiPanel({
             </div>
 
             {thread}
-            {busy && (
+            {live}
+            {busy && !streaming && (
               <p className="ai-loading">
                 {pending === '总结全文' || pending === '总结我的标注'
                   ? '正在总结…'

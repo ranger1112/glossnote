@@ -238,6 +238,65 @@ async fn ai_summarize(
     ai::summarize(&app, &doc_id, annotations_only).await
 }
 
+#[tauri::command]
+async fn ai_explain_stream(
+    app: AppHandle,
+    request_id: String,
+    doc_id: String,
+    page: u32,
+    quote: String,
+    context: String,
+) -> Result<AiAnswer, String> {
+    ai::explain_stream(&app, &request_id, &doc_id, page, quote, context).await
+}
+
+#[tauri::command]
+async fn ai_answer_stream(
+    app: AppHandle,
+    request_id: String,
+    doc_id: String,
+    question: String,
+) -> Result<AiAnswer, String> {
+    ai::answer_stream(&app, &request_id, &doc_id, question).await
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn ai_followup_stream(
+    app: AppHandle,
+    request_id: String,
+    doc_id: String,
+    mode: String,
+    page: Option<u32>,
+    quote: String,
+    context: String,
+    question: String,
+    history: Vec<ChatTurn>,
+) -> Result<AiAnswer, String> {
+    ai::followup_stream(
+        &app,
+        &request_id,
+        &doc_id,
+        mode,
+        page,
+        quote,
+        context,
+        question,
+        history,
+    )
+    .await
+}
+
+#[tauri::command]
+async fn ai_summarize_stream(
+    app: AppHandle,
+    request_id: String,
+    doc_id: String,
+    annotations_only: bool,
+) -> Result<AiAnswer, String> {
+    ai::summarize_stream(&app, &request_id, &doc_id, annotations_only).await
+}
+
 #[tauri::command(async)]
 fn update_document_meta(
     app: AppHandle,
@@ -434,6 +493,10 @@ fn main() {
             ai_answer,
             ai_followup,
             ai_summarize,
+            ai_explain_stream,
+            ai_answer_stream,
+            ai_followup_stream,
+            ai_summarize_stream,
             update_document_meta,
             library_root,
             load_page_texts,

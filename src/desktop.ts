@@ -1,4 +1,5 @@
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import type {
   AiAnswer,
   AiSettingsInput,
@@ -201,4 +202,74 @@ export function aiFollowup(
 
 export function aiSummarize(docId: string, annotationsOnly: boolean): Promise<AiAnswer> {
   return invoke('ai_summarize', { docId, annotationsOnly });
+}
+
+export interface AiStreamChunk {
+  requestId: string;
+  text: string;
+}
+
+/** 订阅本次请求的增量事件；命令返回的完整回答仍是最终结果。 */
+async function streamRequest(
+  command: string,
+  args: Record<string, unknown>,
+  onChunk: (text: string) => void,
+): Promise<AiAnswer> {
+  const requestId = crypto.randomUUID();
+  const unlisten = await listen<AiStreamChunk>('ai-stream', (event) => {
+    if (event.payload.requestId === requestId) onChunk(event.payload.text);
+  });
+
+  try {
+    return await invoke<AiAnswer>(command, { ...args, requestId });
+  } finally {
+    unlisten();
+  }
+}
+
+export function aiExplainStream(
+  docId: string,
+  page: number,
+  quote: string,
+  context: string,
+  onChunk: (text: string) => void,
+): Promise<AiAnswer> {
+  return streamRequest('ai_explain_stream', { docId, page, quote, context }, onChunk);
+}
+
+export function aiAnswerStream(
+  docId: string,
+  question: string,
+  onChunk: (text: string) => void,
+): Promise<AiAnswer> {
+  return streamRequest('ai_answer_stream', { docId, question }, onChunk);
+}
+
+export function aiFollowupStream(
+  docId: string,
+  mode: 'explain' | 'qa',
+  page: number | null,
+  quote: string,
+  context: string,
+  question: string,
+  history: ChatTurn[],
+  onChunk: (text: string) => void,
+): Promise<AiAnswer> {
+  return streamRequest(
+    'ai_followup_stream',
+    { docId, mode, page, quote, context, question, history },
+    onChunk,
+  );
+}
+
+export function aiSummarizeStream(
+  docId: string,
+  annotationsOnly: boolean,
+  onChunk: (text: string) => void,
+): Promise<AiAnswer> {
+  return streamRequest(
+    'ai_summarize_stream',
+    { docId, annotationsOnly },
+    onChunk,
+  );
 }

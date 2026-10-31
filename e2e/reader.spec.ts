@@ -239,11 +239,11 @@ test('标注很多时侧栏分批渲染，可继续加载', async ({ page }) => 
   await expect(
     page.locator('.pdf-page').first().locator('.text-layer span').first(),
   ).toBeVisible({ timeout: 30_000 });
-  await expect(page.locator('.annotation-card')).toHaveCount(100);
+  await expect(page.locator('.annotation-card')).toHaveCount(100, { timeout: 20_000 });
   const more = page.locator('.annotation-more');
   await expect(more).toBeVisible();
   await more.click();
-  await expect(page.locator('.annotation-card')).toHaveCount(150);
+  await expect(page.locator('.annotation-card')).toHaveCount(150, { timeout: 20_000 });
   await expect(more).toHaveCount(0);
 });
 

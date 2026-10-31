@@ -19,6 +19,8 @@ interface PdfPageProps {
   baseSize: { width: number; height: number };
   /** 只渲染当前页附近的页面；整本书一次渲染会占掉数 GB 画布内存。 */
   active: boolean;
+  /** 当前页优先开画；相邻页延后一点，避免首屏和远跳时一起抢资源。 */
+  priority: boolean;
   annotations: Annotation[];
   focusId: string | null;
   /** context 是选区前后各一段正文，供 AI 解释使用；不写进锚点。 */
@@ -231,6 +233,7 @@ export const PdfPage = memo(function PdfPage({
   scale,
   baseSize,
   active,
+  priority,
   annotations,
   focusId,
   onSelect,
@@ -266,6 +269,10 @@ export const PdfPage = memo(function PdfPage({
   const [size, setSize] = useState(baseSize);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState('');
+  // 优先级只决定“何时开始画”，不进渲染 effect 依赖；否则当前页变化会让
+  // 仍在视口里的相邻页清空重绘，正是之前滚动闪烁的原因。
+  const priorityRef = useRef(priority);
+  priorityRef.current = priority;
 
   const paintHighlights = useCallback(() => {
     const pageElement = pageRef.current;
@@ -454,10 +461,20 @@ export const PdfPage = memo(function PdfPage({
       }
     };
 
-    void run();
+    let startTimer: number | null = null;
+    if (priorityRef.current) {
+      void run();
+    } else {
+      // 相邻页晚 120ms 开画，让首屏/远跳的当前页先拿到 worker 与画布。
+      startTimer = window.setTimeout(() => {
+        startTimer = null;
+        void run();
+      }, 120);
+    }
 
     return () => {
       cancelled = true;
+      if (startTimer !== null) window.clearTimeout(startTimer);
       renderTask?.cancel();
       textLayer?.cancel();
       canvas.width = 1;

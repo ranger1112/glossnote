@@ -2239,6 +2239,7 @@ export default function App() {
                   scale={scale}
                   baseSize={baseSize}
                   active={Math.abs(index - currentPage) <= activeRadius}
+                  priority={index === currentPage}
                   annotations={byPage.get(index) ?? EMPTY}
                   focusId={focusId}
                   onSelect={handleSelect}
