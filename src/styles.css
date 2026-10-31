@@ -1511,6 +1511,52 @@ select {
   color: var(--accent-ink);
 }
 
+.import-head-button {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted);
+}
+
+.import-head-button:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.pdf-import-banner {
+  margin: 0 18px 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.65;
+}
+
+.pdf-import-banner p {
+  margin: 0;
+}
+
+.pdf-import-banner strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.pdf-import-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.pdf-import-actions .primary,
+.pdf-import-actions .ghost {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 11.5px;
+}
+
 .sidebar-hint {
   margin: 0;
   padding: 2px 18px 18px;

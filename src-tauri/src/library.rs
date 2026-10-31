@@ -1029,6 +1029,40 @@ pub fn upsert_annotation(
     write_sidecar(&conn, &root, doc_id)
 }
 
+/// 批量导入（例如 PDF 自带标注）：同一事务写入，只回写一次 sidecar。
+pub fn upsert_annotations(
+    app: &AppHandle,
+    doc_id: &str,
+    annotations: &[Annotation],
+) -> Result<(), String> {
+    if annotations.is_empty() {
+        return Ok(());
+    }
+
+    let state = app.state::<AppState>();
+    let root = state.root();
+    let conn = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    if db::find_by_id(&conn, doc_id)?.is_none() {
+        return Err("文档不存在，无法导入标注".to_string());
+    }
+
+    let transaction = conn
+        .unchecked_transaction()
+        .map_err(|error| format!("开始保存标注事务失败：{error}"))?;
+    for annotation in annotations {
+        db::upsert_annotation(&transaction, doc_id, annotation)?;
+    }
+    transaction
+        .commit()
+        .map_err(|error| format!("提交标注事务失败：{error}"))?;
+
+    write_sidecar(&conn, &root, doc_id)
+}
+
 pub fn delete_annotation(app: &AppHandle, doc_id: &str, id: &str) -> Result<(), String> {
     let state = app.state::<AppState>();
     let root = state.root();

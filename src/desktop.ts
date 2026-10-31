@@ -47,6 +47,10 @@ export function listDocuments(): Promise<DocumentMeta[]> {
   return invoke('list_documents');
 }
 
+export function upsertAnnotations(docId: string, annotations: Annotation[]): Promise<void> {
+  return invoke('upsert_annotations', { docId, annotations });
+}
+
 export function upsertAnnotation(docId: string, annotation: Annotation): Promise<void> {
   return invoke('upsert_annotation', { docId, annotation });
 }

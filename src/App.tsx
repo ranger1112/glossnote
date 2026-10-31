@@ -30,6 +30,13 @@ import type {
 } from './types';
 import { loadDoc, saveDoc, sha256Hex } from './storage';
 import { joinPdfItems } from './pdfText';
+import {
+  annotationKey,
+  buildImportedAnnotations,
+  draftsToAnnotations,
+  scanNativeAnnotations,
+  type NativeScan,
+} from './pdfAnnotations';
 import type { PdfTextItem } from './pdfjs';
 import { errorText } from './errors';
 import { getVersion } from '@tauri-apps/api/app';
@@ -54,6 +61,7 @@ import {
   updateCard,
   updateDocumentMeta,
   upsertAnnotation,
+  upsertAnnotations,
 } from './desktop';
 import { applyTheme, initialTheme, type Theme } from './theme';
 
@@ -81,6 +89,13 @@ interface HoverState {
   y: number;
   /** 标注贴近阅读区顶部时，工具条改到文字下方展开。 */
   below: boolean;
+}
+
+interface PdfImportSummary {
+  total: number;
+  annotatedPages: number;
+  byKind: NativeScan['byKind'];
+  pages: { page: number; count: number }[];
 }
 
 interface FindMatch {
@@ -253,6 +268,10 @@ export default function App() {
   const [hover, setHover] = useState<HoverState | null>(null);
   const [hoverConfirmDelete, setHoverConfirmDelete] = useState(false);
   const hoverHideTimer = useRef<number | null>(null);
+  const [pdfImport, setPdfImport] = useState<PdfImportSummary | null>(null);
+  const [pdfImportBusy, setPdfImportBusy] = useState(false);
+  const [pdfImportProgress, setPdfImportProgress] = useState('');
+  const pdfScanRef = useRef<NativeScan | null>(null);
   const [focusId, setFocusId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [message, setMessage] = useState('');
@@ -907,6 +926,9 @@ export default function App() {
     setToolbar(null);
     setHover(null);
     setHoverConfirmDelete(false);
+    setPdfImport(null);
+    setPdfImportProgress('');
+    pdfScanRef.current = null;
     setFocusId(null);
     setAiPanel(null);
     setMessage('');
@@ -1034,6 +1056,9 @@ export default function App() {
       setToolbar(null);
       setHover(null);
       setHoverConfirmDelete(false);
+      setPdfImport(null);
+      setPdfImportProgress('');
+      pdfScanRef.current = null;
       setFocusId(null);
       setEditingId(null);
       setCurrentPage(0);
@@ -1536,6 +1561,122 @@ export default function App() {
     [],
   );
 
+  const pdfImportCurrent = useMemo(
+    () => pdfImport?.pages.find((item) => item.page === currentPage)?.count ?? 0,
+    [currentPage, pdfImport],
+  );
+
+  /** 先只扫描注解，不读页面文字；用户确认范围后再建锚点。 */
+  const dismissPdfImport = useCallback(() => {
+    pdfScanRef.current = null;
+    setPdfImport(null);
+    setPdfImportProgress('');
+  }, []);
+
+  const startPdfImport = useCallback(async () => {
+    if (!doc || pdfImportBusy) return;
+
+    setPdfImportBusy(true);
+    setPdfImport(null);
+    setPdfImportProgress('正在检查 PDF 自带标注…');
+    try {
+      const scan = await scanNativeAnnotations(doc.pdf, (done, total) => {
+        setPdfImportProgress(`正在检查 PDF 自带标注 ${done}/${total} 页…`);
+      });
+      if (docRef.current?.id !== doc.id) return;
+      pdfScanRef.current = scan;
+
+      if (scan.total === 0) {
+        setMessage('这份 PDF 没有可导入的高亮、下划线或删除线标注。');
+        setPdfImportProgress('');
+        return;
+      }
+
+      setPdfImport({
+        total: scan.total,
+        annotatedPages: scan.annotatedPages,
+        byKind: scan.byKind,
+        pages: scan.pages.map((page) => ({ page: page.page, count: page.marks.length })),
+      });
+      setPdfImportProgress('');
+    } catch (error) {
+      setMessage(`检查 PDF 标注失败：${errorText(error)}`);
+      setPdfImportProgress('');
+    } finally {
+      setPdfImportBusy(false);
+    }
+  }, [doc, pdfImportBusy]);
+
+  const runPdfImport = useCallback(
+    async (scope: 'all' | 'current') => {
+      const scan = pdfScanRef.current;
+      const active = doc;
+      if (!scan || !active || pdfImportBusy) return;
+
+      const pages =
+        scope === 'all'
+          ? scan.pages
+          : scan.pages.filter((page) => page.page === currentPageRef.current);
+      if (pages.length === 0) {
+        setMessage('当前页没有可导入的 PDF 标注。');
+        return;
+      }
+
+      setPdfImportBusy(true);
+      setPdfImportProgress('正在读取页面文字…');
+      try {
+        const existing = new Set(
+          annotationsRef.current.map((annotation) =>
+            annotationKey(annotation.page, annotation.anchor.quote),
+          ),
+        );
+        const { drafts, skipped } = await buildImportedAnnotations(
+          active.pdf,
+          pages,
+          existing,
+          (done, total) => setPdfImportProgress(`正在整理 ${done}/${total} 页…`),
+        );
+        if (docRef.current?.id !== active.id) return;
+
+        if (drafts.length === 0) {
+          setMessage(
+            skipped > 0
+              ? `没有新的标注可导入（跳过 ${skipped} 条重复或无法定位）。`
+              : '没有新的标注可导入。',
+          );
+          dismissPdfImport();
+          return;
+        }
+
+        const created = draftsToAnnotations(drafts);
+        setPdfImportProgress(`正在保存 ${created.length} 条标注…`);
+        beginSave();
+        try {
+          if (isTauri()) await upsertAnnotations(active.id, created);
+        } finally {
+          endSave();
+        }
+
+        commit([...annotationsRef.current, ...created]);
+        setFilterColor(null);
+        setFilterKind(null);
+        setPdfImport(null);
+        setPdfImportProgress('');
+        setMessage(
+          `已导入 ${created.length} 条 PDF 标注${
+            skipped > 0 ? `，跳过 ${skipped} 条重复或无法定位` : ''
+          }。`,
+        );
+      } catch (error) {
+        setMessage(`导入 PDF 标注失败：${errorText(error)}`);
+        dismissPdfImport();
+      } finally {
+        setPdfImportBusy(false);
+      }
+    },
+    [beginSave, commit, dismissPdfImport, doc, endSave, pdfImportBusy],
+  );
+
   const saveCard = useCallback(
     async (draft: CardDraft) => {
       const editing = cardEditing;
@@ -1955,6 +2096,16 @@ export default function App() {
               <span className="sidebar-progress">
                 {currentPage + 1} / {doc.pageCount}
               </span>
+              <button
+                type="button"
+                className="ai-head-button import-head-button"
+                title="导入 PDF 内置的高亮、下划线与删除线"
+                disabled={pdfImportBusy}
+                onClick={() => void startPdfImport()}
+              >
+                <IconDownload size={12} />
+                导入 PDF
+              </button>
               {desktop && (
                 <button
                   type="button"
@@ -1967,6 +2118,54 @@ export default function App() {
                 </button>
               )}
             </div>
+
+            {(pdfImport || pdfImportProgress) && (
+              <div className="pdf-import-banner">
+                {pdfImportProgress ? (
+                  <p>{pdfImportProgress}</p>
+                ) : pdfImport ? (
+                  <>
+                    <p>
+                      PDF 自带 <strong>{pdfImport.total}</strong> 条标注（
+                      {pdfImport.byKind.highlight} 高亮
+                      {pdfImport.byKind.underline > 0
+                        ? ` · ${pdfImport.byKind.underline} 下划线`
+                        : ''}
+                      {pdfImport.byKind.strikethrough > 0
+                        ? ` · ${pdfImport.byKind.strikethrough} 删除线`
+                        : ''}
+                      ，共 {pdfImport.annotatedPages} 页）。已有相同文字的标注会跳过。
+                    </p>
+                    <div className="pdf-import-actions">
+                      <button
+                        type="button"
+                        className="primary"
+                        disabled={pdfImportBusy}
+                        onClick={() => void runPdfImport('all')}
+                      >
+                        全部导入
+                      </button>
+                      <button
+                        type="button"
+                        className="ghost"
+                        disabled={pdfImportBusy || pdfImportCurrent === 0}
+                        onClick={() => void runPdfImport('current')}
+                      >
+                        仅本页 {pdfImportCurrent} 条
+                      </button>
+                      <button
+                        type="button"
+                        className="ghost"
+                        disabled={pdfImportBusy}
+                        onClick={dismissPdfImport}
+                      >
+                        忽略
+                      </button>
+                    </div>
+                  </>
+                ) : null}
+              </div>
+            )}
 
             {visible.length > 0 && (
               <div className="sidebar-filters">
@@ -2021,6 +2220,7 @@ export default function App() {
             {visible.length === 0 ? (
               <p className="sidebar-hint">
                 选中正文即可高亮；点浮动栏里的「批注」写下你的想法。
+                PDF 文件自带的高亮可用右上角「导入 PDF」收进来；
                 所有标注会在刷新、缩放后回到原来的位置。
               </p>
             ) : filtered.length === 0 ? (

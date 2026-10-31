@@ -110,6 +110,19 @@ fn upsert_annotation(app: AppHandle, doc_id: String, annotation: Annotation) -> 
     library::upsert_annotation(&app, &doc_id, annotation)
 }
 
+#[tauri::command]
+async fn upsert_annotations(
+    app: AppHandle,
+    doc_id: String,
+    annotations: Vec<Annotation>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        library::upsert_annotations(&app, &doc_id, &annotations)
+    })
+    .await
+    .map_err(|error| format!("导入标注任务失败：{error}"))?
+}
+
 #[tauri::command(async)]
 fn delete_annotation(app: AppHandle, doc_id: String, id: String) -> Result<(), String> {
     library::delete_annotation(&app, &doc_id, &id)
@@ -405,6 +418,7 @@ fn main() {
             export_markdown,
             list_documents,
             upsert_annotation,
+            upsert_annotations,
             delete_annotation,
             list_cards,
             create_card,
