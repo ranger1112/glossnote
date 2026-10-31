@@ -135,6 +135,37 @@ test('撤销与重做标注操作', async ({ page }) => {
   await expect(page.locator('.annotation-card')).toHaveCount(1);
 });
 
+test('已标注文字悬停快捷工具，取消选择后浮动工具收起', async ({ page }) => {
+  await page.goto('/?sample');
+  await expect(
+    page.locator('.pdf-page').first().locator('.text-layer span').first(),
+  ).toBeVisible({ timeout: 30_000 });
+
+  await selectSpans(page, 1, 4);
+  await page.locator('.selection-toolbar .swatch.yellow').click();
+  const highlight = page.locator('.highlight').first();
+  await expect(highlight).toBeVisible();
+
+  // 悬停已有标注：出现换色、批注与删除入口。
+  const box = await highlight.boundingBox();
+  if (!box) throw new Error('高亮没有布局');
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  const hover = page.locator('.annotation-toolbar');
+  await expect(hover).toBeVisible();
+  await expect(hover).toContainText('批注');
+  await expect(hover).toContainText('删除');
+
+  // 点击工具条以外的地方立即收起。
+  await page.locator('.sidebar-head h2').click();
+  await expect(hover).toHaveCount(0);
+
+  // 选区工具同样在取消选择后收起。
+  await selectSpans(page, 7, 9);
+  await expect(page.locator('.selection-toolbar')).toBeVisible();
+  await page.mouse.click(5, 300);
+  await expect(page.locator('.selection-toolbar')).toHaveCount(0);
+});
+
 test('侧栏按页分组，并按颜色和类型筛选', async ({ page }) => {
   await page.goto('/?sample');
   await expect(

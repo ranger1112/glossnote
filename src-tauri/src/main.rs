@@ -278,6 +278,45 @@ fn organize_documents(
     library::organize_documents(&app, doc_ids, favorite, add_tags, remove_tags)
 }
 
+/// 默认窗口是 1280×860 逻辑像素；在 125%/150% 缩放的小屏笔记本上，
+/// 外框会高过屏幕工作区，底部（例如 AI 追问输入框）被任务栏裁掉。
+/// 启动时把窗口收缩并挪回工作区内，已有窗口能放下就不动。
+fn fit_window_to_work_area(window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    let Some(monitor) = window.current_monitor()? else {
+        return Ok(());
+    };
+    let work = *monitor.work_area();
+    let outer = window.outer_size()?;
+
+    if outer.width > work.size.width || outer.height > work.size.height {
+        let inner = window.inner_size()?;
+        let decoration_width = outer.width.saturating_sub(inner.width);
+        let decoration_height = outer.height.saturating_sub(inner.height);
+        let max_inner_width = work.size.width.saturating_sub(decoration_width);
+        let max_inner_height = work.size.height.saturating_sub(decoration_height);
+
+        window.set_size(tauri::PhysicalSize::new(
+            inner.width.min(max_inner_width),
+            inner.height.min(max_inner_height),
+        ))?;
+    }
+
+    // 收缩后窗口仍可能贴着屏幕外，按工作区四边再校正一次位置。
+    let outer = window.outer_size()?;
+    let position = window.outer_position()?;
+    let max_x =
+        (work.position.x + work.size.width as i32 - outer.width as i32).max(work.position.x);
+    let max_y =
+        (work.position.y + work.size.height as i32 - outer.height as i32).max(work.position.y);
+    let x = position.x.clamp(work.position.x, max_x);
+    let y = position.y.clamp(work.position.y, max_y);
+    if x != position.x || y != position.y {
+        window.set_position(tauri::PhysicalPosition::new(x, y))?;
+    }
+
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
         // 单实例要最先注册：第二个进程在碰数据库和 sidecar 之前就退出。
@@ -293,6 +332,12 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            if let Some(window) = app.get_webview_window("main") {
+                if let Err(error) = fit_window_to_work_area(&window) {
+                    eprintln!("调整窗口到屏幕工作区失败：{error}");
+                }
+            }
+
             let handle = app.handle().clone();
             let app_data = handle
                 .path()

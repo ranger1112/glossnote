@@ -23,6 +23,16 @@ interface PdfPageProps {
   focusId: string | null;
   /** context 是选区前后各一段正文，供 AI 解释使用；不写进锚点。 */
   onSelect: (anchor: Anchor, box: { x: number; y: number }, context: string) => void;
+  /** 鼠标停在已标注文字上时上报标注与工具条位置；移开时传 null。 */
+  onHover: (
+    annotation: Annotation | null,
+    box?: { x: number; y: number; below: boolean },
+    context?: string,
+  ) => void;
+  /** 当前正在显示快捷工具的标注 id；滚动收起后同一标注再移动鼠标能重新出现。 */
+  hoverId: string | null;
+  /** 鼠标仍在标注上时取消 App 侧的延迟收起。 */
+  onHoverKeepAlive: () => void;
   /** 页内查找的当前命中；token 变化时滚动到这一行。 */
   searchMatch?: { start: number; end: number; token: number };
 }
@@ -224,6 +234,9 @@ export const PdfPage = memo(function PdfPage({
   annotations,
   focusId,
   onSelect,
+  onHover,
+  hoverId,
+  onHoverKeepAlive,
   searchMatch,
 }: PdfPageProps) {
   const pageRef = useRef<HTMLDivElement>(null);
@@ -241,6 +254,10 @@ export const PdfPage = memo(function PdfPage({
   const searchRef = useRef(searchMatch);
   searchRef.current = searchMatch;
   const lastSearchToken = useRef(0);
+  // 悬停命中检测用归一化矩形，避免每个 mousemove 都读一遍 DOM 布局。
+  const hitRectsRef = useRef<{ id: string; rect: NormRect }[]>([]);
+  const contextsRef = useRef(new Map<string, string>());
+  const hoverIdRef = useRef<string | null>(null);
 
   const [size, setSize] = useState(baseSize);
   const [ready, setReady] = useState(false);
@@ -253,6 +270,8 @@ export const PdfPage = memo(function PdfPage({
     if (!pageElement || !layer || !model) return;
 
     layer.replaceChildren();
+    hitRectsRef.current = [];
+    contextsRef.current.clear();
     const pageRect = pageElement.getBoundingClientRect();
     if (pageRect.width === 0 || pageRect.height === 0) return;
 
@@ -263,6 +282,18 @@ export const PdfPage = memo(function PdfPage({
       const computed = rectsForRange(model, resolved.start, resolved.end, pageElement);
       // 旧标注存的是逐字形矩形，绘制前同样合并，避免历史高亮出现接缝。
       const rects = computed.length > 0 ? computed : mergeRects(annotation.anchor.rects);
+
+      // 悬停后 AI 解释复用页面正文里更宽的上下文，而不是锚点自带的 24 字。
+      const CONTEXT_CHARS = 400;
+      contextsRef.current.set(
+        annotation.id,
+        [
+          model.text.slice(Math.max(0, resolved.start - CONTEXT_CHARS), resolved.start).trim(),
+          model.text.slice(resolved.end, Math.min(model.text.length, resolved.end + CONTEXT_CHARS)).trim(),
+        ]
+          .filter(Boolean)
+          .join('\n…\n'),
+      );
 
       const lineKind =
         annotation.kind === 'underline' || annotation.kind === 'strikethrough';
@@ -286,6 +317,7 @@ export const PdfPage = memo(function PdfPage({
         element.style.width = `${rect.w * pageRect.width}px`;
         element.style.height = `${rect.h * pageRect.height}px`;
         layer.append(element);
+        hitRectsRef.current.push({ id: annotation.id, rect });
       }
     }
 
@@ -340,6 +372,9 @@ export const PdfPage = memo(function PdfPage({
       textElement.style.removeProperty('height');
       highlightRef.current?.replaceChildren();
       modelRef.current = null;
+      hitRectsRef.current = [];
+      contextsRef.current.clear();
+      hoverIdRef.current = null;
       // 只清 canvas 不够：页对象的操作符表和图像数据还在 pdf.js 的缓存里，
       // 一本 500 页的书从头翻到尾会一直涨内存。
       pageProxyRef.current?.cleanup();
@@ -430,8 +465,14 @@ export const PdfPage = memo(function PdfPage({
       textElement.style.removeProperty('height');
       highlightRef.current?.replaceChildren();
       modelRef.current = null;
+      hitRectsRef.current = [];
+      contextsRef.current.clear();
+      if (hoverIdRef.current !== null) {
+        hoverIdRef.current = null;
+        onHover(null);
+      }
     };
-  }, [active, pdf, pageIndex, scale, paintHighlights]);
+  }, [active, pdf, pageIndex, scale, paintHighlights, onHover]);
 
   // 组件卸载（关闭文档、切换文档）时同样释放页对象。
   useEffect(
@@ -506,6 +547,58 @@ export const PdfPage = memo(function PdfPage({
     }, 0);
   }, [pageIndex, onSelect]);
 
+  /** 鼠标悬停在标注上时上报位置；只在命中的标注变化时通知，避免每帧触发 React。 */
+  const handleMouseMove = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      if (event.buttons !== 0) return;
+      const pageElement = pageRef.current;
+      if (!pageElement) return;
+
+      const pageRect = pageElement.getBoundingClientRect();
+      if (pageRect.width === 0 || pageRect.height === 0) return;
+
+      const x = (event.clientX - pageRect.left) / pageRect.width;
+      const y = (event.clientY - pageRect.top) / pageRect.height;
+      const hit = hitRectsRef.current.find(
+        ({ rect }) => x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h,
+      );
+
+      if (hit) onHoverKeepAlive();
+      const id = hit?.id ?? null;
+      if (id === hoverIdRef.current && id === hoverId) return;
+      hoverIdRef.current = id;
+
+      if (!hit) {
+        onHover(null);
+        return;
+      }
+      const annotation = annotationsRef.current.find((item) => item.id === hit.id);
+      if (!annotation) {
+        hoverIdRef.current = null;
+        onHover(null);
+        return;
+      }
+
+      const top = pageRect.top + hit.rect.y * pageRect.height;
+      onHover(
+        annotation,
+        {
+          x: pageRect.left + (hit.rect.x + hit.rect.w / 2) * pageRect.width,
+          y: top,
+          below: top < 96,
+        },
+        contextsRef.current.get(annotation.id) ?? '',
+      );
+    },
+    [hoverId, onHover, onHoverKeepAlive],
+  );
+
+  const handleMouseLeave = useCallback(() => {
+    if (hoverIdRef.current === null) return;
+    hoverIdRef.current = null;
+    onHover(null);
+  }, [onHover]);
+
   return (
     <div
       className="pdf-page"
@@ -513,6 +606,8 @@ export const PdfPage = memo(function PdfPage({
       ref={pageRef}
       style={{ width: Math.round(size.width * scale), height: Math.round(size.height * scale) }}
       onMouseUp={handleMouseUp}
+      onMouseMove={handleMouseMove}
+      onMouseLeave={handleMouseLeave}
     >
       <canvas ref={canvasRef} className="pdf-canvas" />
       <div ref={highlightRef} className="highlight-layer" />

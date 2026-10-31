@@ -1952,6 +1952,24 @@ button.color-dot:hover {
   color: rgba(255, 255, 255, 0.7);
 }
 
+/* 悬停已标注文字时的快捷工具，沿用选区工具条的外观。 */
+.annotation-toolbar {
+  gap: 6px;
+  padding: 6px 7px;
+}
+
+.annotation-toolbar.below {
+  transform: translate(-50%, 10px);
+}
+
+.annotation-toolbar .toolbar-note.danger {
+  color: #ff9d9d;
+}
+
+.annotation-toolbar .toolbar-note.danger:hover {
+  background: rgba(220, 38, 38, 0.2);
+}
+
 /* =========================================================
    Welcome
    ========================================================= */

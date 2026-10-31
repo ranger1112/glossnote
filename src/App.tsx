@@ -73,6 +73,16 @@ interface ToolbarState {
   y: number;
 }
 
+interface HoverState {
+  annotation: Annotation;
+  /** 悬停标注所在页的前后文，供 AI 解释复用。 */
+  context: string;
+  x: number;
+  y: number;
+  /** 标注贴近阅读区顶部时，工具条改到文字下方展开。 */
+  below: boolean;
+}
+
 interface FindMatch {
   page: number;
   start: number;
@@ -240,6 +250,9 @@ export default function App() {
   const [zoomMode, setZoomMode] = useState<ZoomMode>('fit-width');
   const [baseSize, setBaseSize] = useState<{ width: number; height: number } | null>(null);
   const [toolbar, setToolbar] = useState<ToolbarState | null>(null);
+  const [hover, setHover] = useState<HoverState | null>(null);
+  const [hoverConfirmDelete, setHoverConfirmDelete] = useState(false);
+  const hoverHideTimer = useRef<number | null>(null);
   const [focusId, setFocusId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [message, setMessage] = useState('');
@@ -601,6 +614,7 @@ export default function App() {
           context,
         });
         setToolbar(null);
+        setHover(null);
         window.getSelection()?.removeAllRanges();
       } else {
         setAiPanel({ mode: 'qa' });
@@ -891,6 +905,8 @@ export default function App() {
     resetHistory();
     resetSaveState();
     setToolbar(null);
+    setHover(null);
+    setHoverConfirmDelete(false);
     setFocusId(null);
     setAiPanel(null);
     setMessage('');
@@ -1016,6 +1032,8 @@ export default function App() {
       resetHistory();
       resetSaveState();
       setToolbar(null);
+      setHover(null);
+      setHoverConfirmDelete(false);
       setFocusId(null);
       setEditingId(null);
       setCurrentPage(0);
@@ -1041,6 +1059,15 @@ export default function App() {
       scrollFrame.current = null;
       const viewer = viewerRef.current;
       if (!viewer || !docRef.current) return;
+
+      // 浮动工具固定在视口坐标上，滚动后若不移除就会悬在错误的位置。
+      setToolbar(null);
+      if (hoverHideTimer.current !== null) {
+        window.clearTimeout(hoverHideTimer.current);
+        hoverHideTimer.current = null;
+      }
+      setHover(null);
+      setHoverConfirmDelete(false);
 
       // 标注跳转后的第一次滚动来自代码本身，不要把页码改回页边界所在的上一页。
       if (pinnedPage.current !== null) {
@@ -1096,6 +1123,7 @@ export default function App() {
       const docId = docRef.current?.id;
       if (isTauri() && docId) void persistAnnotation(docId, annotation);
       setToolbar(null);
+      setHover(null);
       window.getSelection()?.removeAllRanges();
       if (withNote) setEditingId(annotation.id);
     },
@@ -1411,12 +1439,99 @@ export default function App() {
 
   const handleSelect = useCallback(
     (anchor: Anchor, box: { x: number; y: number }, context: string) => {
+      setHover(null);
       setToolbar({
         anchor,
         context,
         x: Math.min(Math.max(box.x, 90), window.innerWidth - 90),
         y: Math.max(box.y, 70),
       });
+    },
+    [],
+  );
+
+  /** 悬停标注时显示快捷工具；空值延迟收起，留出从文字移到工具条的时间。 */
+  const handleHover = useCallback(
+    (annotation: Annotation | null, box?: { x: number; y: number; below: boolean }, context = '') => {
+      if (hoverHideTimer.current !== null) {
+        window.clearTimeout(hoverHideTimer.current);
+        hoverHideTimer.current = null;
+      }
+
+      if (!annotation || !box) {
+        hoverHideTimer.current = window.setTimeout(() => {
+          hoverHideTimer.current = null;
+          setHover(null);
+          setHoverConfirmDelete(false);
+        }, 200);
+        return;
+      }
+
+      setHover({
+        annotation,
+        context,
+        x: Math.min(Math.max(box.x, 185), window.innerWidth - 185),
+        y: Math.max(box.y, 10),
+        below: box.below,
+      });
+      setHoverConfirmDelete(false);
+    },
+    [],
+  );
+
+  const keepHoverAlive = useCallback(() => {
+    if (hoverHideTimer.current !== null) {
+      window.clearTimeout(hoverHideTimer.current);
+      hoverHideTimer.current = null;
+    }
+  }, []);
+
+  const dismissHover = useCallback(() => {
+    if (hoverHideTimer.current !== null) {
+      window.clearTimeout(hoverHideTimer.current);
+      hoverHideTimer.current = null;
+    }
+    setHover(null);
+    setHoverConfirmDelete(false);
+  }, []);
+
+  // 取消选择、点空白处、选中别处文字或滚动时，浮动工具都应立刻收起。
+  useEffect(() => {
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Element | null;
+      if (target?.closest('.selection-toolbar, .annotation-toolbar')) return;
+      setToolbar(null);
+      dismissHover();
+    };
+    const onSelectionChange = () => {
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+        setToolbar(null);
+        return;
+      }
+      const viewer = viewerRef.current;
+      if (viewer && !viewer.contains(selection.getRangeAt(0).commonAncestorContainer)) {
+        setToolbar(null);
+      }
+    };
+
+    document.addEventListener('pointerdown', onPointerDown, true);
+    document.addEventListener('selectionchange', onSelectionChange);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown, true);
+      document.removeEventListener('selectionchange', onSelectionChange);
+    };
+  }, [dismissHover]);
+
+  useEffect(() => {
+    if (!hoverConfirmDelete) return;
+    const timer = window.setTimeout(() => setHoverConfirmDelete(false), 4000);
+    return () => window.clearTimeout(timer);
+  }, [hoverConfirmDelete]);
+
+  useEffect(
+    () => () => {
+      if (hoverHideTimer.current !== null) window.clearTimeout(hoverHideTimer.current);
     },
     [],
   );
@@ -1449,6 +1564,8 @@ export default function App() {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         setToolbar(null);
+        setHover(null);
+        setHoverConfirmDelete(false);
         setFindOpen(false);
         setHelpOpen(false);
         // AI 设置叠在设置面板上时，只关最上层，回到设置。
@@ -1804,6 +1921,9 @@ export default function App() {
                   annotations={byPage.get(index) ?? EMPTY}
                   focusId={focusId}
                   onSelect={handleSelect}
+                  onHover={handleHover}
+                  hoverId={hover?.annotation.id ?? null}
+                  onHoverKeepAlive={keepHoverAlive}
                   searchMatch={
                     searchTarget?.page === index
                       ? {
@@ -2054,6 +2174,83 @@ export default function App() {
         </div>
       )}
 
+      {doc && hover && !toolbar && (
+        <div
+          className={`selection-toolbar annotation-toolbar${hover.below ? ' below' : ''}`}
+          style={{ left: hover.x, top: hover.y }}
+          data-hover-id={hover.annotation.id}
+          onMouseDown={(event) => event.preventDefault()}
+          onMouseEnter={() => {
+            if (hoverHideTimer.current !== null) {
+              window.clearTimeout(hoverHideTimer.current);
+              hoverHideTimer.current = null;
+            }
+          }}
+          onMouseLeave={() => handleHover(null)}
+        >
+          {COLORS.map((color) => (
+            <button
+              key={color.key}
+              type="button"
+              className={`swatch ${color.key}`}
+              title={`改为${color.label}`}
+              onClick={() => {
+                updateColor(doc.id, hover.annotation.id, color.key);
+                setHover((current) =>
+                  current && current.annotation.id === hover.annotation.id
+                    ? { ...current, annotation: { ...current.annotation, color: color.key } }
+                    : current,
+                );
+              }}
+            />
+          ))}
+          <span className="toolbar-sep" />
+          <button
+            type="button"
+            className="toolbar-note"
+            title="在右侧写批注"
+            onClick={() => {
+              setEditingId(hover.annotation.id);
+              dismissHover();
+            }}
+          >
+            批注
+          </button>
+          {desktop && (
+            <>
+              <span className="toolbar-sep" />
+              <button
+                type="button"
+                className="toolbar-note"
+                onClick={() => {
+                  dismissHover();
+                  openAssistant('explain', hover.annotation.anchor, hover.context);
+                }}
+              >
+                <IconSparkles size={13} />
+                AI 解释
+              </button>
+            </>
+          )}
+          <span className="toolbar-sep" />
+          <button
+            type="button"
+            className={`toolbar-note ${hoverConfirmDelete ? 'danger' : ''}`}
+            title={hoverConfirmDelete ? '再点一次删除这条标注' : '删除标注'}
+            onClick={() => {
+              if (!hoverConfirmDelete) {
+                setHoverConfirmDelete(true);
+                return;
+              }
+              removeAnnotation(doc.id, hover.annotation.id);
+              dismissHover();
+            }}
+          >
+            {hoverConfirmDelete ? '确认删除' : '删除'}
+          </button>
+        </div>
+      )}
+
       {doc && aiPanel && (
         <AiPanel
           key={`${doc.id}:${aiPanel.mode}:${aiPanel.mode === 'explain' ? aiPanel.page : ''}`}
@@ -2177,6 +2374,7 @@ function AnnotationCard({
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [tagDraft, setTagDraft] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const articleRef = useRef<HTMLElement>(null);
   const draftRef = useRef(annotation.body);
   const savedRef = useRef(annotation.body);
   const timerRef = useRef<number | null>(null);
@@ -2190,7 +2388,9 @@ function AnnotationCard({
   }, [annotation.body]);
 
   useEffect(() => {
-    if (editing) textareaRef.current?.focus();
+    if (!editing) return;
+    articleRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    textareaRef.current?.focus();
   }, [editing]);
 
   // 删除标注会同步墓碑到 sidecar，先让用户点第二次确认；4 秒内没点就收回。
@@ -2239,7 +2439,7 @@ function AnnotationCard({
   };
 
   return (
-    <article className="annotation-card" onClick={onJump}>
+    <article ref={articleRef} className="annotation-card" onClick={onJump}>
       <header className="annotation-head">
         <span className="annotation-color">
           <button
