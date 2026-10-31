@@ -11,7 +11,7 @@ mod state;
 
 use crate::{
     models::{
-        AiAnswer, AiSettingsInput, AiSettingsView, Annotation, CardView, Document,
+        AiAnswer, AiSettingsInput, AiSettingsView, Annotation, CardView, ChatTurn, Document,
         DocumentMetaPatch, ImportResult, PageTextInput, ScanReport, SearchHit,
     },
     state::AppState,
@@ -202,6 +202,21 @@ async fn ai_answer(app: AppHandle, doc_id: String, question: String) -> Result<A
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn ai_followup(
+    app: AppHandle,
+    doc_id: String,
+    mode: String,
+    page: Option<u32>,
+    quote: String,
+    context: String,
+    question: String,
+    history: Vec<ChatTurn>,
+) -> Result<AiAnswer, String> {
+    ai::followup(&app, &doc_id, mode, page, quote, context, question, history).await
+}
+
+#[tauri::command]
 async fn ai_summarize(
     app: AppHandle,
     doc_id: String,
@@ -358,6 +373,7 @@ fn main() {
             document_index_status,
             ai_explain,
             ai_answer,
+            ai_followup,
             ai_summarize,
             update_document_meta,
             library_root,

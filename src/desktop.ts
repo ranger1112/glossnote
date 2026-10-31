@@ -5,6 +5,7 @@ import type {
   AiSettingsView,
   Annotation,
   CardView,
+  ChatTurn,
   DocumentMeta,
   ImportResult,
   PageTextInput,
@@ -179,6 +180,19 @@ export function aiExplain(
 
 export function aiAnswer(docId: string, question: string): Promise<AiAnswer> {
   return invoke('ai_answer', { docId, question });
+}
+
+/** 追问：带上最近几轮对话；解释模式继续沿用选段作为资料。 */
+export function aiFollowup(
+  docId: string,
+  mode: 'explain' | 'qa',
+  page: number | null,
+  quote: string,
+  context: string,
+  question: string,
+  history: ChatTurn[],
+): Promise<AiAnswer> {
+  return invoke('ai_followup', { docId, mode, page, quote, context, question, history });
 }
 
 export function aiSummarize(docId: string, annotationsOnly: boolean): Promise<AiAnswer> {

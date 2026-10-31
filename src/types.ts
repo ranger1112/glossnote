@@ -40,6 +40,11 @@ export interface DocumentMeta {
   annotationCount: number;
 }
 
+export interface ChatTurn {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
 export interface SearchHit {
   annotationId: string;
   docId: string;

@@ -1,15 +1,17 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import {
   aiAnswer,
   aiExplain,
+  aiFollowup,
   aiSummarize,
   documentIndexStatus,
   indexDocumentText,
 } from './desktop';
 import { extractDocumentText } from './pdfText';
 import { errorText } from './errors';
-import type { AiAnswer } from './types';
+import { Markdown } from './Markdown';
+import type { AiAnswer, ChatTurn } from './types';
 
 type PanelMode = 'qa' | 'explain';
 
@@ -32,6 +34,12 @@ interface AiPanelProps {
   onMessage: (message: string) => void;
 }
 
+interface Turn {
+  role: 'user' | 'assistant';
+  text: string;
+  answer?: AiAnswer;
+}
+
 export function AiPanel({
   docId,
   docName,
@@ -44,14 +52,16 @@ export function AiPanel({
   onOpenSettings,
   onMessage,
 }: AiPanelProps) {
-  const [answer, setAnswer] = useState<AiAnswer | null>(null);
+  const [turns, setTurns] = useState<Turn[]>([]);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [question, setQuestion] = useState('');
+  const [pending, setPending] = useState('');
   const [indexed, setIndexed] = useState(false);
   const [indexing, setIndexing] = useState(false);
   const [progress, setProgress] = useState('');
   const [chunkCount, setChunkCount] = useState(0);
+  const bodyRef = useRef<HTMLDivElement>(null);
 
   const explainPage = explain?.page;
   const explainQuote = explain?.quote;
@@ -61,13 +71,17 @@ export function AiPanel({
     if (!ready) return;
 
     let cancelled = false;
+    setTurns([]);
+    setError('');
+    setQuestion('');
+    setPending('');
+
     if (mode === 'explain' && explainPage !== undefined && explainQuote !== undefined) {
       setBusy(true);
-      setError('');
-      setAnswer(null);
       aiExplain(docId, explainPage, explainQuote, explainContext ?? '')
         .then((result) => {
-          if (!cancelled) setAnswer(result);
+          if (cancelled) return;
+          setTurns([{ role: 'assistant', text: result.text, answer: result }]);
         })
         .catch((cause) => {
           if (!cancelled) setError(errorText(cause));
@@ -76,6 +90,7 @@ export function AiPanel({
           if (!cancelled) setBusy(false);
         });
     } else {
+      setBusy(false);
       documentIndexStatus(docId)
         .then((value) => {
           if (!cancelled) setIndexed(value);
@@ -87,6 +102,12 @@ export function AiPanel({
       cancelled = true;
     };
   }, [docId, mode, ready, explainPage, explainQuote, explainContext]);
+
+  // 新消息或等待状态变化时滚到底部。
+  useEffect(() => {
+    const body = bodyRef.current;
+    if (body) body.scrollTop = body.scrollHeight;
+  }, [turns.length, busy]);
 
   const handleIndex = useCallback(async () => {
     setIndexing(true);
@@ -111,29 +132,95 @@ export function AiPanel({
     }
   }, [docId, onMessage, pdf]);
 
-  const run = async (kind: 'qa' | 'summary-full' | 'summary-annotations') => {
-    if (busy) return;
-    if (kind === 'qa' && !question.trim()) return;
-    if (kind === 'summary-full' && !indexed) {
-      setError('请先提取全文，再进行全文总结。');
-      return;
-    }
+  const ask = useCallback(
+    async (value: string) => {
+      const text = value.trim();
+      if (!text || busy || !ready) return;
 
-    setBusy(true);
-    setError('');
-    setAnswer(null);
-    try {
-      const result =
-        kind === 'qa'
-          ? await aiAnswer(docId, question.trim())
-          : await aiSummarize(docId, kind === 'summary-annotations');
-      setAnswer(result);
-    } catch (cause) {
-      setError(errorText(cause));
-    } finally {
-      setBusy(false);
-    }
-  };
+      const history: ChatTurn[] = turns.map((turn) => ({
+        role: turn.role,
+        content: turn.text,
+      }));
+
+      setBusy(true);
+      setError('');
+      setPending(text);
+      setQuestion('');
+      try {
+        const result =
+          mode === 'qa' && turns.length === 0
+            ? await aiAnswer(docId, text)
+            : await aiFollowup(
+                docId,
+                mode,
+                mode === 'explain' ? (explainPage ?? null) : null,
+                mode === 'explain' ? (explainQuote ?? '') : '',
+                mode === 'explain' ? (explainContext ?? '') : '',
+                text,
+                history,
+              );
+        setTurns((current) => [
+          ...current,
+          { role: 'user', text },
+          { role: 'assistant', text: result.text, answer: result },
+        ]);
+      } catch (cause) {
+        setError(errorText(cause));
+        // 失败时把问题放回输入框，方便修改后重试。
+        setQuestion(text);
+      } finally {
+        setBusy(false);
+        setPending('');
+      }
+    },
+    [busy, docId, explainContext, explainPage, explainQuote, mode, ready, turns],
+  );
+
+  const summarize = useCallback(
+    async (annotationsOnly: boolean) => {
+      if (busy) return;
+      if (!annotationsOnly && !indexed) {
+        setError('请先提取全文，再进行全文总结。');
+        return;
+      }
+
+      const label = annotationsOnly ? '总结我的标注' : '总结全文';
+      setBusy(true);
+      setError('');
+      setPending(label);
+      try {
+        const result = await aiSummarize(docId, annotationsOnly);
+        setTurns((current) => [
+          ...current,
+          { role: 'user', text: label },
+          { role: 'assistant', text: result.text, answer: result },
+        ]);
+      } catch (cause) {
+        setError(errorText(cause));
+      } finally {
+        setBusy(false);
+        setPending('');
+      }
+    },
+    [busy, docId, indexed],
+  );
+
+  const lastAnswer = [...turns].reverse().find((turn) => turn.answer)?.answer;
+
+  const thread = turns.map((turn, index) =>
+    turn.role === 'user' ? (
+      <div className="ai-turn-user" key={index}>
+        {turn.text}
+      </div>
+    ) : (
+      <div className="ai-turn-assistant" key={index}>
+        <div className="ai-answer-text">
+          <Markdown text={turn.text} />
+        </div>
+        {turn.answer && <Sources answer={turn.answer} onJumpPage={onJumpPage} />}
+      </div>
+    ),
+  );
 
   return (
     <aside className="ai-panel">
@@ -150,7 +237,7 @@ export function AiPanel({
         </button>
       </header>
 
-      <div className="ai-panel-body">
+      <div className="ai-panel-body" ref={bodyRef}>
         {!ready ? (
           <div className="ai-disabled">
             <p>AI 尚未启用，或还没有填写 API Key。</p>
@@ -161,15 +248,13 @@ export function AiPanel({
         ) : mode === 'explain' ? (
           <>
             {explain?.quote && <blockquote className="ai-quote">{explain.quote}</blockquote>}
-            {busy && <p className="ai-loading">正在解释…</p>}
-            {error && <p className="ai-error">{error}</p>}
-            {answer && (
-              <>
-                <div className="ai-answer-text">{answer.text}</div>
-                <Sources answer={answer} onJumpPage={onJumpPage} />
-                <p className="ai-model">模型：{answer.model}</p>
-              </>
+            {thread}
+            {busy && (
+              <p className="ai-loading">
+                {pending ? '回答中…' : '正在解释…'}
+              </p>
             )}
+            {error && <p className="ai-error">{error}</p>}
           </>
         ) : (
           <>
@@ -198,7 +283,7 @@ export function AiPanel({
                 type="button"
                 className="ghost"
                 disabled={busy || !indexed}
-                onClick={() => void run('summary-full')}
+                onClick={() => void summarize(false)}
               >
                 总结全文
               </button>
@@ -206,50 +291,57 @@ export function AiPanel({
                 type="button"
                 className="ghost"
                 disabled={busy}
-                onClick={() => void run('summary-annotations')}
+                onClick={() => void summarize(true)}
               >
                 总结我的标注
               </button>
             </div>
 
-            <div className="ai-ask">
-              <textarea
-                value={question}
-                rows={3}
-                placeholder="就这份文档提问，例如：作者的核心论点是什么？"
-                onChange={(event) => setQuestion(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-                    event.preventDefault();
-                    void run('qa');
-                  }
-                }}
-              />
-              <button
-                type="button"
-                className="primary"
-                disabled={busy || !question.trim()}
-                onClick={() => void run('qa')}
-              >
-                {busy ? '回答中…' : '提问'}
-              </button>
-            </div>
-
-            {error && <p className="ai-error">{error}</p>}
-
-            {answer && (
-              <div className="ai-answer">
-                <div className="ai-answer-text">{answer.text}</div>
-                <Sources answer={answer} onJumpPage={onJumpPage} />
-                <p className="ai-model">模型：{answer.model}</p>
-              </div>
+            {thread}
+            {busy && (
+              <p className="ai-loading">
+                {pending === '总结全文' || pending === '总结我的标注'
+                  ? '正在总结…'
+                  : '回答中…'}
+              </p>
             )}
+            {error && <p className="ai-error">{error}</p>}
           </>
         )}
+
+        {lastAnswer && <p className="ai-model">模型：{lastAnswer.model}</p>}
       </div>
 
       <footer className="ai-panel-foot">
-        只会发送本次问题、选中的文字与检索到的片段；不会上传整座书库。
+        {ready && (
+          <div className="ai-composer">
+            <textarea
+              rows={2}
+              value={question}
+              placeholder={
+                mode === 'explain' ? '继续追问这段文字…' : '接着问这份文档…（Ctrl+Enter 发送）'
+              }
+              onChange={(event) => setQuestion(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                  event.preventDefault();
+                  void ask(question);
+                }
+              }}
+            />
+            <button
+              type="button"
+              className="primary"
+              disabled={busy || !question.trim()}
+              onClick={() => void ask(question)}
+            >
+              {busy ? '回答中…' : '发送'}
+            </button>
+          </div>
+        )}
+        <p className="ai-panel-note">
+          只会发送本次问题、选中的文字与检索到的片段；不会上传整座书库。
+        </p>
       </footer>
     </aside>
   );

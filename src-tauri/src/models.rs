@@ -133,6 +133,14 @@ pub struct ScanReport {
     pub scanned_at: i64,
 }
 
+/// AI 面板里的一轮对话，用来把追问的上下文带回模型。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatTurn {
+    pub role: String,
+    pub content: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Card {

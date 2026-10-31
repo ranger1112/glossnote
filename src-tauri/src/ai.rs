@@ -3,7 +3,9 @@
 
 use crate::{
     db,
-    models::{AiAnswer, AiCitation, AiSettingsInput, AiSettingsView, Chunk, PageTextInput},
+    models::{
+        AiAnswer, AiCitation, AiSettingsInput, AiSettingsView, ChatTurn, Chunk, PageTextInput,
+    },
     settings::{self, AiSettings},
     state::AppState,
 };
@@ -303,6 +305,29 @@ fn citation_for(index: usize, source: &Source) -> AiCitation {
     }
 }
 
+/// 追问时把最近几轮对话拼进提示词；只保留短上下文，避免把整段历史都发出去。
+fn history_block(history: &[ChatTurn]) -> String {
+    let start = history.len().saturating_sub(8);
+    let mut block = String::new();
+    for turn in &history[start..] {
+        let content = turn.content.trim();
+        if content.is_empty() {
+            continue;
+        }
+        let label = if turn.role == "assistant" {
+            "助手"
+        } else {
+            "用户"
+        };
+        block.push_str(&format!("{label}：{}\n", truncate(content, 2_000)));
+    }
+    if block.is_empty() {
+        String::new()
+    } else {
+        format!("\n\n之前的对话（保持上下文连贯，不要重复已经说过的内容）：\n{block}")
+    }
+}
+
 fn build_prompt(question: &str, sources: &[Source]) -> String {
     let mut prompt = String::from("资料：\n");
     for (index, source) in sources.iter().enumerate() {
@@ -496,6 +521,89 @@ pub async fn explain(
         build_prompt("解释这段话", &sources)
     );
     let text = complete(&ai, SYSTEM_PROMPT, &prompt).await?;
+    Ok(AiAnswer {
+        text,
+        citations,
+        model: ai.model,
+    })
+}
+
+/// 追问：沿用选段（解释模式）或重新检索（问答模式）的资料，并带上最近的对话。
+#[allow(clippy::too_many_arguments)]
+pub async fn followup(
+    app: &AppHandle,
+    doc_id: &str,
+    mode: String,
+    page: Option<u32>,
+    quote: String,
+    context: String,
+    question: String,
+    history: Vec<ChatTurn>,
+) -> Result<AiAnswer, String> {
+    let question = question.trim().to_string();
+    if question.is_empty() {
+        return Err("请先输入问题".to_string());
+    }
+
+    let ai = settings::load(app).ai;
+    let (sources, max_chunks, max_annotations) = if mode == "explain" {
+        let page = page.ok_or_else(|| "缺少选段页码".to_string())?;
+        let quote = quote.trim();
+        if quote.is_empty() {
+            return Err("没有选中的文字".to_string());
+        }
+        let title = {
+            let state = app.state::<AppState>();
+            let conn = state
+                .db
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            doc_name(&conn, doc_id)?
+        };
+        let source = Source {
+            page: Some(page),
+            kind: "page".to_string(),
+            label: format!("《{title}》第 {} 页", page + 1),
+            body: format!(
+                "选段：\n{quote}\n\n上下文：\n{}",
+                truncate(context.trim(), 2400)
+            ),
+            annotation_id: None,
+            score: 1.0,
+        };
+        (vec![source], 1, 0)
+    } else {
+        let sources = {
+            let state = app.state::<AppState>();
+            let conn = state
+                .db
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            collect_sources(&conn, doc_id, &question)?
+        };
+        (sources, 6, 4)
+    };
+
+    if sources.is_empty() {
+        return Err("这份文档还没有可用的文字或标注。请先提取全文，或添加标注。".to_string());
+    }
+
+    let sources = select_sources(sources, max_chunks, max_annotations);
+    if sources.is_empty() {
+        return Err("这份文档还没有可用的文字或标注。请先提取全文，或添加标注。".to_string());
+    }
+    let citations = sources
+        .iter()
+        .enumerate()
+        .map(|(index, source)| citation_for(index + 1, source))
+        .collect::<Vec<_>>();
+    let prompt = format!(
+        "{}{}",
+        build_prompt(&question, &sources),
+        history_block(&history)
+    );
+    let text = complete(&ai, SYSTEM_PROMPT, &prompt).await?;
+
     Ok(AiAnswer {
         text,
         citations,
@@ -715,6 +823,24 @@ mod tests {
         let chunks = chunk_text("第一段\n第二段");
         assert_eq!(chunks, vec!["第一段\n第二段"]);
         assert!(chunk_text("   ").is_empty());
+    }
+
+    #[test]
+    fn history_block_keeps_only_recent_turns() {
+        let history: Vec<ChatTurn> = (0..10)
+            .map(|index| ChatTurn {
+                role: if index % 2 == 0 { "user" } else { "assistant" }.to_string(),
+                content: format!("第{index}轮"),
+            })
+            .collect();
+
+        let block = history_block(&history);
+        assert!(block.contains("用户：第2轮"));
+        assert!(block.contains("助手：第3轮"));
+        assert!(block.contains("第9轮"));
+        assert!(!block.contains("第0轮"));
+        assert!(!block.contains("第1轮"));
+        assert!(history_block(&[]).is_empty());
     }
 
     #[test]
