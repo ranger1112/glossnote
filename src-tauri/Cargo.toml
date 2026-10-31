@@ -1,6 +1,6 @@
 [package]
 name = "glossnote"
-version = "0.2.0"
+version = "0.2.1"
 description = "GlossNote — 在文档上批注，把标注沉淀成知识"
 authors = ["ranger"]
 license = "Apache-2.0"

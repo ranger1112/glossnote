@@ -1,7 +1,7 @@
 {
   "name": "glossnote",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.2.1",
   "license": "Apache-2.0",
   "type": "module",
   "description": "GlossNote — 本地优先的 PDF 阅读与标注客户端。",
