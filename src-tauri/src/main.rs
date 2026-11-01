@@ -11,8 +11,9 @@ mod state;
 
 use crate::{
     models::{
-        AiAnswer, AiSettingsInput, AiSettingsView, Annotation, CardView, ChatTurn, Document,
-        DocumentMetaPatch, ImportResult, PageTextInput, ScanReport, SearchHit,
+        AiAnswer, AiSettingsInput, AiSettingsView, Annotation, CardView, ChatTurn, DeleteReport,
+        Document, DocumentMetaPatch, ImportResult, PageTextInput, ScanReport, SearchHit,
+        SmartCollection,
     },
     state::AppState,
 };
@@ -335,8 +336,9 @@ fn organize_document(
     doc_id: String,
     favorite: Option<bool>,
     tags: Option<Vec<String>>,
+    folder: Option<String>,
 ) -> Result<Document, String> {
-    library::organize_document(&app, &doc_id, favorite, tags)
+    library::organize_document(&app, &doc_id, favorite, tags, folder)
 }
 
 #[tauri::command(async)]
@@ -346,8 +348,42 @@ fn organize_documents(
     favorite: Option<bool>,
     add_tags: Vec<String>,
     remove_tags: Vec<String>,
+    folder: Option<String>,
 ) -> Result<Vec<Document>, String> {
-    library::organize_documents(&app, doc_ids, favorite, add_tags, remove_tags)
+    library::organize_documents(&app, doc_ids, favorite, add_tags, remove_tags, folder)
+}
+
+#[tauri::command(async)]
+fn delete_documents(app: AppHandle, doc_ids: Vec<String>) -> Result<DeleteReport, String> {
+    library::delete_documents(&app, doc_ids)
+}
+
+#[tauri::command(async)]
+fn reorder_documents(app: AppHandle, doc_ids: Vec<String>) -> Result<Vec<Document>, String> {
+    library::reorder_documents(&app, doc_ids)
+}
+
+#[tauri::command(async)]
+fn list_folders(app: AppHandle) -> Vec<String> {
+    library::list_folders(&app)
+}
+
+#[tauri::command(async)]
+fn save_folders(app: AppHandle, folders: Vec<String>) -> Result<Vec<String>, String> {
+    library::save_folders(&app, folders)
+}
+
+#[tauri::command(async)]
+fn list_smart_collections(app: AppHandle) -> Vec<SmartCollection> {
+    library::list_smart_collections(&app)
+}
+
+#[tauri::command(async)]
+fn save_smart_collections(
+    app: AppHandle,
+    collections: Vec<SmartCollection>,
+) -> Result<Vec<SmartCollection>, String> {
+    library::save_smart_collections(&app, collections)
 }
 
 /// 默认窗口是 1280×860 逻辑像素；在 125%/150% 缩放的小屏笔记本上，
@@ -503,6 +539,12 @@ fn main() {
             save_page_texts,
             organize_document,
             organize_documents,
+            delete_documents,
+            reorder_documents,
+            list_folders,
+            save_folders,
+            list_smart_collections,
+            save_smart_collections,
         ])
         .run(tauri::generate_context!())
         .expect("GlossNote 启动失败");

@@ -23,6 +23,8 @@ export interface Annotation {
   deleted?: boolean;
 }
 
+export type LibrarySort = 'recent' | 'added' | 'title' | 'annotations' | 'manual';
+
 export interface DocumentMeta {
   id: string;
   name: string;
@@ -37,7 +39,30 @@ export interface DocumentMeta {
   lastPage: number;
   favorite: boolean;
   tags: string[];
+  /** 虚拟文件夹；空字符串表示未分类。 */
+  folder: string;
+  /** 手动排序位置，只存在本机索引里。 */
+  position: number;
   annotationCount: number;
+}
+
+/** 智能收藏夹：保存一组筛选条件，点开时动态匹配文档。 */
+export interface SmartCollection {
+  id: string;
+  name: string;
+  favorite: boolean;
+  /** 空字符串表示不限标签。 */
+  tag: string;
+  /** null 表示不限文件夹；空字符串表示未分类。 */
+  folder: string | null;
+  sort: LibrarySort;
+}
+
+export interface DeleteReport {
+  removed: number;
+  trashedFiles: number;
+  missingFiles: number;
+  failed: string[];
 }
 
 export interface ChatTurn {

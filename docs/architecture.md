@@ -37,7 +37,7 @@ Rust 侧只做 WebView 做不了或做起来不划算的事：文件系统、哈
     └── conflicts/                    # 合并后的云盘冲突副本，保留原文
 ```
 
-- 用户可见的只有 `books/`，文件名保持可读。
+- 用户可见的只有 `books/`，文件名保持可读；虚拟文件夹只写在 sidecar 与索引里，不在磁盘上建目录。
 - 标注 sidecar 用内容哈希命名，放在隐藏目录：重命名、移动文件不会丢标注，顶层也不会被几百个 `.json` 填满。
 - 书库根目录可以由用户指到坚果云 / OneDrive / NAS 同步目录。
 - **sidecar 是可移植的真相源，SQLite 只是索引。** 删掉 `library.db` 后，扫描 `books/` + `.glossnote/annotations/` 必须能完整重建。
@@ -50,7 +50,7 @@ Rust 侧只做 WebView 做不了或做起来不划算的事：文件系统、哈
 
 启动时如果 `library.db` 打不开或已损坏，会把旧文件（连同 `-wal` / `-shm`）改名为 `library.db.broken-<时间戳>`，再从空库重建——索引是派生物，`books/` + sidecar 才是真相源。`settings.json` 解析失败同样会改名备份。两种情况都会通过 `startup_notice` 在界面上提示一次。应用启用单实例保护，重复启动会聚焦已有窗口，避免两个进程同时写同一个库和 sidecar。
 
-0.3 起启动时扫描 `books/` 与 sidecars：命中 path + size + mtime 缓存就跳过哈希，未命中才计算 SHA-256；标注按 `updatedAt`、收藏与文档标签按 `metaUpdatedAt` 合并进 DB，内容有变化时才回写修复（内容相同不碰文件，避免云盘把每次启动都当成一次修改）。删除 DB 后可完整重建。0.5 起扫描还负责识别云盘冲突副本、归档冲突文件，并报告合并结果。
+0.3 起启动时扫描 `books/` 与 sidecars：命中 path + size + mtime 缓存就跳过哈希，未命中才计算 SHA-256；标注按 `updatedAt`、收藏/文档标签/文件夹按 `metaUpdatedAt` 合并进 DB，内容有变化时才回写修复（内容相同不碰文件，避免云盘把每次启动都当成一次修改）。删除 DB 后可完整重建。0.5 起扫描还负责识别云盘冲突副本、归档冲突文件，并报告合并结果。
 
 ```sql
 documents(
@@ -61,7 +61,12 @@ documents(
   rel_path TEXT NOT NULL,     -- 相对书库的路径
   added_at INTEGER, last_opened_at INTEGER,
   last_page INTEGER DEFAULT 0,-- 0 基页码，本机阅读进度
-  cover TEXT DEFAULT ''       -- 缩略图相对路径
+  cover TEXT DEFAULT '',      -- 缩略图相对路径
+  favorite INTEGER DEFAULT 0,
+  tags TEXT DEFAULT '[]',     -- 文档标签 JSON
+  folder TEXT DEFAULT '',     -- 虚拟文件夹；空字符串 = 未分类
+  position INTEGER DEFAULT 0, -- 手动排序位置，仅本机
+  meta_updated_at INTEGER DEFAULT 0 -- 收藏/标签/文件夹的 LWW 时间戳
 );
 
 annotations(
@@ -111,7 +116,8 @@ page_texts(                        -- 页内查找的逐页原文缓存，派生
 
 约定：
 
-- 删除只写 `deleted = 1` 墓碑，不物理删除；同步、撤销、冲突合并都依赖它。
+- 标注与卡片的删除只写 `deleted = 1` 墓碑，不物理删除；同步、撤销、冲突合并都依赖它。整份文档的删除是例外：PDF 与 sidecar 进系统回收站，索引行、标注与派生缓存直接移除，来源卡片转为 `orphaned`。
+- `folder` 是虚拟文件夹，不改变 `rel_path`；`position` 是手动排序位置，只在本机索引里，删库后重排。
 - `doc_id` 是文件字节的 SHA-256，不是路径，也不是文件名。
 - 书库搜索走 `LIKE` 子串匹配（覆盖 quote、正文、标签、文档名与标题），先把中文搜索跑通。0.4 曾建过 FTS5 表但从未被查询，现已删除；需要全文排序时再按实际查询补索引。
 - `last_page` 是本机阅读进度，不写入 sidecar，也不参与跨设备合并。
@@ -177,8 +183,11 @@ page_texts(                        -- 页内查找的逐页原文缓存，派生
 - **搜索**：输入停顿 240ms 后调用 `search_annotations`，在引文（`json_extract(anchor,'$.quote')`）、`body`、`tags` JSON、文档名与标题上做 `LIKE` 子串匹配，最多返回 100 条，按更新时间倒序。不能直接匹配 `anchor` 整段 JSON——那会把坐标和 `pageHash` 也算进去，搜 `start` 或 `0.5` 会命中所有标注。结果点击后打开文档并滚到对应页。
 - **阅读进度**：滚动时按视口顶部命中页更新，700ms 防抖写 `last_page`；返回书库时再同步写一次，避免扫描读到旧值；打开文档时优先使用调用方传入的页码，其次使用 `last_page`。
 - **标签**：作为标注的 `tags` 数组存储，随标注写入 SQLite 与 sidecar；搜索命中会返回标签。
-- **文档整理**：收藏（`favorite`）与文档级标签（`tags`）存在 `documents` 表，并写进 sidecar 的 `favorite` / `tags` / `metaUpdatedAt`；扫描时按 `metaUpdatedAt` 做 LWW。标签只做去空白、去 `#`、去重、24 字与 20 个的上限，不建目录树，也不移动 `books/` 里的文件。
-- **排序与筛选**：书库列表由前端排序（最近阅读、添加时间、标题、标注数）并按收藏/标签过滤；多选后的收藏与标签增删由 `organize_documents` 一次持锁完成，避免逐文档往返。
+- **文档整理**：收藏（`favorite`）、文档级标签（`tags`）与虚拟文件夹（`folder`）存在 `documents` 表，并写进 sidecar 的 `favorite` / `tags` / `folder` / `metaUpdatedAt`；扫描时按 `metaUpdatedAt` 做 LWW。标签只做去空白、去 `#`、去重、24 字与 20 个的上限。
+- **虚拟文件夹**：`folder` 是一层扁平名字，空字符串表示未分类；PDF 仍平铺在 `books/`，不建物理目录、不移动文件。文件夹列表额外保存在 `settings.json`，空文件夹也能保留；文档实际归属以 SQLite/sidecar 为准，扫描时并入显示。重命名与删除文件夹会批量改写文档的 `folder` 并逐个回写 sidecar。
+- **批量删除**：选中文档后调用 `delete_documents`，PDF 与 sidecar 移到操作系统回收站（Windows 回收站），封面直接删除，SQLite 立即移除文档与标注；来源卡片标记 `orphaned`。文件进不了回收站时该文档保留并报告，避免书库里出现幽灵条目。文件已缺失时只清理索引。
+- **排序与筛选**：书库列表由前端排序（最近阅读、添加时间、标题、标注数、手动排序）并按收藏/标签/文件夹组合过滤；多选后的收藏、标签、文件夹移动由 `organize_documents` 一次持锁完成，避免逐文档往返。手动排序位置存在 `documents.position`，只在本机索引里，不写 sidecar；拖拽时按所有文档的新顺序整体重写位置。
+- **智能收藏夹**：保存「收藏 + 标签 + 文件夹 + 排序」这组筛选条件，存在 `settings.json` 的 `collections` 数组里，不复制文档，也不随书库同步；点开时动态匹配当前书库。
 - **导出**：`export_markdown(path, docId?)` 在 Rust 侧拼 Markdown 并原子落盘，前端只负责原生保存对话框。`export_annotated_pdf(doc_id, path)` 用 `lopdf` 把标注写成 PDF 原生对象：高亮/下划线/删除线带 QuadPoints 与 `/C` 颜色，批注正文非空时再加一个 Text 便签；始终另存为新文件，源 PDF 只读。
 - **深色模式**：`data-theme` 作用在 `<html>`，配色全部走 CSS 变量；偏好存 `localStorage`。
 
@@ -219,6 +228,7 @@ page_texts(                        -- 页内查找的逐页原文缓存，派生
 约束与边界：
 
 - 同步单位是 `annotation` 与 `card`，每条带 `updatedAt` 与 `deleted`；不做整文件覆盖。卡片跟随来源文档的 sidecar，跨文档移动尚未支持。
+- 文档级组织字段（`favorite` / `tags` / `folder`）作为一份元数据按 `metaUpdatedAt` 做 LWW；手动排序 `position` 与阅读进度 `last_page` 是本机状态，不参与同步。
 - **不上 CRDT。** 标注是准不可变的小记录，LWW 足够；只有出现“两人同时编辑同一段笔记正文”时才重新评估。
 - 冲突副本只保留原始 JSON，不提供逐字段 diff 或人工选择；同时间戳的冲突按路径顺序取舍。
 - 打开/导入单份文档时按文件名前缀只读该文档的 sidecar 与云盘冲突副本，不再遍历整个标注目录；被手工改名的 sidecar 仍会在全库扫描时合并。
