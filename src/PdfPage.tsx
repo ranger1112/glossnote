@@ -717,6 +717,8 @@ export const PdfPage = memo(function PdfPage({
     >
       <canvas ref={canvasRef} className="pdf-canvas" />
       <div ref={highlightRef} className="highlight-layer" />
+      {/* 选区放在页面内部，和标注高亮共用 multiply 混合组，避免全屏滤镜的重影。 */}
+      <div className="selection-layer" />
       <div ref={textRef} className="text-layer" />
       <span className="page-number">{pageIndex + 1}</span>
       {error && <span className="page-error">{error}</span>}

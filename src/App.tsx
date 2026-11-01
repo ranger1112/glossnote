@@ -418,7 +418,6 @@ export default function App() {
   const savingRef = useRef(0);
   const saveTimerRef = useRef<number | null>(null);
   const viewerRef = useRef<HTMLElement | null>(null);
-  const selectionOverlayRef = useRef<HTMLDivElement | null>(null);
   const currentPageRef = useRef(0);
   const scaleRef = useRef(scale);
   /** 缩放目标：连按时按目标累加，渲染等 140ms 空闲后只做一次。 */
@@ -1728,43 +1727,68 @@ export default function App() {
 
   /** 用圆角矩形自己画选区，替代浏览器默认的直角高亮。 */
   const paintSelectionOverlay = useCallback(() => {
-    const overlay = selectionOverlayRef.current;
-    if (!overlay) return;
     const viewer = viewerRef.current;
+    for (const layer of document.querySelectorAll<HTMLElement>('.selection-layer')) {
+      layer.replaceChildren();
+    }
     const selection = window.getSelection();
-    if (!viewer || !selection || selection.isCollapsed || selection.rangeCount === 0) {
-      overlay.replaceChildren();
-      return;
-    }
+    if (!viewer || !selection || selection.isCollapsed || selection.rangeCount === 0) return;
     const range = selection.getRangeAt(0);
-    if (!viewer.contains(range.commonAncestorContainer)) {
-      overlay.replaceChildren();
-      return;
-    }
+    if (!viewer.contains(range.commonAncestorContainer)) return;
 
     const view = viewer.getBoundingClientRect();
-    const boxes: SelectionBox[] = [];
+    const pages = Array.from(viewer.querySelectorAll<HTMLElement>('.pdf-page'));
+    const pageRects = new Map(pages.map((page) => [page, page.getBoundingClientRect()]));
+    const groups = new Map<HTMLElement, SelectionBox[]>();
+
     for (const rect of Array.from(range.getClientRects())) {
       const left = Math.max(rect.left, view.left);
       const top = Math.max(rect.top, view.top);
       const right = Math.min(rect.right, view.right);
       const bottom = Math.min(rect.bottom, view.bottom);
       if (right - left < 1 || bottom - top < 1) continue;
-      boxes.push({ left, top, right, bottom });
-    }
-    const merged = mergeSelectionRects(boxes);
 
-    const fragment = document.createDocumentFragment();
-    for (const box of merged) {
-      const element = document.createElement('div');
-      element.className = 'selection-rect';
-      element.style.left = `${box.left}px`;
-      element.style.top = `${box.top + 1}px`;
-      element.style.width = `${box.right - box.left}px`;
-      element.style.height = `${Math.max(2, box.bottom - box.top - 2)}px`;
-      fragment.append(element);
+      const centerX = (left + right) / 2;
+      const centerY = (top + bottom) / 2;
+      const page = pages.find((element) => {
+        const box = pageRects.get(element);
+        return box && centerX >= box.left && centerX <= box.right && centerY >= box.top && centerY <= box.bottom;
+      });
+      if (!page) continue;
+      const pageRect = pageRects.get(page);
+      if (!pageRect) continue;
+
+      const pageLeft = Math.max(left, pageRect.left);
+      const pageTop = Math.max(top, pageRect.top);
+      const pageRight = Math.min(right, pageRect.right);
+      const pageBottom = Math.min(bottom, pageRect.bottom);
+      if (pageRight - pageLeft < 1 || pageBottom - pageTop < 1) continue;
+
+      const boxes = groups.get(page) ?? [];
+      boxes.push({
+        left: pageLeft - pageRect.left,
+        top: pageTop - pageRect.top,
+        right: pageRight - pageRect.left,
+        bottom: pageBottom - pageRect.top,
+      });
+      groups.set(page, boxes);
     }
-    overlay.replaceChildren(fragment);
+
+    for (const [page, boxes] of groups) {
+      const layer = page.querySelector<HTMLElement>('.selection-layer');
+      if (!layer) continue;
+      const fragment = document.createDocumentFragment();
+      for (const box of mergeSelectionRects(boxes)) {
+        const element = document.createElement('div');
+        element.className = 'selection-rect';
+        element.style.left = `${box.left}px`;
+        element.style.top = `${box.top + 1}px`;
+        element.style.width = `${box.right - box.left}px`;
+        element.style.height = `${Math.max(2, box.bottom - box.top - 2)}px`;
+        fragment.append(element);
+      }
+      layer.replaceChildren(fragment);
+    }
   }, []);
 
   // 取消选择、点空白处、选中别处文字或滚动时，浮动工具都应立刻收起。
@@ -2695,8 +2719,6 @@ export default function App() {
           </div>
         </main>
       )}
-
-      <div className="selection-overlay" ref={selectionOverlayRef} aria-hidden="true" />
 
       {toolbar && (
         <div

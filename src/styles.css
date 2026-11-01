@@ -1444,24 +1444,27 @@ select {
   display: contents;
 }
 
-/* 选区由 selection-overlay 统一绘制，原生选区只保留可复制/可聚焦行为。 */
+/* 选区由页面内的 selection-layer 统一绘制，原生选区只保留可复制/可聚焦行为。
+   必须连文字颜色一起设为透明；否则 ::selection 的默认文字色会让文本层
+   重新画出一层可见文字，和 canvas 叠成重影。 */
 .text-layer ::selection {
   background: transparent;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
 }
 
-.selection-overlay {
-  position: fixed;
+.selection-layer {
+  position: absolute;
   inset: 0;
-  z-index: 8;
   pointer-events: none;
-  /* 和黄色高亮标注同一套 multiply，黄色压上去但文字仍透出来。 */
-  mix-blend-mode: multiply;
 }
 
 .selection-rect {
-  position: fixed;
+  position: absolute;
   border-radius: 3px;
   background: var(--highlight-yellow);
+  /* 在 .pdf-page 的隔离层里与 canvas 相乘，和黄色高亮标注一致。 */
+  mix-blend-mode: multiply;
 }
 
 .page-number {
