@@ -40,6 +40,8 @@ test('示例文档：划词高亮与下划线，刷新后复原', async ({ page 
   await expect(firstPage.locator('.text-layer span').first()).toBeVisible({ timeout: 30_000 });
 
   await selectSpans(page, 1, 4);
+  // 选区由自绘的圆角色带呈现。
+  await expect(page.locator('.selection-rect').first()).toBeVisible();
   await page.locator('.selection-toolbar .swatch.yellow').click();
   await expect(page.locator('.highlight').first()).toBeVisible();
   await expect(page.locator('.annotation-card')).toHaveCount(1);

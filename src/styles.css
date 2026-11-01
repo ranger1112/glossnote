@@ -29,6 +29,7 @@
   --accent-ink: #ffffff;
   --accent-soft: #eceefb;
   --accent-line: #cfd5f5;
+  --selection-bg: rgba(75, 92, 196, 0.2);
 
   --success: #2f7d5c;
   --success-soft: #e8f3ed;
@@ -89,6 +90,7 @@
   --accent-ink: #12131f;
   --accent-soft: #242a4a;
   --accent-line: #3a4370;
+  --selection-bg: rgba(147, 168, 255, 0.22);
 
   --success: #6ec99f;
   --success-soft: #172a21;
@@ -1443,8 +1445,22 @@ select {
   display: contents;
 }
 
+/* 选区由 selection-overlay 统一绘制，原生选区只保留可复制/可聚焦行为。 */
 .text-layer ::selection {
-  background: rgba(75, 92, 196, 0.26);
+  background: transparent;
+}
+
+.selection-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 8;
+  pointer-events: none;
+}
+
+.selection-rect {
+  position: fixed;
+  border-radius: 3px;
+  background: var(--selection-bg);
 }
 
 .page-number {

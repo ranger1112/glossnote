@@ -417,6 +417,7 @@ export default function App() {
   const savingRef = useRef(0);
   const saveTimerRef = useRef<number | null>(null);
   const viewerRef = useRef<HTMLElement | null>(null);
+  const selectionOverlayRef = useRef<HTMLDivElement | null>(null);
   const currentPageRef = useRef(0);
   const scaleRef = useRef(scale);
   /** 缩放目标：连按时按目标累加，渲染等 140ms 空闲后只做一次。 */
@@ -1724,6 +1725,81 @@ export default function App() {
     setHoverConfirmDelete(false);
   }, []);
 
+  /** 用圆角矩形自己画选区，替代浏览器默认的直角高亮。 */
+  const paintSelectionOverlay = useCallback(() => {
+    const overlay = selectionOverlayRef.current;
+    if (!overlay) return;
+    const viewer = viewerRef.current;
+    const selection = window.getSelection();
+    if (!viewer || !selection || selection.isCollapsed || selection.rangeCount === 0) {
+      overlay.replaceChildren();
+      return;
+    }
+    const range = selection.getRangeAt(0);
+    if (!viewer.contains(range.commonAncestorContainer)) {
+      overlay.replaceChildren();
+      return;
+    }
+
+    const view = viewer.getBoundingClientRect();
+    const boxes: Array<{ left: number; top: number; right: number; bottom: number }> = [];
+    for (const rect of Array.from(range.getClientRects())) {
+      const left = Math.max(rect.left, view.left);
+      const top = Math.max(rect.top, view.top);
+      const right = Math.min(rect.right, view.right);
+      const bottom = Math.min(rect.bottom, view.bottom);
+      if (right - left < 1 || bottom - top < 1) continue;
+      boxes.push({ left, top, right, bottom });
+    }
+    boxes.sort((a, b) => a.top - b.top || a.left - b.left);
+
+    // pdf.js 的文本项会给出高度不同的重叠矩形；先按行合并，再合并同一行的
+    // 水平区间，避免半透明矩形叠在一起出现深色接缝。
+    const lines: Array<{ top: number; bottom: number; boxes: typeof boxes }> = [];
+    for (const box of boxes) {
+      const line = lines.find((item) => {
+        const overlap = Math.min(item.bottom, box.bottom) - Math.max(item.top, box.top);
+        return overlap > Math.min(item.bottom - item.top, box.bottom - box.top) * 0.5;
+      });
+      if (line) {
+        line.top = Math.min(line.top, box.top);
+        line.bottom = Math.max(line.bottom, box.bottom);
+        line.boxes.push(box);
+      } else {
+        lines.push({ top: box.top, bottom: box.bottom, boxes: [box] });
+      }
+    }
+
+    const merged: typeof boxes = [];
+    for (const line of lines) {
+      const intervals = line.boxes
+        .map((box) => [box.left, box.right] as [number, number])
+        .sort((a, b) => a[0] - b[0]);
+      let current = intervals[0];
+      for (const interval of intervals.slice(1)) {
+        if (interval[0] <= current[1] + 3) {
+          current[1] = Math.max(current[1], interval[1]);
+        } else {
+          merged.push({ left: current[0], right: current[1], top: line.top, bottom: line.bottom });
+          current = interval;
+        }
+      }
+      merged.push({ left: current[0], right: current[1], top: line.top, bottom: line.bottom });
+    }
+
+    const fragment = document.createDocumentFragment();
+    for (const box of merged) {
+      const element = document.createElement('div');
+      element.className = 'selection-rect';
+      element.style.left = `${box.left}px`;
+      element.style.top = `${box.top + 1}px`;
+      element.style.width = `${box.right - box.left}px`;
+      element.style.height = `${Math.max(2, box.bottom - box.top - 2)}px`;
+      fragment.append(element);
+    }
+    overlay.replaceChildren(fragment);
+  }, []);
+
   // 取消选择、点空白处、选中别处文字或滚动时，浮动工具都应立刻收起。
   useEffect(() => {
     const onPointerDown = (event: PointerEvent) => {
@@ -1733,6 +1809,7 @@ export default function App() {
       dismissHover();
     };
     const onSelectionChange = () => {
+      paintSelectionOverlay();
       const selection = window.getSelection();
       if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
         setToolbar(null);
@@ -1750,7 +1827,30 @@ export default function App() {
       document.removeEventListener('pointerdown', onPointerDown, true);
       document.removeEventListener('selectionchange', onSelectionChange);
     };
-  }, [dismissHover]);
+  }, [dismissHover, paintSelectionOverlay]);
+
+  // 滚动和缩放时选区矩形会移动；节流到下一帧重画。
+  useEffect(() => {
+    let frame = 0;
+    const update = () => {
+      if (frame !== 0) cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        paintSelectionOverlay();
+      });
+    };
+    window.addEventListener('scroll', update, true);
+    window.addEventListener('resize', update);
+    return () => {
+      if (frame !== 0) cancelAnimationFrame(frame);
+      window.removeEventListener('scroll', update, true);
+      window.removeEventListener('resize', update);
+    };
+  }, [paintSelectionOverlay]);
+
+  useEffect(() => {
+    paintSelectionOverlay();
+  }, [doc, scale, paintSelectionOverlay]);
 
   useEffect(() => {
     if (!hoverConfirmDelete) return;
@@ -2628,6 +2728,8 @@ export default function App() {
           </div>
         </main>
       )}
+
+      <div className="selection-overlay" ref={selectionOverlayRef} aria-hidden="true" />
 
       {toolbar && (
         <div
