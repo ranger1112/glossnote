@@ -1995,25 +1995,81 @@ button.color-dot:hover {
   z-index: 50;
   display: flex;
   align-items: center;
-  gap: 7px;
-  padding: 7px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: var(--radius-lg);
-  background: #211e18;
-  box-shadow: var(--shadow-lg);
-  transform: translate(-50%, calc(-100% - 10px));
+  gap: 4px;
+  padding: 5px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: var(--panel-strong);
+  color: var(--ink);
+  box-shadow:
+    0 14px 34px rgba(34, 29, 20, 0.16),
+    0 2px 6px rgba(34, 29, 20, 0.08);
+  transform: translate(-50%, calc(-100% - 9px));
+  white-space: nowrap;
+  animation: toolbar-fade 110ms ease-out;
+}
+
+/* 小三角指向选区；悬停工具条在文字下方时朝上。 */
+.selection-toolbar::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: -5px;
+  width: 8px;
+  height: 8px;
+  border-right: 1px solid var(--line-strong);
+  border-bottom: 1px solid var(--line-strong);
+  background: var(--panel-strong);
+  transform: translateX(-50%) rotate(45deg);
+  pointer-events: none;
+}
+
+.selection-toolbar.below::after {
+  top: -5px;
+  bottom: auto;
+  transform: translateX(-50%) rotate(225deg);
+}
+
+@keyframes toolbar-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 .swatch {
-  width: 24px;
-  height: 24px;
-  border: 2px solid rgba(255, 255, 255, 0.2);
+  width: 22px;
+  height: 22px;
+  border: 0;
   border-radius: 50%;
-  transition: transform var(--transition);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.14);
+  transition:
+    transform var(--transition),
+    box-shadow var(--transition);
+  flex: none;
 }
 
 .swatch:hover {
-  transform: scale(1.08);
+  transform: scale(1.12);
+}
+
+.swatch:active {
+  transform: scale(0.96);
+}
+
+.swatch:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* 悬停工具条里标出当前颜色；选区工具条没有选中状态。 */
+.swatch.active {
+  box-shadow:
+    inset 0 0 0 1px rgba(0, 0, 0, 0.14),
+    0 0 0 2px var(--panel-strong),
+    0 0 0 3.5px var(--ink);
 }
 
 .swatch.yellow {
@@ -2043,44 +2099,67 @@ button.color-dot:hover {
 
 .toolbar-sep {
   width: 1px;
-  height: 18px;
-  margin: 0 2px;
-  background: rgba(255, 255, 255, 0.16);
+  height: 16px;
+  margin: 0 3px;
+  background: var(--line-strong);
+  flex: none;
 }
 
 .toolbar-note {
-  height: 26px;
-  padding: 0 9px;
-  border-radius: var(--radius-sm);
-  color: rgba(255, 255, 255, 0.92);
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 7px;
+  color: var(--ink-soft);
   font-size: 12px;
   font-weight: 500;
+  transition:
+    background var(--transition),
+    color var(--transition);
+  flex: none;
 }
 
 .toolbar-note:hover {
-  background: rgba(255, 255, 255, 0.12);
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.toolbar-note:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .toolbar-note svg {
-  color: rgba(255, 255, 255, 0.7);
+  color: var(--muted);
+}
+
+.toolbar-note.ai {
+  color: var(--accent);
+}
+
+.toolbar-note.ai svg {
+  color: var(--accent);
+}
+
+.toolbar-note.ai:hover {
+  background: var(--accent-soft);
 }
 
 /* 悬停已标注文字时的快捷工具，沿用选区工具条的外观。 */
 .annotation-toolbar {
-  gap: 6px;
-  padding: 6px 7px;
+  gap: 4px;
+  padding: 5px 6px;
 }
 
 .annotation-toolbar.below {
-  transform: translate(-50%, 10px);
+  transform: translate(-50%, 9px);
 }
 
 .annotation-toolbar .toolbar-note.danger {
-  color: #ff9d9d;
+  color: var(--danger);
 }
 
 .annotation-toolbar .toolbar-note.danger:hover {
-  background: rgba(220, 38, 38, 0.2);
+  background: var(--danger-soft);
 }
 
 /* =========================================================

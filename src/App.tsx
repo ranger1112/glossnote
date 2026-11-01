@@ -1672,7 +1672,7 @@ export default function App() {
       setToolbar({
         anchor,
         context,
-        x: Math.min(Math.max(box.x, 90), window.innerWidth - 90),
+        x: Math.min(Math.max(box.x, 200), window.innerWidth - 200),
         y: Math.max(box.y, 70),
       });
     },
@@ -1699,7 +1699,7 @@ export default function App() {
       setHover({
         annotation,
         context,
-        x: Math.min(Math.max(box.x, 185), window.innerWidth - 185),
+        x: Math.min(Math.max(box.x, 230), window.innerWidth - 230),
         y: Math.max(box.y, 10),
         below: box.below,
       });
@@ -2632,6 +2632,8 @@ export default function App() {
       {toolbar && (
         <div
           className="selection-toolbar"
+          role="toolbar"
+          aria-label="标注工具"
           style={{ left: toolbar.x, top: toolbar.y }}
           onMouseDown={(event) => event.preventDefault()}
         >
@@ -2641,6 +2643,7 @@ export default function App() {
               type="button"
               className={`swatch ${color.key}`}
               title={color.label}
+              aria-label={color.label}
               onClick={() => addAnnotation(toolbar.anchor, color.key, 'highlight', false)}
             />
           ))}
@@ -2674,7 +2677,7 @@ export default function App() {
               <span className="toolbar-sep" />
               <button
                 type="button"
-                className="toolbar-note"
+                className="toolbar-note ai"
                 onClick={() => openAssistant('explain', toolbar.anchor, toolbar.context)}
               >
                 <IconSparkles size={13} />
@@ -2688,6 +2691,8 @@ export default function App() {
       {doc && hover && !toolbar && (
         <div
           className={`selection-toolbar annotation-toolbar${hover.below ? ' below' : ''}`}
+          role="toolbar"
+          aria-label="标注快捷工具"
           style={{ left: hover.x, top: hover.y }}
           data-hover-id={hover.annotation.id}
           onMouseDown={(event) => event.preventDefault()}
@@ -2703,8 +2708,10 @@ export default function App() {
             <button
               key={color.key}
               type="button"
-              className={`swatch ${color.key}`}
+              className={`swatch ${color.key}${hover.annotation.color === color.key ? ' active' : ''}`}
               title={`改为${color.label}`}
+              aria-label={`改为${color.label}`}
+              aria-pressed={hover.annotation.color === color.key}
               onClick={() => {
                 updateColor(doc.id, hover.annotation.id, color.key);
                 setHover((current) =>
@@ -2732,7 +2739,7 @@ export default function App() {
               <span className="toolbar-sep" />
               <button
                 type="button"
-                className="toolbar-note"
+                className="toolbar-note ai"
                 onClick={() => {
                   dismissHover();
                   openAssistant('explain', hover.annotation.anchor, hover.context);
