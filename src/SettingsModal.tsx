@@ -9,6 +9,8 @@ interface SettingsModalProps {
   onTheme: (theme: 'light' | 'dark') => void;
   renderQuality: 'standard' | 'high';
   onRenderQuality: (quality: 'standard' | 'high') => void;
+  scanEnhance: boolean;
+  onScanEnhance: (enabled: boolean) => void;
   ai: AiSettingsView | null;
   onOpenAi: () => void;
   docOpen: boolean;
@@ -31,6 +33,8 @@ export function SettingsModal({
   onTheme,
   renderQuality,
   onRenderQuality,
+  scanEnhance,
+  onScanEnhance,
   ai,
   onOpenAi,
   docOpen,
@@ -134,9 +138,31 @@ export function SettingsModal({
               </button>
             </div>
           </div>
+          <div className="settings-row">
+            <div>
+              <strong>扫描件增黑</strong>
+              <span>加深灰底扫描件的文字；只影响显示，不改 PDF、标注或导出。</span>
+            </div>
+            <div className="theme-choice">
+              <button
+                type="button"
+                className={scanEnhance ? '' : 'active'}
+                onClick={() => onScanEnhance(false)}
+              >
+                关闭
+              </button>
+              <button
+                type="button"
+                className={scanEnhance ? 'active' : ''}
+                onClick={() => onScanEnhance(true)}
+              >
+                开启
+              </button>
+            </div>
+          </div>
           <p className="settings-hint">
             标准约 1600 万像素/页，高清约 3200 万；扫描件或低分辨率图片组成的 PDF
-            受源图限制，放大后仍可能模糊。
+            受源图限制，放大后仍可能模糊。增黑适合灰字扫描件，插图中间调也会变深。
           </p>
         </section>
 

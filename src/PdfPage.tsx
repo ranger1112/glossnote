@@ -23,6 +23,8 @@ interface PdfPageProps {
   priority: boolean;
   /** 单页画布像素上限；高清模式放大上限以保留更多文字细节。 */
   pixelBudget: number;
+  /** 扫描件增黑：只给 canvas 加 gamma 滤镜，不改 PDF 与标注。 */
+  scanEnhance: boolean;
   annotations: Annotation[];
   focusId: string | null;
   /** context 是选区前后各一段正文，供 AI 解释使用；不写进锚点。 */
@@ -237,6 +239,7 @@ export const PdfPage = memo(function PdfPage({
   active,
   priority,
   pixelBudget,
+  scanEnhance,
   annotations,
   focusId,
   onSelect,
@@ -276,6 +279,13 @@ export const PdfPage = memo(function PdfPage({
   // 仍在视口里的相邻页清空重绘，正是之前滚动闪烁的原因。
   const priorityRef = useRef(priority);
   priorityRef.current = priority;
+
+  // 增黑只改 canvas 的显示滤镜；切换时不必重新渲染 PDF。
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    canvas.style.filter = scanEnhance ? 'url(#glossnote-scan-enhance)' : '';
+  }, [scanEnhance]);
 
   const paintHighlights = useCallback(() => {
     const pageElement = pageRef.current;

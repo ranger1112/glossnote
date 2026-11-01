@@ -240,6 +240,15 @@ select {
   height: 100%;
 }
 
+/* 扫描件增黑的 SVG 滤镜定义；不占布局。 */
+.scan-enhance-filter {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
 /* =========================================================
    Controls
    ========================================================= */

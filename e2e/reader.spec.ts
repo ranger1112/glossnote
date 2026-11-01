@@ -325,7 +325,7 @@ test('阅读器快捷键：帮助、翻页与缩放', async ({ page }) => {
   await expect(zoom).toHaveText(original);
 });
 
-test('设置面板：主题切换、快捷键列表与关闭', async ({ page }) => {
+test('设置面板：主题、阅读清晰度、扫描件增黑与关闭', async ({ page }) => {
   await page.goto('/?sample');
   await expect(
     page.locator('.pdf-page').first().locator('.text-layer span').first(),
@@ -357,6 +357,27 @@ test('设置面板：主题切换、快捷键列表与关闭', async ({ page }) 
   await expect
     .poll(() => page.evaluate(() => localStorage.getItem('glossnote:render-quality')))
     .toBe('standard');
+
+  // 扫描件增黑只给 canvas 加滤镜，可随时关掉。
+  const enhance = modal.locator('.settings-section', { hasText: '扫描件增黑' });
+  await enhance.getByRole('button', { name: '开启' }).click();
+  await expect
+    .poll(() => page.evaluate(() => localStorage.getItem('glossnote:scan-enhance')))
+    .toBe('1');
+  await expect
+    .poll(() =>
+      page.locator('.pdf-canvas').first().evaluate((element) => getComputedStyle(element).filter),
+    )
+    .toContain('glossnote-scan-enhance');
+  await enhance.getByRole('button', { name: '关闭' }).click();
+  await expect
+    .poll(() => page.evaluate(() => localStorage.getItem('glossnote:scan-enhance')))
+    .toBe('0');
+  await expect
+    .poll(() =>
+      page.locator('.pdf-canvas').first().evaluate((element) => getComputedStyle(element).filter),
+    )
+    .toBe('none');
 
   // 标题栏和底部按钮固定，只有中间内容滚动。
   const head = modal.locator('.settings-head');

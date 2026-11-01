@@ -106,12 +106,21 @@ const SIDEBAR_PAGE = 100;
 
 type RenderQuality = 'standard' | 'high';
 const RENDER_QUALITY_KEY = 'glossnote:render-quality';
+const SCAN_ENHANCE_KEY = 'glossnote:scan-enhance';
 
 function initialRenderQuality(): RenderQuality {
   try {
     return localStorage.getItem(RENDER_QUALITY_KEY) === 'high' ? 'high' : 'standard';
   } catch {
     return 'standard';
+  }
+}
+
+function initialScanEnhance(): boolean {
+  try {
+    return localStorage.getItem(SCAN_ENHANCE_KEY) === '1';
+  } catch {
+    return false;
   }
 }
 
@@ -287,6 +296,7 @@ export default function App() {
   const [theme, setTheme] = useState<Theme>(initialTheme);
   const [renderQuality, setRenderQuality] =
     useState<RenderQuality>(initialRenderQuality);
+  const [scanEnhance, setScanEnhance] = useState(initialScanEnhance);
 
   const changeRenderQuality = useCallback((quality: RenderQuality) => {
     setRenderQuality(quality);
@@ -294,6 +304,15 @@ export default function App() {
       localStorage.setItem(RENDER_QUALITY_KEY, quality);
     } catch {
       // 隐私模式或存储被禁用时只影响下次启动，不阻止当前切换。
+    }
+  }, []);
+
+  const changeScanEnhance = useCallback((enabled: boolean) => {
+    setScanEnhance(enabled);
+    try {
+      localStorage.setItem(SCAN_ENHANCE_KEY, enabled ? '1' : '0');
+    } catch {
+      // 同上：只影响下次启动。
     }
   }, []);
 
@@ -1993,6 +2012,16 @@ export default function App() {
 
   return (
     <div className="app">
+      {/* 扫描件增黑：只对 canvas 显示做 gamma，不影响文本层、高亮层与导出。 */}
+      <svg className="scan-enhance-filter" width="0" height="0" aria-hidden="true">
+        <filter id="glossnote-scan-enhance">
+          <feComponentTransfer>
+            <feFuncR type="gamma" exponent="1.8" />
+            <feFuncG type="gamma" exponent="1.8" />
+            <feFuncB type="gamma" exponent="1.8" />
+          </feComponentTransfer>
+        </filter>
+      </svg>
       <header className="topbar">
         <div className="brand">
           <span className="brand-mark">G</span>
@@ -2263,6 +2292,7 @@ export default function App() {
                   active={Math.abs(index - currentPage) <= activeRadius}
                   priority={index === currentPage}
                   pixelBudget={renderQuality === 'high' ? 32_000_000 : 16_000_000}
+                  scanEnhance={scanEnhance}
                   annotations={byPage.get(index) ?? EMPTY}
                   focusId={focusId}
                   onSelect={handleSelect}
@@ -2758,6 +2788,8 @@ export default function App() {
           onTheme={setTheme}
           renderQuality={renderQuality}
           onRenderQuality={changeRenderQuality}
+          scanEnhance={scanEnhance}
+          onScanEnhance={changeScanEnhance}
           ai={ai}
           onOpenAi={() => void openAiSettings()}
           docOpen={!!doc}
