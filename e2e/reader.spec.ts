@@ -334,6 +334,8 @@ test('设置面板：主题、阅读清晰度、扫描件增黑与关闭', async
   await page.getByRole('button', { name: '设置' }).click();
   const modal = page.locator('.settings-modal');
   await expect(modal).toBeVisible();
+  await expect(modal).toContainText('文档设置');
+  await expect(modal).toContainText('应用设置');
   await expect(modal).toContainText('外观');
   await expect(modal).toContainText('快捷键');
   await expect(modal).toContainText('关于');
@@ -358,21 +360,47 @@ test('设置面板：主题、阅读清晰度、扫描件增黑与关闭', async
     .poll(() => page.evaluate(() => localStorage.getItem('glossnote:render-quality')))
     .toBe('standard');
 
-  // 扫描件增黑只给 canvas 加滤镜，可随时关掉。
+  // 扫描件增黑按文档记忆，只给 canvas 加滤镜，可随时关掉。
+  const docId = await page.evaluate(() => {
+    const key = Object.keys(localStorage).find((item) => item.startsWith('glossnote:doc:'));
+    return key ? key.slice('glossnote:doc:'.length) : '';
+  });
+  expect(docId).not.toBe('');
+  const enhancedForDoc = (id: string) =>
+    page.evaluate((doc) => {
+      const raw = localStorage.getItem('glossnote:scan-enhance-docs');
+      if (!raw) return false;
+      try {
+        return JSON.parse(raw)[doc] === true;
+      } catch {
+        return false;
+      }
+    }, id);
+
   const enhance = modal.locator('.settings-section', { hasText: '扫描件增黑' });
   await enhance.getByRole('button', { name: '开启' }).click();
-  await expect
-    .poll(() => page.evaluate(() => localStorage.getItem('glossnote:scan-enhance')))
-    .toBe('1');
+  await expect.poll(() => enhancedForDoc(docId)).toBe(true);
   await expect
     .poll(() =>
       page.locator('.pdf-canvas').first().evaluate((element) => getComputedStyle(element).filter),
     )
     .toContain('glossnote-scan-enhance');
-  await enhance.getByRole('button', { name: '关闭' }).click();
+
+  // 重新加载同一文档后，增黑仍按文档恢复。
+  await page.reload();
+  await expect(
+    page.locator('.pdf-page').first().locator('.text-layer span').first(),
+  ).toBeVisible({ timeout: 30_000 });
   await expect
-    .poll(() => page.evaluate(() => localStorage.getItem('glossnote:scan-enhance')))
-    .toBe('0');
+    .poll(() =>
+      page.locator('.pdf-canvas').first().evaluate((element) => getComputedStyle(element).filter),
+    )
+    .toContain('glossnote-scan-enhance');
+  await page.getByRole('button', { name: '设置' }).click();
+  await modal.waitFor({ state: 'visible' });
+
+  await enhance.getByRole('button', { name: '关闭' }).click();
+  await expect.poll(() => enhancedForDoc(docId)).toBe(false);
   await expect
     .poll(() =>
       page.locator('.pdf-canvas').first().evaluate((element) => getComputedStyle(element).filter),
@@ -391,6 +419,15 @@ test('设置面板：主题、阅读清晰度、扫描件增黑与关闭', async
 
   await modal.getByRole('button', { name: '完成' }).click();
   await expect(modal).toHaveCount(0);
+});
+
+test('设置面板：没有打开文档时只显示应用设置', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: '设置' }).click();
+  const modal = page.locator('.settings-modal');
+  await expect(modal).toBeVisible();
+  await expect(modal).toContainText('应用设置');
+  await expect(modal).not.toContainText('文档设置');
 });
 
 test('页内查找：Ctrl+F 搜索并定位命中', async ({ page }) => {

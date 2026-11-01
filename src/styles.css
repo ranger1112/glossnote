@@ -2278,6 +2278,34 @@ button.color-dot:hover {
   padding-top: 16px;
 }
 
+.settings-group + .settings-group {
+  margin-top: 4px;
+  border-top: 1px solid var(--line);
+}
+
+.settings-group-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+  padding: 16px 0 0;
+  color: var(--faint);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+
+.settings-group-title span {
+  color: var(--faint);
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+.settings-group .settings-section:first-of-type {
+  padding-top: 4px;
+}
+
 .settings-section .ghost {
   border: 1px solid var(--line);
   background: var(--panel-strong);

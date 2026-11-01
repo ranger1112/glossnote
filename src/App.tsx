@@ -106,7 +106,7 @@ const SIDEBAR_PAGE = 100;
 
 type RenderQuality = 'standard' | 'high';
 const RENDER_QUALITY_KEY = 'glossnote:render-quality';
-const SCAN_ENHANCE_KEY = 'glossnote:scan-enhance';
+const SCAN_ENHANCE_DOCS_KEY = 'glossnote:scan-enhance-docs';
 
 function initialRenderQuality(): RenderQuality {
   try {
@@ -116,11 +116,28 @@ function initialRenderQuality(): RenderQuality {
   }
 }
 
-function initialScanEnhance(): boolean {
+/** 扫描件增黑按文档记忆；只存开启的文档，新文档默认关闭。 */
+function initialScanEnhanceDocs(): Record<string, boolean> {
   try {
-    return localStorage.getItem(SCAN_ENHANCE_KEY) === '1';
+    const raw = localStorage.getItem(SCAN_ENHANCE_DOCS_KEY);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const result: Record<string, boolean> = {};
+    for (const [id, value] of Object.entries(parsed)) {
+      if (value === true) result[id] = true;
+    }
+    return result;
   } catch {
-    return false;
+    return {};
+  }
+}
+
+function persistScanEnhanceDocs(docs: Record<string, boolean>): void {
+  try {
+    localStorage.setItem(SCAN_ENHANCE_DOCS_KEY, JSON.stringify(docs));
+  } catch {
+    // 隐私模式或存储被禁用时只影响下次启动，不阻止当前切换。
   }
 }
 
@@ -296,7 +313,7 @@ export default function App() {
   const [theme, setTheme] = useState<Theme>(initialTheme);
   const [renderQuality, setRenderQuality] =
     useState<RenderQuality>(initialRenderQuality);
-  const [scanEnhance, setScanEnhance] = useState(initialScanEnhance);
+  const [scanEnhanceDocs, setScanEnhanceDocs] = useState(initialScanEnhanceDocs);
 
   const changeRenderQuality = useCallback((quality: RenderQuality) => {
     setRenderQuality(quality);
@@ -307,16 +324,25 @@ export default function App() {
     }
   }, []);
 
-  const changeScanEnhance = useCallback((enabled: boolean) => {
-    setScanEnhance(enabled);
-    try {
-      localStorage.setItem(SCAN_ENHANCE_KEY, enabled ? '1' : '0');
-    } catch {
-      // 同上：只影响下次启动。
-    }
-  }, []);
-
   const [doc, setDoc] = useState<OpenedDoc | null>(null);
+  const scanEnhance = doc ? scanEnhanceDocs[doc.id] === true : false;
+
+  const changeScanEnhance = useCallback(
+    (enabled: boolean) => {
+      if (!doc) return;
+      setScanEnhanceDocs((current) => {
+        const next = { ...current };
+        if (enabled) next[doc.id] = true;
+        else delete next[doc.id];
+        return next;
+      });
+    },
+    [doc],
+  );
+
+  useEffect(() => {
+    persistScanEnhanceDocs(scanEnhanceDocs);
+  }, [scanEnhanceDocs]);
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [scale, setScale] = useState(1.2);
   const [zoomMode, setZoomMode] = useState<ZoomMode>('fit-width');
