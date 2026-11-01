@@ -29,7 +29,7 @@
   --accent-ink: #ffffff;
   --accent-soft: #eceefb;
   --accent-line: #cfd5f5;
-  --selection-bg: rgba(245, 180, 30, 0.46);
+  --highlight-yellow: #ffe066;
 
   --success: #2f7d5c;
   --success-soft: #e8f3ed;
@@ -90,7 +90,6 @@
   --accent-ink: #12131f;
   --accent-soft: #242a4a;
   --accent-line: #3a4370;
-  --selection-bg: rgba(245, 180, 30, 0.4);
 
   --success: #6ec99f;
   --success-soft: #172a21;
@@ -1271,7 +1270,7 @@ select {
 }
 
 .highlight-yellow {
-  background: #ffe066;
+  background: var(--highlight-yellow);
 }
 
 .highlight-green {
@@ -1455,12 +1454,14 @@ select {
   inset: 0;
   z-index: 8;
   pointer-events: none;
+  /* 和黄色高亮标注同一套 multiply，黄色压上去但文字仍透出来。 */
+  mix-blend-mode: multiply;
 }
 
 .selection-rect {
   position: fixed;
   border-radius: 3px;
-  background: var(--selection-bg);
+  background: var(--highlight-yellow);
 }
 
 .page-number {
@@ -2089,7 +2090,7 @@ button.color-dot:hover {
 }
 
 .swatch.yellow {
-  background: #ffe066;
+  background: var(--highlight-yellow);
 }
 
 .swatch.green {
