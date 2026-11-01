@@ -29,7 +29,7 @@
   --accent-ink: #ffffff;
   --accent-soft: #eceefb;
   --accent-line: #cfd5f5;
-  --selection-bg: rgba(75, 92, 196, 0.2);
+  --selection-bg: rgba(38, 35, 28, 0.15);
 
   --success: #2f7d5c;
   --success-soft: #e8f3ed;
@@ -90,7 +90,7 @@
   --accent-ink: #12131f;
   --accent-soft: #242a4a;
   --accent-line: #3a4370;
-  --selection-bg: rgba(147, 168, 255, 0.22);
+  --selection-bg: rgba(236, 230, 217, 0.18);
 
   --success: #6ec99f;
   --success-soft: #172a21;

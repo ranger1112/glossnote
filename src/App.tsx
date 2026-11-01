@@ -30,6 +30,7 @@ import type {
 } from './types';
 import { loadDoc, saveDoc, sha256Hex } from './storage';
 import { joinPdfItems } from './pdfText';
+import { mergeSelectionRects, type SelectionBox } from './selection';
 import {
   annotationKey,
   buildImportedAnnotations,
@@ -1742,7 +1743,7 @@ export default function App() {
     }
 
     const view = viewer.getBoundingClientRect();
-    const boxes: Array<{ left: number; top: number; right: number; bottom: number }> = [];
+    const boxes: SelectionBox[] = [];
     for (const rect of Array.from(range.getClientRects())) {
       const left = Math.max(rect.left, view.left);
       const top = Math.max(rect.top, view.top);
@@ -1751,41 +1752,7 @@ export default function App() {
       if (right - left < 1 || bottom - top < 1) continue;
       boxes.push({ left, top, right, bottom });
     }
-    boxes.sort((a, b) => a.top - b.top || a.left - b.left);
-
-    // pdf.js 的文本项会给出高度不同的重叠矩形；先按行合并，再合并同一行的
-    // 水平区间，避免半透明矩形叠在一起出现深色接缝。
-    const lines: Array<{ top: number; bottom: number; boxes: typeof boxes }> = [];
-    for (const box of boxes) {
-      const line = lines.find((item) => {
-        const overlap = Math.min(item.bottom, box.bottom) - Math.max(item.top, box.top);
-        return overlap > Math.min(item.bottom - item.top, box.bottom - box.top) * 0.5;
-      });
-      if (line) {
-        line.top = Math.min(line.top, box.top);
-        line.bottom = Math.max(line.bottom, box.bottom);
-        line.boxes.push(box);
-      } else {
-        lines.push({ top: box.top, bottom: box.bottom, boxes: [box] });
-      }
-    }
-
-    const merged: typeof boxes = [];
-    for (const line of lines) {
-      const intervals = line.boxes
-        .map((box) => [box.left, box.right] as [number, number])
-        .sort((a, b) => a[0] - b[0]);
-      let current = intervals[0];
-      for (const interval of intervals.slice(1)) {
-        if (interval[0] <= current[1] + 3) {
-          current[1] = Math.max(current[1], interval[1]);
-        } else {
-          merged.push({ left: current[0], right: current[1], top: line.top, bottom: line.bottom });
-          current = interval;
-        }
-      }
-      merged.push({ left: current[0], right: current[1], top: line.top, bottom: line.bottom });
-    }
+    const merged = mergeSelectionRects(boxes);
 
     const fragment = document.createDocumentFragment();
     for (const box of merged) {
