@@ -58,6 +58,34 @@ export function IconFolder({ size = 16, className }: IconProps) {
   );
 }
 
+export function IconTrash({ size = 16, className }: IconProps) {
+  return (
+    <svg {...iconProps(size, className)}>
+      <path d="M4 7h16" />
+      <path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+      <path d="M6 7l1 12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-12" />
+      <path d="M10 11v5M14 11v5" />
+    </svg>
+  );
+}
+
+export function IconPlus({ size = 16, className }: IconProps) {
+  return (
+    <svg {...iconProps(size, className)}>
+      <path d="M12 5v14M5 12h14" />
+    </svg>
+  );
+}
+
+export function IconPencil({ size = 16, className }: IconProps) {
+  return (
+    <svg {...iconProps(size, className)}>
+      <path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3Z" />
+      <path d="m13.5 6.5 3 3" />
+    </svg>
+  );
+}
+
 export function IconRefresh({ size = 16, className }: IconProps) {
   return (
     <svg {...iconProps(size, className)}>

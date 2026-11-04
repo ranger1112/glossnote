@@ -1,3 +1,4 @@
+use crate::models::SmartCollection;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf, process};
 use tauri::{AppHandle, Manager};
@@ -49,6 +50,12 @@ pub struct AppSettings {
     pub library_dir: Option<String>,
     #[serde(default)]
     pub ai: AiSettings,
+    /// 虚拟文件夹列表；文档上的归属仍以 SQLite/sidecar 为准。
+    #[serde(default)]
+    pub folders: Vec<String>,
+    /// 智能收藏夹：保存筛选条件，点开时动态匹配文档。
+    #[serde(default)]
+    pub collections: Vec<SmartCollection>,
 }
 
 pub fn path(app: &AppHandle) -> Result<PathBuf, String> {

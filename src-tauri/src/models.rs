@@ -18,7 +18,11 @@ pub struct DocumentRow {
     pub last_page: u32,
     pub favorite: bool,
     pub tags: Vec<String>,
-    /// 收藏与文档标签的 LWW 时间戳，随 sidecar 同步。
+    /// 虚拟文件夹名；空字符串表示「未分类」。不移动 books/ 里的 PDF。
+    pub folder: String,
+    /// 手动排序位置，只存在本机索引里，不写 sidecar。
+    pub position: i64,
+    /// 收藏、文档标签与文件夹的 LWW 时间戳，随 sidecar 同步。
     pub meta_updated_at: i64,
     pub annotation_count: usize,
 }
@@ -48,6 +52,8 @@ impl DocumentRow {
             last_page: self.last_page,
             favorite: self.favorite,
             tags: self.tags.clone(),
+            folder: self.folder.clone(),
+            position: self.position,
             annotation_count: self.annotation_count,
         }
     }
@@ -69,7 +75,33 @@ pub struct Document {
     pub last_page: u32,
     pub favorite: bool,
     pub tags: Vec<String>,
+    pub folder: String,
+    pub position: i64,
     pub annotation_count: usize,
+}
+
+/// 书库里「智能收藏夹」：保存一组筛选条件，不复制文档，点开时动态匹配。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SmartCollection {
+    pub id: String,
+    pub name: String,
+    /// 只显示收藏文档。
+    #[serde(default)]
+    pub favorite: bool,
+    /// 文档必须带这个标签；空字符串表示不限标签。
+    #[serde(default)]
+    pub tag: String,
+    /// None 表示不限文件夹；空字符串表示「未分类」。
+    #[serde(default)]
+    pub folder: Option<String>,
+    /// 打开收藏夹时使用的排序：recent / added / title / annotations / manual。
+    #[serde(default = "default_collection_sort")]
+    pub sort: String,
+}
+
+fn default_collection_sort() -> String {
+    "recent".to_string()
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -305,6 +337,20 @@ pub struct Sidecar {
     pub favorite: bool,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// 旧版 sidecar 没有该字段：None 表示「没提供」，合并时不要覆盖本机文件夹。
+    #[serde(default)]
+    pub folder: Option<String>,
     #[serde(default)]
     pub meta_updated_at: i64,
+}
+
+/// 批量删除的结果：文件进回收站，索引立即移除。
+#[derive(Serialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteReport {
+    pub removed: usize,
+    pub trashed_files: usize,
+    pub missing_files: usize,
+    /// 文件进不了回收站的文档；这些文档会保留在书库里。
+    pub failed: Vec<String>,
 }

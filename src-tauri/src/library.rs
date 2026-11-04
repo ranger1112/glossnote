@@ -2,8 +2,8 @@ use crate::{
     db,
     fsrs::{self, MemoryState},
     models::{
-        Annotation, Card, CardView, Document, DocumentMetaPatch, DocumentRow, ImportResult,
-        PageTextInput, ScanReport, SearchHit, Sidecar,
+        Annotation, Card, CardView, DeleteReport, Document, DocumentMetaPatch, DocumentRow,
+        ImportResult, PageTextInput, ScanReport, SearchHit, Sidecar, SmartCollection,
     },
     settings,
     state::AppState,
@@ -64,6 +64,8 @@ pub fn set_root(app: &AppHandle, path: &str) -> Result<ScanReport, String> {
 
     let mut app_settings = settings::load(app);
     app_settings.library_dir = Some(root.to_string_lossy().into_owned());
+    // 空文件夹属于旧书库；新书库的文件夹会从文档与 sidecar 重新并出来。
+    app_settings.folders.clear();
     settings::save(app, &app_settings)?;
 
     {
@@ -331,16 +333,21 @@ fn apply_sidecar(
         db::update_meta(conn, &document.id, Some(sidecar.page_count), None, None)?;
     }
 
-    // 收藏/标签按时间戳做 LWW；旧 sidecar 没有该字段，时间戳为 0，不会覆盖本机设置。
+    // 收藏/标签/文件夹按时间戳做 LWW；旧 sidecar 没有这些字段，时间戳为 0，不会覆盖本机设置。
     if sidecar.meta_updated_at > document.meta_updated_at {
         document.favorite = sidecar.favorite;
         document.tags = sidecar.tags.clone();
+        // 旧版应用写 sidecar 时没有 folder 字段，不能把已有的文件夹清空。
+        if let Some(folder) = &sidecar.folder {
+            document.folder = folder.clone();
+        }
         document.meta_updated_at = sidecar.meta_updated_at;
         db::update_organization(
             conn,
             &document.id,
             Some(document.favorite),
             Some(&document.tags),
+            Some(&document.folder),
             document.meta_updated_at,
         )?;
     }
@@ -453,6 +460,7 @@ fn serialized_sidecar(conn: &rusqlite::Connection, doc_id: &str) -> Result<Vec<u
         cards,
         favorite: document.favorite,
         tags: document.tags.clone(),
+        folder: Some(document.folder.clone()),
         meta_updated_at: document.meta_updated_at,
     };
 
@@ -591,6 +599,9 @@ pub fn import_pdf(app: &AppHandle, source: &str) -> Result<ImportResult, String>
         last_page: 0,
         favorite: false,
         tags: Vec::new(),
+        folder: String::new(),
+        // 新导入的文档排在手动排序的最后；之后重排会写成 0..N。
+        position: now,
         meta_updated_at: 0,
         annotation_count: 0,
     };
@@ -726,6 +737,11 @@ pub fn scan(app: &AppHandle) -> Result<ScanReport, String> {
                 .as_ref()
                 .map(|row| row.tags.clone())
                 .unwrap_or_default(),
+            folder: prior
+                .as_ref()
+                .map(|row| row.folder.clone())
+                .unwrap_or_default(),
+            position: prior.as_ref().map(|row| row.position).unwrap_or(now),
             meta_updated_at: prior.as_ref().map(|row| row.meta_updated_at).unwrap_or(0),
             annotation_count: 0,
         };
@@ -1149,12 +1165,46 @@ fn clean_tags(tags: Vec<String>) -> Vec<String> {
     cleaned
 }
 
-/// 收藏或重设文档标签；结果写回 SQLite 并同步 sidecar。
+/// 虚拟文件夹名：空字符串表示未分类；斜杠会让名字看起来像路径，直接拒绝。
+fn clean_folder(name: &str) -> Result<String, String> {
+    let value = name.trim();
+    if value.is_empty() {
+        return Ok(String::new());
+    }
+    if value.chars().count() > 40 {
+        return Err("文件夹名超过 40 个字符".to_string());
+    }
+    if value
+        .chars()
+        .any(|ch| ch.is_control() || ch == '/' || ch == '\\')
+    {
+        return Err("文件夹名不能包含斜杠或控制字符".to_string());
+    }
+    Ok(value.to_string())
+}
+
+fn clean_folders(folders: Vec<String>) -> Result<Vec<String>, String> {
+    let mut cleaned: Vec<String> = Vec::new();
+    for folder in folders {
+        let value = clean_folder(&folder)?;
+        if value.is_empty() || cleaned.contains(&value) {
+            continue;
+        }
+        cleaned.push(value);
+        if cleaned.len() >= 100 {
+            break;
+        }
+    }
+    Ok(cleaned)
+}
+
+/// 收藏或重设文档标签/文件夹；结果写回 SQLite 并同步 sidecar。
 pub fn organize_document(
     app: &AppHandle,
     doc_id: &str,
     favorite: Option<bool>,
     tags: Option<Vec<String>>,
+    folder: Option<String>,
 ) -> Result<Document, String> {
     let state = app.state::<AppState>();
     let root = state.root();
@@ -1164,19 +1214,28 @@ pub fn organize_document(
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let tags = tags.map(clean_tags);
-    db::update_organization(&conn, doc_id, favorite, tags.as_deref(), now_ms())?;
+    let folder = folder.map(|value| clean_folder(&value)).transpose()?;
+    db::update_organization(
+        &conn,
+        doc_id,
+        favorite,
+        tags.as_deref(),
+        folder.as_deref(),
+        now_ms(),
+    )?;
     write_sidecar(&conn, &root, doc_id)?;
     let document = db::find_by_id(&conn, doc_id)?.ok_or_else(|| "文档不存在".to_string())?;
     Ok(document.to_document(&root))
 }
 
-/// 批量设置收藏或追加标签；一次持锁完成，避免逐文档往返 IPC。
+/// 批量设置收藏、文件夹或增删标签；一次持锁完成，避免逐文档往返 IPC。
 pub fn organize_documents(
     app: &AppHandle,
     doc_ids: Vec<String>,
     favorite: Option<bool>,
     add_tags: Vec<String>,
     remove_tags: Vec<String>,
+    folder: Option<String>,
 ) -> Result<Vec<Document>, String> {
     let state = app.state::<AppState>();
     let root = state.root();
@@ -1187,6 +1246,7 @@ pub fn organize_documents(
 
     let add = clean_tags(add_tags);
     let remove = clean_tags(remove_tags);
+    let folder = folder.map(|value| clean_folder(&value)).transpose()?;
     let now = now_ms();
     let mut updated = Vec::new();
     for doc_id in doc_ids {
@@ -1205,11 +1265,221 @@ pub fn organize_documents(
             }
         }
         let tags = clean_tags(tags);
-        let row = db::update_organization(&conn, &doc_id, favorite, Some(&tags), now)?;
+        let row = db::update_organization(
+            &conn,
+            &doc_id,
+            favorite,
+            Some(&tags),
+            folder.as_deref(),
+            now,
+        )?;
         write_sidecar(&conn, &root, &doc_id)?;
         updated.push(row.to_document(&root));
     }
     Ok(updated)
+}
+
+/// 手动排序：按传入顺序重排书库，位置只存在本机索引里。
+pub fn reorder_documents(app: &AppHandle, doc_ids: Vec<String>) -> Result<Vec<Document>, String> {
+    let state = app.state::<AppState>();
+    let root = state.root();
+    let conn = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    db::reorder_documents(&conn, &doc_ids)?;
+    Ok(db::list_documents(&conn)?
+        .iter()
+        .map(|row| row.to_document(&root))
+        .collect())
+}
+
+pub fn list_folders(app: &AppHandle) -> Vec<String> {
+    // 设置文件可能被手动改过；坏名字直接跳过，不要让它挡住整个侧栏。
+    let mut cleaned: Vec<String> = Vec::new();
+    for folder in settings::load(app).folders {
+        if let Ok(value) = clean_folder(&folder) {
+            if !value.is_empty() && !cleaned.contains(&value) {
+                cleaned.push(value);
+            }
+        }
+    }
+    cleaned
+}
+
+/// 保存虚拟文件夹列表（允许空文件夹）；返回归一化后的列表。
+pub fn save_folders(app: &AppHandle, folders: Vec<String>) -> Result<Vec<String>, String> {
+    let cleaned = clean_folders(folders)?;
+    let mut app_settings = settings::load(app);
+    app_settings.folders = cleaned;
+    settings::save(app, &app_settings)?;
+    Ok(app_settings.folders)
+}
+
+fn clean_smart_collections(
+    collections: Vec<SmartCollection>,
+) -> Result<Vec<SmartCollection>, String> {
+    const SORTS: [&str; 5] = ["recent", "added", "title", "annotations", "manual"];
+    let mut cleaned: Vec<SmartCollection> = Vec::new();
+    let mut counter = 0usize;
+
+    for collection in collections {
+        let name = collection.name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        if name.chars().count() > 40 {
+            return Err("收藏夹名超过 40 个字符".to_string());
+        }
+        if cleaned.iter().any(|item| item.id == collection.id) {
+            continue;
+        }
+
+        let tag = collection
+            .tag
+            .trim()
+            .trim_start_matches('#')
+            .trim()
+            .to_string();
+        if tag.chars().count() > 24 {
+            return Err("收藏夹标签超过 24 个字符".to_string());
+        }
+        let folder = collection.folder.as_deref().map(clean_folder).transpose()?;
+        let sort = if SORTS.contains(&collection.sort.as_str()) {
+            collection.sort
+        } else {
+            "recent".to_string()
+        };
+        let id = if collection.id.trim().is_empty() {
+            counter += 1;
+            format!("smart-{}-{counter}", now_ms())
+        } else {
+            collection.id
+        };
+
+        cleaned.push(SmartCollection {
+            id,
+            name: name.to_string(),
+            favorite: collection.favorite,
+            tag,
+            folder,
+            sort,
+        });
+        if cleaned.len() >= 20 {
+            break;
+        }
+    }
+    Ok(cleaned)
+}
+
+pub fn save_smart_collections(
+    app: &AppHandle,
+    collections: Vec<SmartCollection>,
+) -> Result<Vec<SmartCollection>, String> {
+    let cleaned = clean_smart_collections(collections)?;
+    let mut app_settings = settings::load(app);
+    app_settings.collections = cleaned;
+    settings::save(app, &app_settings)?;
+    Ok(app_settings.collections)
+}
+
+pub fn list_smart_collections(app: &AppHandle) -> Vec<SmartCollection> {
+    settings::load(app).collections
+}
+
+struct TrashOutcome {
+    trashed: usize,
+    missing: bool,
+}
+
+/// 把一份文档的 PDF 与 sidecar 交给回收站，封面直接删除。
+/// 文件已经不在（手动删掉或云盘还没同步）时返回 missing，由调用方决定只清索引。
+fn trash_document_files(
+    root: &Path,
+    row: &DocumentRow,
+    trash_file: &mut dyn FnMut(&Path) -> Result<(), String>,
+) -> Result<TrashOutcome, String> {
+    let pdf = root.join(row.rel_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+    if !pdf.exists() {
+        return Ok(TrashOutcome {
+            trashed: 0,
+            missing: true,
+        });
+    }
+
+    trash_file(&pdf)?;
+    let mut trashed = 1;
+
+    let sidecar = sidecar_path(root, &row.id);
+    if sidecar.exists() {
+        match trash_file(&sidecar) {
+            Ok(()) => trashed += 1,
+            // PDF 已经进回收站了，sidecar 失败也只影响「恢复后是否还有标注」这一步。
+            Err(error) => eprintln!("无法把标注文件移入回收站：{error}"),
+        }
+    }
+
+    let thumbnail = root
+        .join(".glossnote")
+        .join("thumbnails")
+        .join(format!("{}.jpg", row.id));
+    if thumbnail.exists() {
+        let _ = fs::remove_file(&thumbnail);
+    }
+
+    Ok(TrashOutcome {
+        trashed,
+        missing: false,
+    })
+}
+
+/// 批量删除：PDF、sidecar 与封面进回收站/删除，索引立即移除。
+/// 单个文件进不了回收站时保留该文档并报告，避免留下「书库里有、磁盘上没有」的幽灵。
+pub fn delete_documents(app: &AppHandle, doc_ids: Vec<String>) -> Result<DeleteReport, String> {
+    let state = app.state::<AppState>();
+    let root = state.root();
+
+    let rows: Vec<DocumentRow> = {
+        let conn = state
+            .db
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        doc_ids
+            .iter()
+            .filter_map(|id| db::find_by_id(&conn, id).ok().flatten())
+            .collect()
+    };
+
+    let mut report = DeleteReport::default();
+    let mut removed = Vec::new();
+    let mut trash_file = |path: &Path| trash::delete(path).map_err(|error| error.to_string());
+    for row in &rows {
+        match trash_document_files(&root, row, &mut trash_file) {
+            Ok(outcome) => {
+                report.trashed_files += outcome.trashed;
+                if outcome.missing {
+                    // 文件已经被手动删除或还没从云盘同步下来：清掉索引即可。
+                    report.missing_files += 1;
+                }
+                removed.push(row.id.clone());
+            }
+            Err(error) => report.failed.push(format!("{}：{error}", row.name)),
+        }
+    }
+
+    if !removed.is_empty() {
+        let conn = state
+            .db
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let now = now_ms();
+        for id in &removed {
+            db::remove_document(&conn, id, now)?;
+        }
+    }
+
+    report.removed = removed.len();
+    Ok(report)
 }
 
 fn memory_state(card: &Card) -> MemoryState {
@@ -1499,6 +1769,8 @@ mod tests {
             last_page: 0,
             favorite: false,
             tags: Vec::new(),
+            folder: String::new(),
+            position: 0,
             meta_updated_at: 0,
             annotation_count: 0,
         }
@@ -1589,17 +1861,26 @@ mod tests {
         let row = document("doc1", "books/doc1.pdf");
         db::upsert_document(&conn, &row).unwrap();
 
-        db::update_organization(&conn, "doc1", Some(true), Some(&["论文".to_string()]), 10)
-            .unwrap();
+        db::update_organization(
+            &conn,
+            "doc1",
+            Some(true),
+            Some(&["论文".to_string()]),
+            Some("研究"),
+            10,
+        )
+        .unwrap();
         write_sidecar(&conn, &root, "doc1").unwrap();
         let path = sidecar_path(&root, "doc1");
         let mut sidecar: Sidecar = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert!(sidecar.favorite);
         assert_eq!(sidecar.tags, vec!["论文".to_string()]);
+        assert_eq!(sidecar.folder.as_deref(), Some("研究"));
 
         // 比数据库旧的 sidecar 不得覆盖本机设置。
         sidecar.favorite = false;
         sidecar.tags = vec!["旧".to_string()];
+        sidecar.folder = Some("旧文件夹".to_string());
         sidecar.meta_updated_at = 5;
         fs::write(&path, serde_json::to_vec(&sidecar).unwrap()).unwrap();
         let current = db::find_by_id(&conn, "doc1").unwrap().unwrap();
@@ -1607,10 +1888,12 @@ mod tests {
         let fresh = db::find_by_id(&conn, "doc1").unwrap().unwrap();
         assert!(fresh.favorite);
         assert_eq!(fresh.tags, vec!["论文".to_string()]);
+        assert_eq!(fresh.folder, "研究");
 
         // 另一台设备写入了更新的版本：合并时应当采用。
         sidecar.favorite = false;
         sidecar.tags = vec!["同步".to_string()];
+        sidecar.folder = Some("同步文件夹".to_string());
         sidecar.meta_updated_at = 20;
         fs::write(&path, serde_json::to_vec(&sidecar).unwrap()).unwrap();
         let current = db::find_by_id(&conn, "doc1").unwrap().unwrap();
@@ -1618,8 +1901,132 @@ mod tests {
         let fresh = db::find_by_id(&conn, "doc1").unwrap().unwrap();
         assert!(!fresh.favorite);
         assert_eq!(fresh.tags, vec!["同步".to_string()]);
+        assert_eq!(fresh.folder, "同步文件夹");
+
+        // 旧版应用写 sidecar 时没有 folder 字段：不能把已有文件夹清空。
+        sidecar.favorite = true;
+        sidecar.meta_updated_at = 30;
+        sidecar.folder = None;
+        fs::write(&path, serde_json::to_vec(&sidecar).unwrap()).unwrap();
+        let current = db::find_by_id(&conn, "doc1").unwrap().unwrap();
+        merge_from_disk(&conn, &root, &current);
+        let fresh = db::find_by_id(&conn, "doc1").unwrap().unwrap();
+        assert!(fresh.favorite);
+        assert_eq!(fresh.folder, "同步文件夹");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn folder_names_are_validated_and_deduplicated() {
+        assert_eq!(clean_folder("  研究 ").unwrap(), "研究");
+        assert_eq!(clean_folder("").unwrap(), "");
+        assert!(clean_folder("a/b").is_err());
+        assert!(clean_folder(&"长".repeat(41)).is_err());
+        assert_eq!(
+            clean_folders(vec![
+                "研究".to_string(),
+                "研究".to_string(),
+                String::new(),
+                "资料".to_string(),
+            ])
+            .unwrap(),
+            vec!["研究".to_string(), "资料".to_string()]
+        );
+    }
+
+    #[test]
+    fn manual_order_follows_input_sequence() {
+        let dir = temp_dir("reorder");
+        let conn = db::open(&dir.join("test.db")).unwrap();
+        for id in ["a", "b", "c"] {
+            db::upsert_document(&conn, &document(id, &format!("books/{id}.pdf"))).unwrap();
+        }
+
+        db::reorder_documents(&conn, &["c".to_string(), "a".to_string(), "b".to_string()]).unwrap();
+
+        let mut rows = db::list_documents(&conn).unwrap();
+        rows.sort_by_key(|row| row.position);
+        assert_eq!(
+            rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            vec!["c", "a", "b"]
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn deleting_documents_trashes_pdf_and_sidecar() {
+        let dir = temp_dir("delete-files");
+        let root = dir.join("library");
+        ensure_dirs(&root).unwrap();
+        let row = document("doc1", "books/doc1.pdf");
+        let pdf = root.join("books").join("doc1.pdf");
+        fs::write(&pdf, b"pdf").unwrap();
+        let sidecar = sidecar_path(&root, &row.id);
+        fs::write(&sidecar, b"{}").unwrap();
+        let thumbnail = root.join(".glossnote").join("thumbnails").join("doc1.jpg");
+        fs::create_dir_all(thumbnail.parent().unwrap()).unwrap();
+        fs::write(&thumbnail, b"jpg").unwrap();
+
+        let bin = dir.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let mut trash_file = |path: &Path| {
+            let destination = bin.join(path.file_name().unwrap());
+            fs::rename(path, destination).map_err(|error| error.to_string())
+        };
+
+        let outcome = trash_document_files(&root, &row, &mut trash_file).unwrap();
+        assert_eq!(outcome.trashed, 2);
+        assert!(!outcome.missing);
+        assert!(!pdf.exists());
+        assert!(!sidecar.exists());
+        assert!(!thumbnail.exists());
+        assert!(bin.join("doc1.pdf").exists());
+        assert!(bin.join("doc1.json").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn deleting_a_missing_pdf_only_clears_the_index() {
+        let dir = temp_dir("delete-missing");
+        let root = dir.join("library");
+        ensure_dirs(&root).unwrap();
+        let row = document("doc1", "books/doc1.pdf");
+        let mut trash_file =
+            |_path: &Path| -> Result<(), String> { panic!("缺失文件不应进入回收站") };
+
+        let outcome = trash_document_files(&root, &row, &mut trash_file).unwrap();
+        assert_eq!(outcome.trashed, 0);
+        assert!(outcome.missing);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn smart_collections_normalize_and_skip_empty_names() {
+        let cleaned = clean_smart_collections(vec![
+            SmartCollection {
+                id: "1".to_string(),
+                name: "   ".to_string(),
+                ..Default::default()
+            },
+            SmartCollection {
+                id: "2".to_string(),
+                name: " 收藏论文 ".to_string(),
+                tag: "#论文".to_string(),
+                folder: Some("研究".to_string()),
+                sort: "manual".to_string(),
+                ..Default::default()
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(cleaned.len(), 1);
+        assert_eq!(cleaned[0].name, "收藏论文");
+        assert_eq!(cleaned[0].tag, "论文");
+        assert_eq!(cleaned[0].folder.as_deref(), Some("研究"));
+        assert_eq!(cleaned[0].sort, "manual");
     }
 
     #[test]
@@ -1665,6 +2072,7 @@ mod tests {
             cards: Vec::new(),
             favorite: false,
             tags: Vec::new(),
+            folder: None,
             meta_updated_at: 0,
         }
     }

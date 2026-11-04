@@ -809,14 +809,225 @@ select {
   cursor: pointer;
 }
 
+.library-body {
+  display: flex;
+  align-items: flex-start;
+  gap: 26px;
+  max-width: 1160px;
+  margin: 0 auto;
+}
+
+.library-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.library-side {
+  position: sticky;
+  top: 18px;
+  flex: 0 0 188px;
+  width: 188px;
+  padding-top: 2px;
+  user-select: none;
+}
+
+.side-section {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 22px;
+}
+
+.side-title {
+  margin: 0 0 6px;
+  padding: 0 8px;
+  color: var(--faint);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.side-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  font-size: 12px;
+  text-align: left;
+}
+
+.side-row > svg {
+  flex: none;
+  color: var(--faint);
+}
+
+.side-row:hover {
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.side-row.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.side-row.active > svg {
+  color: var(--accent);
+}
+
+.side-row.drop {
+  background: var(--accent-soft);
+  outline: 1px dashed var(--accent);
+  outline-offset: -1px;
+}
+
+.side-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.side-count {
+  flex: none;
+  color: var(--faint);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.side-folder-row,
+.side-smart-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.side-folder-row .side-row,
+.side-smart-row .side-row {
+  padding-right: 46px;
+}
+
+.side-folder-actions {
+  position: absolute;
+  right: 4px;
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity var(--transition);
+}
+
+.side-folder-row:hover .side-folder-actions,
+.side-smart-row:hover .side-folder-actions,
+.side-folder-row:focus-within .side-folder-actions,
+.side-smart-row:focus-within .side-folder-actions {
+  opacity: 1;
+}
+
+.side-icon {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  color: var(--faint);
+}
+
+.side-icon:hover {
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.side-add {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: var(--radius-sm);
+  color: var(--faint);
+  font-size: 11.5px;
+  text-align: left;
+}
+
+.side-add:hover:not(:disabled) {
+  background: var(--surface);
+  color: var(--ink-soft);
+}
+
+.side-add:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.side-add-form {
+  display: flex;
+  gap: 4px;
+  padding: 2px 2px 2px 0;
+}
+
+.side-add-form input {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--ink);
+  font-size: 11.5px;
+}
+
+.side-add-form input:focus {
+  outline: 0;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.side-add-form .ghost {
+  height: 28px;
+  padding: 0 8px;
+  font-size: 11px;
+}
+
+.side-rename {
+  flex: 1;
+  padding-right: 2px;
+}
+
+.side-rename input {
+  width: 100%;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  outline: 0;
+  background: var(--panel);
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.side-hint {
+  margin: 6px 8px 0;
+  color: var(--faint);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
 .library-tools {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
   flex-wrap: wrap;
-  max-width: 1160px;
-  margin: -8px auto 20px;
+  max-width: none;
+  margin: -8px 0 20px;
 }
 
 .library-filters,
@@ -862,8 +1073,31 @@ select {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(172px, 1fr));
   gap: 26px 20px;
-  max-width: 1160px;
-  margin: 0 auto;
+  max-width: none;
+  margin: 0;
+}
+
+.library-grid.manual .library-item {
+  cursor: grab;
+}
+
+.library-grid.manual .library-item:active {
+  cursor: grabbing;
+}
+
+.library-item.dragging {
+  opacity: 0.42;
+}
+
+.library-item.drop-target::before {
+  position: absolute;
+  top: -12px;
+  right: 2px;
+  left: 2px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+  content: '';
 }
 
 .library-item {
@@ -986,6 +1220,26 @@ select {
   background: var(--surface);
   color: var(--ink);
   font-size: 11.5px;
+}
+
+.selection-move {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--faint);
+  font-size: 10.5px;
+}
+
+.selection-move select {
+  height: 28px;
+  max-width: 128px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-full);
+  background: var(--surface);
+  color: var(--ink-soft);
+  font-size: 11.5px;
+  cursor: pointer;
 }
 
 .selection-bar .ghost {
@@ -2266,6 +2520,45 @@ button.color-dot:hover {
   box-shadow: var(--shadow-lg);
 }
 
+.confirm-card {
+  width: min(420px, 92vw);
+  padding: 20px 22px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  box-shadow: var(--shadow-lg);
+}
+
+.confirm-card h2 {
+  margin: 0 0 10px;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.confirm-body {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.confirm-body p {
+  margin: 0;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.confirm-actions .ghost,
+.confirm-actions .primary {
+  height: 30px;
+  padding: 0 14px;
+  font-size: 12px;
+}
+
 .shortcut-list {
   margin: 0;
 }
@@ -3395,6 +3688,15 @@ button.color-dot:hover {
     padding: 22px 20px 56px;
   }
 
+  .library-body {
+    gap: 18px;
+  }
+
+  .library-side {
+    flex-basis: 160px;
+    width: 160px;
+  }
+
   .library-actions {
     width: 100%;
     margin-left: 0;
@@ -3436,6 +3738,14 @@ button.color-dot:hover {
   .ai-panel {
     width: 100vw;
     border-left: 0;
+  }
+}
+
+/* 触摸屏没有悬停：收藏和选择按钮常驻，否则用户点不到。 */
+@media (pointer: coarse) {
+  .card-star,
+  .card-select {
+    opacity: 1;
   }
 }
 

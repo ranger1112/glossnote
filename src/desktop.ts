@@ -7,11 +7,13 @@ import type {
   Annotation,
   CardView,
   ChatTurn,
+  DeleteReport,
   DocumentMeta,
   ImportResult,
   PageTextInput,
   ScanReport,
   SearchHit,
+  SmartCollection,
 } from './types';
 
 export function assetUrl(path: string): string {
@@ -67,25 +69,58 @@ export function updateDocumentMeta(
   return invoke('update_document_meta', { docId, patch });
 }
 
-/** 设置收藏或替换文档标签；结果同步写 sidecar。 */
+/** 设置收藏、文件夹或替换文档标签；结果同步写 sidecar。 */
 export function organizeDocument(
   docId: string,
-  patch: { favorite?: boolean; tags?: string[] },
+  patch: { favorite?: boolean; tags?: string[]; folder?: string },
 ): Promise<DocumentMeta> {
   return invoke('organize_document', { docId, ...patch });
 }
 
-/** 批量设置收藏并向选中文档追加标签。 */
+/** 批量设置收藏/文件夹，并向选中文档追加或移除标签。 */
 export function organizeDocuments(
   docIds: string[],
-  patch: { favorite?: boolean; addTags?: string[]; removeTags?: string[] },
+  patch: {
+    favorite?: boolean;
+    addTags?: string[];
+    removeTags?: string[];
+    folder?: string;
+  },
 ): Promise<DocumentMeta[]> {
   return invoke('organize_documents', {
     docIds,
     favorite: patch.favorite,
     addTags: patch.addTags ?? [],
     removeTags: patch.removeTags ?? [],
+    folder: patch.folder,
   });
+}
+
+/** 批量删除：PDF 与标注进系统回收站，索引立即移除。 */
+export function deleteDocuments(docIds: string[]): Promise<DeleteReport> {
+  return invoke('delete_documents', { docIds });
+}
+
+/** 手动排序：按传入的文档顺序重写位置。 */
+export function reorderDocuments(docIds: string[]): Promise<DocumentMeta[]> {
+  return invoke('reorder_documents', { docIds });
+}
+
+export function listFolders(): Promise<string[]> {
+  return invoke('list_folders');
+}
+
+/** 保存虚拟文件夹列表（允许空文件夹）。 */
+export function saveFolders(folders: string[]): Promise<string[]> {
+  return invoke('save_folders', { folders });
+}
+
+export function listSmartCollections(): Promise<SmartCollection[]> {
+  return invoke('list_smart_collections');
+}
+
+export function saveSmartCollections(collections: SmartCollection[]): Promise<SmartCollection[]> {
+  return invoke('save_smart_collections', { collections });
 }
 
 /** 前端把首页渲染成 JPEG，Rust 落到书库的 .glossnote/thumbnails 下。 */
