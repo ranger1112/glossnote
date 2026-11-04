@@ -9,9 +9,17 @@ import { AiPanel } from './AiPanel';
 import { AiSettingsModal } from './AiSettingsModal';
 import { SettingsModal } from './SettingsModal';
 import { ShortcutList } from './ShortcutList';
+import { HistoryModal } from './HistoryModal';
+import { OutlinePanel } from './OutlinePanel';
+import { PageThumbnails } from './PageThumbnails';
+import { loadOutline, type OutlineEntry } from './outline';
 import {
   IconArrowLeft,
+  IconBookmark,
   IconDownload,
+  IconHistory,
+  IconList,
+  IconPages,
   IconRedo,
   IconSettings,
   IconSparkles,
@@ -22,10 +30,12 @@ import type {
   AiSettingsView,
   Annotation,
   AnnotationKind,
+  Bookmark,
   CardView,
   DocRecord,
   DocumentMeta,
   HighlightColor,
+  ImportResult,
   PageTextInput,
 } from './types';
 import { loadDoc, saveDoc, sha256Hex } from './storage';
@@ -57,6 +67,7 @@ import {
   listCards,
   loadPageTexts,
   openDocument,
+  saveBookmarks,
   savePageTexts,
   saveProgress,
   scanLibrary,
@@ -74,6 +85,7 @@ interface OpenedDoc {
   name: string;
   pageCount: number;
   pdf: PDFDocumentProxy;
+  bookmarks: Bookmark[];
   dispose: () => void;
 }
 
@@ -174,6 +186,7 @@ interface Activation {
   pdf: PDFDocumentProxy;
   task: ReturnType<typeof pdfjsLib.getDocument>;
   annotations: Annotation[];
+  bookmarks?: Bookmark[];
   desktopMeta?: DocumentMeta;
   initialPage?: number;
 }
@@ -326,6 +339,10 @@ export default function App() {
   }, []);
 
   const [doc, setDoc] = useState<OpenedDoc | null>(null);
+  const [sideTab, setSideTab] = useState<'annotations' | 'outline' | 'pages'>('annotations');
+  const [outline, setOutline] = useState<OutlineEntry[]>([]);
+  const [outlineLoading, setOutlineLoading] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const scanEnhance = doc ? scanEnhanceDocs[doc.id] === true : false;
 
   const changeScanEnhance = useCallback(
@@ -1065,6 +1082,7 @@ export default function App() {
       name: input.name,
       pageCount: input.pageCount,
       pdf: input.pdf,
+      bookmarks: input.bookmarks ?? [],
       dispose: () => {
         void input.task.destroy().catch(() => undefined);
       },
@@ -1101,6 +1119,17 @@ export default function App() {
     setFocusId(null);
     setAiPanel(null);
     setMessage('');
+    setSideTab('annotations');
+    setOutline([]);
+    setOutlineLoading(true);
+    void loadOutline(input.pdf)
+      .then((entries) => {
+        if (docRef.current?.id === input.id) setOutline(entries);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (docRef.current?.id === input.id) setOutlineLoading(false);
+      });
 
     requestAnimationFrame(() => {
       if (startPage > 0) scrollToPage(startPage);
@@ -1153,6 +1182,7 @@ export default function App() {
           pdf,
           task,
           annotations: record.annotations,
+          bookmarks: [],
         });
       } catch (error) {
         setMessage(`打开失败：${errorText(error)}`);
@@ -1181,6 +1211,7 @@ export default function App() {
           pdf,
           task,
           annotations: result.annotations,
+          bookmarks: result.document.bookmarks,
           desktopMeta: result.document,
           initialPage: page ?? result.document.lastPage,
         });
@@ -1234,6 +1265,10 @@ export default function App() {
       setCards([]);
       setCardEditing(null);
       setAiPanel(null);
+      setSideTab('annotations');
+      setOutline([]);
+      setOutlineLoading(false);
+      setHistoryOpen(false);
       setMessage('');
       closingRef.current = false;
     };
@@ -1246,6 +1281,96 @@ export default function App() {
       finish();
     }
   }, [resetHistory, resetSaveState]);
+
+  const currentBookmark =
+    doc?.bookmarks.find((bookmark) => bookmark.page === currentPage) ?? null;
+
+  const persistBookmarks = useCallback(
+    async (next: Bookmark[]) => {
+      const active = doc;
+      if (!active) return;
+      const previous = active.bookmarks;
+      setDoc((current) =>
+        current && current.id === active.id ? { ...current, bookmarks: next } : current,
+      );
+      if (!isTauri()) return;
+
+      try {
+        const updated = await saveBookmarks(active.id, next);
+        setDoc((current) =>
+          current && current.id === active.id
+            ? { ...current, bookmarks: updated.bookmarks }
+            : current,
+        );
+      } catch (error) {
+        setDoc((current) =>
+          current && current.id === active.id
+            ? { ...current, bookmarks: previous }
+            : current,
+        );
+        setMessage(`保存书签失败：${errorText(error)}`);
+      }
+    },
+    [doc, setMessage],
+  );
+
+  const toggleBookmark = useCallback(() => {
+    if (!doc) return;
+    const page = currentPageRef.current;
+    const exists = doc.bookmarks.some((bookmark) => bookmark.page === page);
+    const next = exists
+      ? doc.bookmarks.filter((bookmark) => bookmark.page !== page)
+      : [
+          ...doc.bookmarks,
+          {
+            id: crypto.randomUUID(),
+            page,
+            label: `第 ${page + 1} 页`,
+            createdAt: Date.now(),
+          },
+        ].sort((left, right) => left.page - right.page);
+    void persistBookmarks(next);
+  }, [doc, persistBookmarks]);
+
+  const removeBookmark = useCallback(
+    (id: string) => {
+      if (!doc) return;
+      void persistBookmarks(doc.bookmarks.filter((bookmark) => bookmark.id !== id));
+    },
+    [doc, persistBookmarks],
+  );
+
+  const renameBookmark = useCallback(
+    (id: string, label: string) => {
+      if (!doc) return;
+      const value = label.trim();
+      if (!value) return;
+      void persistBookmarks(
+        doc.bookmarks.map((bookmark) =>
+          bookmark.id === id ? { ...bookmark, label: value } : bookmark,
+        ),
+      );
+    },
+    [doc, persistBookmarks],
+  );
+
+  const handleRestored = useCallback(
+    (result: ImportResult) => {
+      annotationsRef.current = result.annotations;
+      setAnnotations(result.annotations);
+      resetHistory();
+      resetSaveState();
+      setToolbar(null);
+      setHover(null);
+      setDoc((current) =>
+        current && current.id === result.document.id
+          ? { ...current, bookmarks: result.document.bookmarks }
+          : current,
+      );
+      void refreshCards();
+    },
+    [refreshCards, resetHistory, resetSaveState],
+  );
 
   const handleViewerScroll = useCallback(() => {
     if (scrollFrame.current !== null) return;
@@ -2253,6 +2378,27 @@ export default function App() {
             >
               <IconRedo size={16} />
             </button>
+            <button
+              type="button"
+              className={`theme-toggle ${currentBookmark ? 'ready' : ''}`}
+              title={currentBookmark ? '移除本页书签' : '给本页加书签'}
+              aria-label={currentBookmark ? '移除本页书签' : '给本页加书签'}
+              aria-pressed={!!currentBookmark}
+              onClick={toggleBookmark}
+            >
+              <IconBookmark size={16} filled={!!currentBookmark} />
+            </button>
+            {desktop && (
+              <button
+                type="button"
+                className="theme-toggle"
+                title="版本历史"
+                aria-label="版本历史"
+                onClick={() => setHistoryOpen(true)}
+              >
+                <IconHistory size={16} />
+              </button>
+            )}
           </div>
         )}
 
@@ -2431,19 +2577,27 @@ export default function App() {
 
           <aside className="sidebar">
             <div className="sidebar-head">
-              <h2>标注</h2>
-              <span
-                className="count"
-                title={
-                  filtered.length === visible.length
-                    ? undefined
-                    : `已筛选 ${filtered.length} 条，共 ${visible.length} 条`
-                }
-              >
-                {filtered.length === visible.length
-                  ? visible.length
-                  : `${filtered.length} / ${visible.length}`}
-              </span>
+              <h2>
+                {sideTab === 'annotations'
+                  ? '标注'
+                  : sideTab === 'outline'
+                    ? '目录'
+                    : '页面'}
+              </h2>
+              {sideTab === 'annotations' && (
+                <span
+                  className="count"
+                  title={
+                    filtered.length === visible.length
+                      ? undefined
+                      : `已筛选 ${filtered.length} 条，共 ${visible.length} 条`
+                  }
+                >
+                  {filtered.length === visible.length
+                    ? visible.length
+                    : `${filtered.length} / ${visible.length}`}
+                </span>
+              )}
               <span className="sidebar-progress">
                 {currentPage + 1} / {doc.pageCount}
               </span>
@@ -2470,6 +2624,41 @@ export default function App() {
               )}
             </div>
 
+            <div className="sidebar-tabs" role="tablist" aria-label="侧栏视图">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={sideTab === 'annotations'}
+                className={sideTab === 'annotations' ? 'active' : ''}
+                onClick={() => setSideTab('annotations')}
+              >
+                标注
+                <span className="tab-count">{filtered.length}</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={sideTab === 'outline'}
+                className={sideTab === 'outline' ? 'active' : ''}
+                onClick={() => setSideTab('outline')}
+              >
+                <IconList size={13} />
+                目录
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={sideTab === 'pages'}
+                className={sideTab === 'pages' ? 'active' : ''}
+                onClick={() => setSideTab('pages')}
+              >
+                <IconPages size={13} />
+                页面
+              </button>
+            </div>
+
+            {sideTab === 'annotations' ? (
+              <>
             {(pdfImport || pdfImportProgress) && (
               <div className="pdf-import-banner">
                 {pdfImportProgress ? (
@@ -2671,6 +2860,27 @@ export default function App() {
                   </button>
                 )}
               </div>
+            )}
+              </>
+            ) : sideTab === 'outline' ? (
+              <OutlinePanel
+                outline={outline}
+                loading={outlineLoading}
+                bookmarks={doc.bookmarks}
+                currentPage={currentPage}
+                onJump={goToPage}
+                onToggleBookmark={toggleBookmark}
+                onRemoveBookmark={removeBookmark}
+                onRenameBookmark={renameBookmark}
+              />
+            ) : (
+              <PageThumbnails
+                pdf={doc.pdf}
+                pageCount={doc.pageCount}
+                currentPage={currentPage}
+                bookmarks={doc.bookmarks}
+                onJump={goToPage}
+              />
             )}
 
             <div className="sidebar-foot">
@@ -2876,6 +3086,16 @@ export default function App() {
           onClose={() => setAiPanel(null)}
           onJumpPage={goToPage}
           onOpenSettings={() => void openAiSettings()}
+          onMessage={setMessage}
+        />
+      )}
+
+      {historyOpen && doc && (
+        <HistoryModal
+          docId={doc.id}
+          docName={doc.name}
+          onClose={() => setHistoryOpen(false)}
+          onRestored={handleRestored}
           onMessage={setMessage}
         />
       )}

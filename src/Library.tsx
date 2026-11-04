@@ -7,21 +7,28 @@ import {
   listDocuments,
   listFolders,
   listSmartCollections,
+  loadPageTexts,
   organizeDocument,
   organizeDocuments,
+  pageIndexStatus,
   reorderDocuments as persistOrder,
   saveCover,
   saveFolders,
+  savePageTexts,
   saveSmartCollections,
   scanLibrary,
   searchAnnotations,
+  searchPages,
   updateDocumentMeta,
 } from './desktop';
+import { extractDocumentText } from './pdfText';
 import { pickPdfPath } from './platform';
 import { IconSearch, IconStar, IconTrash, IconUpload } from './icons';
 import type {
   DocumentMeta,
   LibrarySort,
+  PageHit,
+  PageIndexStatus,
   ScanReport,
   SearchHit,
   SmartCollection,
@@ -83,7 +90,13 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
   const [importing, setImporting] = useState(false);
   const [query, setQuery] = useState('');
   const [hits, setHits] = useState<SearchHit[]>([]);
+  const [pageHits, setPageHits] = useState<PageHit[]>([]);
   const [searching, setSearching] = useState(false);
+  const [searchRevision, setSearchRevision] = useState(0);
+  const [indexStatus, setIndexStatus] = useState<PageIndexStatus | null>(null);
+  const [indexing, setIndexing] = useState(false);
+  const [indexProgress, setIndexProgress] = useState('');
+  const indexCancel = useRef(false);
   const [sync, setSync] = useState<ScanReport | null>(null);
   const [sort, setSort] = useState<LibrarySort>('recent');
   const [favoriteOnly, setFavoriteOnly] = useState(false);
@@ -161,18 +174,93 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
     }
   }, []);
 
+  const refreshIndexStatus = useCallback(async () => {
+    try {
+      setIndexStatus(await pageIndexStatus());
+    } catch (error) {
+      console.warn('读取正文索引状态失败', error);
+    }
+  }, []);
+
   const refresh = useCallback(async () => {
     try {
       const report = await scanLibrary();
       setSync(report);
       await loadDocs();
       await loadSidebar();
+      await refreshIndexStatus();
       setLoading(false);
     } catch (error) {
       setLoading(false);
       onMessage(`读取书库失败：${errorText(error)}`);
     }
-  }, [loadDocs, loadSidebar, onMessage]);
+  }, [loadDocs, loadSidebar, onMessage, refreshIndexStatus]);
+
+  const indexLibrary = useCallback(async () => {
+    if (indexing) {
+      indexCancel.current = true;
+      setIndexProgress('正在停止…');
+      return;
+    }
+
+    setIndexing(true);
+    indexCancel.current = false;
+    let updated = 0;
+    let failed = 0;
+
+    try {
+      const list = await listDocuments();
+      for (let index = 0; index < list.length; index += 1) {
+        if (indexCancel.current) break;
+        const doc = list[index];
+        if (doc.pageCount <= 0) continue;
+
+        const cached = await loadPageTexts(doc.id);
+        if (cached.length >= doc.pageCount) continue;
+
+        const label = doc.title || doc.name;
+        setIndexProgress(`正在索引「${label}」（${index + 1}/${list.length}）…`);
+        const task = pdfjsLib.getDocument({ url: assetUrl(doc.path), ...pdfjsAssets });
+        try {
+          const pdf = await task.promise;
+          const pages = await extractDocumentText(pdf, (done, total) => {
+            if (!indexCancel.current) {
+              setIndexProgress(`正在索引「${label}」${done}/${total} 页…`);
+            }
+          });
+          for (let start = 0; start < pages.length; start += 50) {
+            if (indexCancel.current) break;
+            await savePageTexts(doc.id, pages.slice(start, start + 50));
+          }
+          updated += 1;
+        } catch (error) {
+          failed += 1;
+          console.warn('建立正文索引失败', doc.name, error);
+        } finally {
+          await task.destroy().catch(() => undefined);
+        }
+      }
+
+      setSearchRevision((value) => value + 1);
+      if (indexCancel.current) {
+        onMessage(`已停止索引，本次完成 ${updated} 份文档。`);
+      } else if (updated === 0 && failed === 0) {
+        onMessage('正文索引已是最新。');
+      } else {
+        onMessage(
+          failed > 0
+            ? `正文索引完成，更新 ${updated} 份；${failed} 份读取失败。`
+            : `正文索引完成，更新 ${updated} 份文档。`,
+        );
+      }
+    } catch (error) {
+      onMessage(`建立正文索引失败：${errorText(error)}`);
+    } finally {
+      setIndexing(false);
+      setIndexProgress('');
+      await refreshIndexStatus();
+    }
+  }, [indexing, onMessage, refreshIndexStatus]);
 
   useEffect(() => {
     void refresh();
@@ -185,6 +273,7 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
     const term = query.trim();
     if (!term) {
       setHits([]);
+      setPageHits([]);
       setSearching(false);
       return;
     }
@@ -192,12 +281,13 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
     let cancelled = false;
     setSearching(true);
     const timer = window.setTimeout(() => {
-      searchAnnotations(term)
-        .then((results) => {
-          if (!cancelled) setHits(results);
-        })
-        .catch((error) => {
-          if (!cancelled) onMessage(`搜索失败：${errorText(error)}`);
+      Promise.allSettled([searchAnnotations(term), searchPages(term)])
+        .then(([annotations, pages]) => {
+          if (cancelled) return;
+          if (annotations.status === 'fulfilled') setHits(annotations.value);
+          if (pages.status === 'fulfilled') setPageHits(pages.value);
+          const failed = [annotations, pages].find((item) => item.status === 'rejected');
+          if (failed) onMessage(`搜索失败：${errorText(failed.reason)}`);
         })
         .finally(() => {
           if (!cancelled) setSearching(false);
@@ -208,7 +298,7 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [query, onMessage]);
+  }, [query, onMessage, searchRevision]);
 
   const handleImport = useCallback(async () => {
     setImporting(true);
@@ -689,20 +779,38 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
                 )}
               </div>
 
-              <label className="library-sort">
-                <span>排序</span>
-                <select
-                  aria-label="排序方式"
-                  value={sort}
-                  onChange={(event) => setSort(event.target.value as LibrarySort)}
-                >
-                  <option value="recent">最近阅读</option>
-                  <option value="added">添加时间</option>
-                  <option value="title">标题</option>
-                  <option value="annotations">标注数</option>
-                  <option value="manual">手动排序</option>
-                </select>
-              </label>
+              <div className="library-tool-right">
+                <label className="library-sort">
+                  <span>排序</span>
+                  <select
+                    aria-label="排序方式"
+                    value={sort}
+                    onChange={(event) => setSort(event.target.value as LibrarySort)}
+                  >
+                    <option value="recent">最近阅读</option>
+                    <option value="added">添加时间</option>
+                    <option value="title">标题</option>
+                    <option value="annotations">标注数</option>
+                    <option value="manual">手动排序</option>
+                  </select>
+                </label>
+                <div className="library-index">
+                  <button
+                    type="button"
+                    className="ghost"
+                    title="在本机提取 PDF 文字层，供全库正文搜索使用"
+                    onClick={() => void indexLibrary()}
+                  >
+                    {indexing ? '停止索引' : '索引正文'}
+                  </button>
+                  <span className="index-status" title={indexProgress}>
+                    {indexProgress ||
+                      (indexStatus
+                        ? `已索引 ${indexStatus.indexedDocuments}/${indexStatus.documents} 份`
+                        : '')}
+                  </span>
+                </div>
+              </div>
             </div>
           )}
 
@@ -710,36 +818,93 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
             <section className="search-results">
               {searching ? (
                 <p className="library-empty">搜索中…</p>
-              ) : hits.length === 0 ? (
-                <p className="library-empty">没有匹配「{query.trim()}」的标注。</p>
+              ) : hits.length === 0 && pageHits.length === 0 ? (
+                <div className="search-empty">
+                  <p className="library-empty">没有匹配「{query.trim()}」的正文或标注。</p>
+                  {indexStatus && indexStatus.indexedDocuments < indexStatus.documents && (
+                    <p className="search-index-hint">
+                      正文索引覆盖 {indexStatus.indexedDocuments}/{indexStatus.documents} 份文档。
+                      未索引的文档不会出现在正文结果里。
+                      <button
+                        type="button"
+                        className="link-button"
+                        onClick={() => void indexLibrary()}
+                      >
+                        {indexing ? '停止索引' : '建立正文索引'}
+                      </button>
+                    </p>
+                  )}
+                  {indexing && indexProgress && (
+                    <p className="search-index-hint">{indexProgress}</p>
+                  )}
+                </div>
               ) : (
                 <>
-                  <p className="search-count">{hits.length} 条结果</p>
-                  {hits.map((hit) => (
-                    <button
-                      key={hit.annotationId}
-                      type="button"
-                      className="search-hit"
-                      onClick={() => onOpen(hit.docId, hit.page)}
-                    >
-                      <header>
-                        <span className={`color-dot ${hit.color}`} />
-                        <span className="search-doc">{hit.docName}</span>
-                        <span>第 {hit.page + 1} 页</span>
-                      </header>
-                      {hit.quote && <blockquote>{hit.quote}</blockquote>}
-                      {hit.body && <p>{hit.body}</p>}
-                      {hit.tags.length > 0 && (
-                        <div className="tag-row">
-                          {hit.tags.map((tag) => (
-                            <span className="tag" key={tag}>
-                              #{tag}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                    </button>
-                  ))}
+                  {pageHits.length > 0 && (
+                    <div className="search-group">
+                      <p className="search-count">正文 · {pageHits.length} 条</p>
+                      {pageHits.map((hit) => (
+                        <button
+                          key={`${hit.docId}-${hit.page}`}
+                          type="button"
+                          className="search-hit"
+                          onClick={() => onOpen(hit.docId, hit.page)}
+                        >
+                          <header>
+                            <span className="search-doc">{hit.docName}</span>
+                            <span>第 {hit.page + 1} 页</span>
+                          </header>
+                          <blockquote>{hit.snippet}</blockquote>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {hits.length > 0 && (
+                    <div className="search-group">
+                      <p className="search-count">标注 · {hits.length} 条</p>
+                      {hits.map((hit) => (
+                        <button
+                          key={hit.annotationId}
+                          type="button"
+                          className="search-hit"
+                          onClick={() => onOpen(hit.docId, hit.page)}
+                        >
+                          <header>
+                            <span className={`color-dot ${hit.color}`} />
+                            <span className="search-doc">{hit.docName}</span>
+                            <span>第 {hit.page + 1} 页</span>
+                          </header>
+                          {hit.quote && <blockquote>{hit.quote}</blockquote>}
+                          {hit.body && <p>{hit.body}</p>}
+                          {hit.tags.length > 0 && (
+                            <div className="tag-row">
+                              {hit.tags.map((tag) => (
+                                <span className="tag" key={tag}>
+                                  #{tag}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {indexStatus && indexStatus.indexedDocuments < indexStatus.documents && (
+                    <p className="search-index-hint">
+                      正文索引覆盖 {indexStatus.indexedDocuments}/{indexStatus.documents} 份文档，
+                      未索引的文档不会出现在正文结果里。
+                      <button
+                        type="button"
+                        className="link-button"
+                        onClick={() => void indexLibrary()}
+                      >
+                        {indexing ? '停止索引' : '建立正文索引'}
+                      </button>
+                    </p>
+                  )}
+                  {indexing && indexProgress && (
+                    <p className="search-index-hint">{indexProgress}</p>
+                  )}
                 </>
               )}
             </section>

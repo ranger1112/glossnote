@@ -453,3 +453,32 @@ test('页内查找：Ctrl+F 搜索并定位命中', async ({ page }) => {
   await page.keyboard.press('Escape');
   await expect(page.locator('.find-bar')).toHaveCount(0);
 });
+
+test('侧栏目录、书签与页面缩略图', async ({ page }) => {
+  await page.goto('/?sample');
+  await expect(
+    page.locator('.pdf-page').first().locator('.text-layer span').first(),
+  ).toBeVisible({ timeout: 30_000 });
+
+  await page.getByRole('tab', { name: '目录' }).click();
+  await expect(page.locator('.outline-panel')).toBeVisible();
+  await expect(page.getByText('还没有书签')).toBeVisible();
+
+  await page.getByRole('button', { name: '给本页加书签' }).click();
+  await expect(page.locator('.bookmark-row')).toHaveCount(1);
+  await expect(page.locator('.bookmark-label')).toHaveText('第 1 页');
+
+  await page.locator('.bookmark-row').hover();
+  await page.getByRole('button', { name: /重命名书签/ }).click();
+  const rename = page.getByRole('textbox', { name: '书签名称' });
+  await rename.fill('重点');
+  await rename.press('Enter');
+  await expect(page.locator('.bookmark-label')).toHaveText('重点');
+
+  await page.getByRole('tab', { name: '页面' }).click();
+  await expect(page.locator('.page-thumb').first()).toBeVisible();
+  await expect(page.locator('.page-thumb img').first()).toBeVisible({ timeout: 30_000 });
+
+  await page.getByRole('tab', { name: '标注' }).click();
+  await expect(page.locator('.sidebar-tabs button.active')).toHaveText(/标注/);
+});

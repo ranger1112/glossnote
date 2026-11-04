@@ -23,6 +23,7 @@ function doc(id: string, patch: Partial<DocumentMeta> = {}): DocumentMeta {
     lastPage: 0,
     favorite: false,
     tags: [],
+    bookmarks: [],
     folder: '',
     position: 0,
     annotationCount: 0,

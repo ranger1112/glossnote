@@ -18,6 +18,8 @@ pub struct DocumentRow {
     pub last_page: u32,
     pub favorite: bool,
     pub tags: Vec<String>,
+    /// 页面书签；随 sidecar 做整表 LWW。
+    pub bookmarks: Vec<Bookmark>,
     /// 虚拟文件夹名；空字符串表示「未分类」。不移动 books/ 里的 PDF。
     pub folder: String,
     /// 手动排序位置，只存在本机索引里，不写 sidecar。
@@ -52,6 +54,7 @@ impl DocumentRow {
             last_page: self.last_page,
             favorite: self.favorite,
             tags: self.tags.clone(),
+            bookmarks: self.bookmarks.clone(),
             folder: self.folder.clone(),
             position: self.position,
             annotation_count: self.annotation_count,
@@ -75,9 +78,21 @@ pub struct Document {
     pub last_page: u32,
     pub favorite: bool,
     pub tags: Vec<String>,
+    pub bookmarks: Vec<Bookmark>,
     pub folder: String,
     pub position: i64,
     pub annotation_count: usize,
+}
+
+/// 文档内的一页书签；标签由用户改，页码从 0 开始。
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Bookmark {
+    pub id: String,
+    pub page: u32,
+    pub label: String,
+    #[serde(default)]
+    pub created_at: i64,
 }
 
 /// 书库里「智能收藏夹」：保存一组筛选条件，不复制文档，点开时动态匹配。
@@ -259,6 +274,39 @@ pub struct SearchHit {
     pub tags: Vec<String>,
 }
 
+/// 全库正文搜索的一条命中；snippet 从原始页面文字里截取，不是索引词。
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PageHit {
+    pub doc_id: String,
+    pub doc_name: String,
+    pub page: u32,
+    pub snippet: String,
+}
+
+#[derive(Serialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PageIndexStatus {
+    pub documents: usize,
+    pub indexed_documents: usize,
+    pub pages: usize,
+    pub indexed_pages: usize,
+}
+
+/// 版本历史里的一份 sidecar 快照。
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SidecarVersion {
+    pub id: String,
+    pub created_at: i64,
+    pub annotations: usize,
+    pub cards: usize,
+    pub bookmarks: usize,
+    pub favorite: bool,
+    pub tags: Vec<String>,
+    pub folder: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct PageTextInput {
@@ -337,6 +385,9 @@ pub struct Sidecar {
     pub favorite: bool,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// 旧 sidecar 没有书签字段：None 表示「没提供」，不覆盖本机书签。
+    #[serde(default)]
+    pub bookmarks: Option<Vec<Bookmark>>,
     /// 旧版 sidecar 没有该字段：None 表示「没提供」，合并时不要覆盖本机文件夹。
     #[serde(default)]
     pub folder: Option<String>,

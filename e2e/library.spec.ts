@@ -32,6 +32,7 @@ async function mockLibrary(page: Page) {
         lastPage: 0,
         favorite: false,
         tags: ['论文'],
+        bookmarks: [],
         folder: '',
         position: 3,
         annotationCount: 2,
@@ -50,6 +51,7 @@ async function mockLibrary(page: Page) {
         lastPage: 0,
         favorite: false,
         tags: [],
+        bookmarks: [],
         folder: '',
         position: 2,
         annotationCount: 0,
@@ -68,6 +70,7 @@ async function mockLibrary(page: Page) {
         lastPage: 0,
         favorite: false,
         tags: ['论文'],
+        bookmarks: [],
         folder: '',
         position: 1,
         annotationCount: 1,
@@ -143,6 +146,56 @@ async function mockLibrary(page: Page) {
             return copy(state.folders);
           case 'list_smart_collections':
             return copy(state.collections);
+          case 'search_annotations': {
+            const query = String(args.query ?? '');
+            if (!query.includes('标注')) return [];
+            return [
+              {
+                annotationId: 'ann-1',
+                docId: 'doc-a',
+                docName: '深度工作',
+                page: 0,
+                quote: '标注的价值不在数量',
+                body: '',
+                color: 'yellow',
+                tags: ['论文'],
+              },
+            ];
+          }
+          case 'search_pages': {
+            const query = String(args.query ?? '');
+            if (!query.includes('认知')) return [];
+            return [
+              {
+                docId: 'doc-a',
+                docName: '深度工作',
+                page: 0,
+                snippet: '…认知科学是研究心智的科学…',
+              },
+            ];
+          }
+          case 'page_index_status':
+            return {
+              documents: state.docs.length,
+              indexedDocuments: 1,
+              pages: 400,
+              indexedPages: 120,
+            };
+          case 'load_page_texts':
+            return [];
+          case 'save_page_texts':
+            return (args.pages as unknown[]).length;
+          case 'list_sidecar_versions':
+            return [];
+          case 'save_bookmarks': {
+            const doc = state.docs.find((item) => item.id === args.docId);
+            if (doc) {
+              (doc as unknown as { bookmarks: unknown[] }).bookmarks = copy(
+                args.bookmarks as unknown[],
+              );
+            }
+            return copy(doc);
+          }
           case 'save_smart_collections':
             state.collections = copy(args.collections as unknown[]);
             return copy(state.collections);
@@ -254,6 +307,20 @@ test('书库：手动排序拖动卡片并持久化位置', async ({ page }) => 
         .map((doc) => doc.id),
   );
   expect(positions).toEqual(['doc-a', 'doc-c', 'doc-b']);
+});
+
+test('书库：正文与标注搜索结果分组显示', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.locator('.library-item')).toHaveCount(3);
+
+  const search = page.getByLabel('搜索标注、批注、标签');
+  await search.fill('认知');
+  await expect(page.getByText('正文 · 1 条')).toBeVisible();
+  await expect(page.getByText('认知科学是研究心智的科学')).toBeVisible();
+
+  await search.fill('标注');
+  await expect(page.getByText('标注 · 1 条')).toBeVisible();
+  await expect(page.getByText('标注的价值不在数量')).toBeVisible();
 });
 
 test('书库：保存并应用智能收藏夹', async ({ page }) => {

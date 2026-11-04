@@ -5,14 +5,18 @@ import type {
   AiSettingsInput,
   AiSettingsView,
   Annotation,
+  Bookmark,
   CardView,
   ChatTurn,
   DeleteReport,
   DocumentMeta,
   ImportResult,
+  PageHit,
+  PageIndexStatus,
   PageTextInput,
   ScanReport,
   SearchHit,
+  SidecarVersion,
   SmartCollection,
 } from './types';
 
@@ -134,6 +138,28 @@ export function saveProgress(docId: string, lastPage: number): Promise<void> {
 
 export function searchAnnotations(query: string): Promise<SearchHit[]> {
   return invoke('search_annotations', { query });
+}
+
+/** 全库正文搜索；只覆盖已经缓存过页面文字的文档。 */
+export function searchPages(query: string): Promise<PageHit[]> {
+  return invoke('search_pages', { query });
+}
+
+export function pageIndexStatus(): Promise<PageIndexStatus> {
+  return invoke('page_index_status');
+}
+
+export function saveBookmarks(docId: string, bookmarks: Bookmark[]): Promise<DocumentMeta> {
+  return invoke('save_bookmarks', { docId, bookmarks });
+}
+
+export function listSidecarVersions(docId: string): Promise<SidecarVersion[]> {
+  return invoke('list_sidecar_versions', { docId });
+}
+
+/** 把某份历史快照恢复为当前标注/书签/整理信息。 */
+export function restoreSidecarVersion(docId: string, versionId: string): Promise<ImportResult> {
+  return invoke('restore_sidecar_version', { docId, versionId });
 }
 
 export function exportMarkdown(path: string, docId?: string): Promise<string> {

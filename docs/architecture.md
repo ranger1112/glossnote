@@ -33,6 +33,7 @@ Rust 侧只做 WebView 做不了或做起来不划算的事：文件系统、哈
 │   └── 设计心理学.pdf
 └── .glossnote/
     ├── annotations/<sha256>.json     # 每份文档一份 sidecar，按内容哈希命名
+    ├── history/<sha256>/<时间戳>-<序号>.json # 覆盖 sidecar 前的自动快照，每份保留最近 30 个
     ├── thumbnails/<sha256>.jpg       # 首页封面，320px 宽，可重建
     └── conflicts/                    # 合并后的云盘冲突副本，保留原文
 ```
@@ -64,9 +65,10 @@ documents(
   cover TEXT DEFAULT '',      -- 缩略图相对路径
   favorite INTEGER DEFAULT 0,
   tags TEXT DEFAULT '[]',     -- 文档标签 JSON
+  bookmarks TEXT DEFAULT '[]',-- 页面书签 JSON
   folder TEXT DEFAULT '',     -- 虚拟文件夹；空字符串 = 未分类
   position INTEGER DEFAULT 0, -- 手动排序位置，仅本机
-  meta_updated_at INTEGER DEFAULT 0 -- 收藏/标签/文件夹的 LWW 时间戳
+  meta_updated_at INTEGER DEFAULT 0 -- 收藏/标签/书签/文件夹的 LWW 时间戳
 );
 
 annotations(
@@ -106,12 +108,16 @@ chunks(                            -- AI 全文索引，派生数据，不进 si
   text TEXT NOT NULL
 );
 
-page_texts(                        -- 页内查找的逐页原文缓存，派生数据，不进 sidecar
+page_texts(                        -- 页内查找与全库正文检索的逐页原文缓存，派生数据，不进 sidecar
   doc_id TEXT NOT NULL,
   page INTEGER NOT NULL,
   text TEXT NOT NULL,
+  tokens TEXT NOT NULL DEFAULT '', -- FTS5 用的中英混排 token
   PRIMARY KEY (doc_id, page)
 );
+
+page_search USING fts5(tokens, content='page_texts', content_rowid='rowid');
+-- 触发器保持 token 与 FTS 同步；升级旧库时回填 tokens 后 rebuild 一次
 ```
 
 约定：
@@ -180,7 +186,8 @@ page_texts(                        -- 页内查找的逐页原文缓存，派生
 0.4 把单文档阅读器扩展成「书库 ↔ 阅读器」两视图：
 
 - **书库**：扫描书库后列出文档卡片；封面与页数在缺失时由前端用 pdf.js 补齐；标注数来自 `annotations` 子查询。
-- **搜索**：输入停顿 240ms 后调用 `search_annotations`，在引文（`json_extract(anchor,'$.quote')`）、`body`、`tags` JSON、文档名与标题上做 `LIKE` 子串匹配，最多返回 100 条，按更新时间倒序。不能直接匹配 `anchor` 整段 JSON——那会把坐标和 `pageHash` 也算进去，搜 `start` 或 `0.5` 会命中所有标注。结果点击后打开文档并滚到对应页。
+- **搜索**：输入停顿 240ms 后同时调用 `search_annotations` 与 `search_pages`。标注搜索在引文（`json_extract(anchor,'$.quote')`）、`body`、`tags` JSON、文档名与标题上做 `LIKE` 子串匹配，最多 100 条；不能直接匹配 `anchor` 整段 JSON——那会把坐标和 `pageHash` 也算进去。正文搜索走 `page_search` FTS5：中文连续段切成二元组，连续中文查询按二元组短语匹配，拉丁字母/数字切成小写词，英文查询加 `*` 做前缀匹配，单字中文退回 `LIKE`；命中的页码用原始 `page_texts.text` 截取上下文片段。结果点击后打开文档并滚到对应页。
+- **正文索引**：书库工具栏显示已索引文档数，`索引正文` 逐本用 pdf.js 提取文字层，每 50 页批量写 `page_texts`，写盘时触发器同步 FTS；可中途停止，完成后自动刷新当前搜索。只索引已导入书库的文档，整个过程在本机完成。
 - **阅读进度**：滚动时按视口顶部命中页更新，700ms 防抖写 `last_page`；返回书库时再同步写一次，避免扫描读到旧值；打开文档时优先使用调用方传入的页码，其次使用 `last_page`。
 - **标签**：作为标注的 `tags` 数组存储，随标注写入 SQLite 与 sidecar；搜索命中会返回标签。
 - **文档整理**：收藏（`favorite`）、文档级标签（`tags`）与虚拟文件夹（`folder`）存在 `documents` 表，并写进 sidecar 的 `favorite` / `tags` / `folder` / `metaUpdatedAt`；扫描时按 `metaUpdatedAt` 做 LWW。标签只做去空白、去 `#`、去重、24 字与 20 个的上限。
@@ -192,6 +199,15 @@ page_texts(                        -- 页内查找的逐页原文缓存，派生
 - **深色模式**：`data-theme` 作用在 `<html>`，配色全部走 CSS 变量；偏好存 `localStorage`。
 
 封面写入路径固定为 `.glossnote/thumbnails/<sha256>.jpg`，扫描时若记录里没有 cover 但文件存在，会重新挂上，避免删库后封面丢失。
+
+## 版本历史
+
+sidecar 是标注的真相源，覆盖写入前自动快照到 `.glossnote/history/<sha256>/<毫秒时间戳>-<四位序号>.json`；每份文档保留最近 30 个版本，内容未变时不产生快照。
+
+- **列表**：读取快照并按文件名时间戳倒序，展示标注/卡片/书签数量、收藏、标签与文件夹。
+- **恢复**：快照里的标注更新时间推进到 `now`，快照中不存在的当前标注写墓碑；收藏、标签、文件夹与书签从快照恢复。这样“恢复”在跨设备 LWW 合并里也能赢过其他设备的旧数据。
+- **卡片不回滚**：来源卡片保持当前内容，恢复标注后由 `orphan_cards_for_document` 与 `upsert_annotation` 重新计算失效/可用。
+- **可回退**：恢复前会先快照当前 sidecar，误恢复还能再退回来。历史文件在 `.glossnote/` 下，会随云盘一起同步。
 
 ## 卡片与复习
 
@@ -228,7 +244,7 @@ page_texts(                        -- 页内查找的逐页原文缓存，派生
 约束与边界：
 
 - 同步单位是 `annotation` 与 `card`，每条带 `updatedAt` 与 `deleted`；不做整文件覆盖。卡片跟随来源文档的 sidecar，跨文档移动尚未支持。
-- 文档级组织字段（`favorite` / `tags` / `folder`）作为一份元数据按 `metaUpdatedAt` 做 LWW；手动排序 `position` 与阅读进度 `last_page` 是本机状态，不参与同步。
+- 文档级组织字段（`favorite` / `tags` / `bookmarks` / `folder`）作为一份元数据按 `metaUpdatedAt` 做 LWW；手动排序 `position` 与阅读进度 `last_page` 是本机状态，不参与同步。书签是整表 LWW，同一时刻两端各加一个书签时只保留较新的一侧。
 - **不上 CRDT。** 标注是准不可变的小记录，LWW 足够；只有出现“两人同时编辑同一段笔记正文”时才重新评估。
 - 冲突副本只保留原始 JSON，不提供逐字段 diff 或人工选择；同时间戳的冲突按路径顺序取舍。
 - 打开/导入单份文档时按文件名前缀只读该文档的 sidecar 与云盘冲突副本，不再遍历整个标注目录；被手工改名的 sidecar 仍会在全库扫描时合并。
