@@ -385,12 +385,14 @@ export default function App() {
   }, [scanEnhanceDocs]);
 
   useEffect(() => {
+    // 拖动过程中宽度每帧都在变，松手后再写一次，别让 localStorage 跟着每帧写入。
+    if (sidebarResizing) return;
     try {
       localStorage.setItem(SIDEBAR_WIDTH_KEY, String(Math.round(sidebarWidth)));
     } catch {
       // 存储不可用时只影响下次启动的宽度记忆。
     }
-  }, [sidebarWidth]);
+  }, [sidebarWidth, sidebarResizing]);
 
   const startSidebarResize = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {

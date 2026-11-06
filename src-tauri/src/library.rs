@@ -1604,7 +1604,7 @@ fn list_versions(root: &Path, doc_id: &str) -> Result<Vec<SidecarVersion>, Strin
             .cmp(&left.created_at)
             .then_with(|| right.id.cmp(&left.id))
     });
-    versions.truncate(60);
+    versions.truncate(HISTORY_VERSIONS);
     Ok(versions)
 }
 
