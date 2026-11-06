@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-11-06
+
+### 性能
+
+- 页面缩略图共用 IntersectionObserver，并让屏外缩略图跳过布局与绘制；500 页以上的书切换「页面」视图更流畅。
+- 大文档关闭 pdf.js 后台整本预取，只按需读取 Range，减少首屏渲染时的文件搬运。
+- 画布渲染与文字层提取并行，文字层不再等待画布完成。
+- 活动页渲染期间显示骨架，扫描页不再长时间白屏。
+
+### 维护
+
+- 移除与 `write_sidecar` 等价的 `write_sidecar_if_changed`。
+- 升级 `@tauri-apps/plugin-dialog`、`tauri-plugin-dialog` 与 `rusqlite` 补丁版本。
+
 ## [0.3.1] - 2026-11-06
 
 ### 修复
