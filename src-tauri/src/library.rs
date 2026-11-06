@@ -421,7 +421,7 @@ fn reconcile_document(
     db::orphan_cards_for_document(conn, &document.id, now_ms())?;
     // 合并结果没变就不要碰文件：扫描和打开文档都会走到这里，
     // 每次重写会让云盘客户端把整座书库当成“已修改”。
-    write_sidecar_if_changed(conn, root, &document.id)?;
+    write_sidecar(conn, root, &document.id)?;
 
     for (path, sidecar) in &ordered {
         if is_canonical(path, &document.id) || sidecar.schema_version != SIDECAR_VERSION {
@@ -554,18 +554,9 @@ fn write_sidecar_bytes(root: &Path, path: &Path, bytes: &[u8]) -> Result<(), Str
     Ok(())
 }
 
-pub fn write_sidecar(conn: &rusqlite::Connection, root: &Path, doc_id: &str) -> Result<(), String> {
-    let bytes = serialized_sidecar(conn, doc_id)?;
-    write_sidecar_bytes(root, &sidecar_path(root, doc_id), &bytes)
-}
-
 /// 扫描/打开文档时会走一遍合并，即使什么都没变也会被调到这里。
 /// 内容相同就在 `write_sidecar_bytes` 里直接跳过，不产生历史版本。
-fn write_sidecar_if_changed(
-    conn: &rusqlite::Connection,
-    root: &Path,
-    doc_id: &str,
-) -> Result<(), String> {
+pub fn write_sidecar(conn: &rusqlite::Connection, root: &Path, doc_id: &str) -> Result<(), String> {
     let bytes = serialized_sidecar(conn, doc_id)?;
     write_sidecar_bytes(root, &sidecar_path(root, doc_id), &bytes)
 }
@@ -2898,7 +2889,7 @@ mod tests {
         let first = fs::metadata(&path).unwrap().modified().unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(20));
-        write_sidecar_if_changed(&conn, &root, "doc1").unwrap();
+        write_sidecar(&conn, &root, "doc1").unwrap();
         assert_eq!(
             first,
             fs::metadata(&path).unwrap().modified().unwrap(),
@@ -2906,7 +2897,7 @@ mod tests {
         );
 
         db::upsert_annotation(&conn, &row.id, &annotation("a1", 20, "newer")).unwrap();
-        write_sidecar_if_changed(&conn, &root, "doc1").unwrap();
+        write_sidecar(&conn, &root, "doc1").unwrap();
         assert!(
             fs::metadata(&path).unwrap().modified().unwrap() > first,
             "数据库变化后应重写 sidecar"
