@@ -938,10 +938,7 @@ pub fn page_text_counts(conn: &Connection) -> Result<HashMap<String, usize>, Str
         .map_err(|error| format!("准备页面文字统计失败：{error}"))?;
     let rows = statement
         .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)? as usize,
-            ))
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
         })
         .map_err(|error| format!("读取页面文字统计失败：{error}"))?;
     rows.collect::<rusqlite::Result<HashMap<String, usize>>>()

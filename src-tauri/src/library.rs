@@ -992,7 +992,11 @@ pub fn page_index_status(app: &AppHandle) -> Result<PageIndexStatus, String> {
     for document in documents {
         // 云盘还没同步下来、或已经被删掉的 PDF 不该让覆盖率永远差几份。
         if root
-            .join(document.rel_path.replace('/', std::path::MAIN_SEPARATOR_STR))
+            .join(
+                document
+                    .rel_path
+                    .replace('/', std::path::MAIN_SEPARATOR_STR),
+            )
             .is_file()
         {
             continue;
@@ -1484,7 +1488,11 @@ fn valid_file_name(value: &str) -> bool {
         return false;
     }
 
-    let stem = value.split('.').next().unwrap_or(value).to_ascii_uppercase();
+    let stem = value
+        .split('.')
+        .next()
+        .unwrap_or(value)
+        .to_ascii_uppercase();
     !matches!(
         stem.as_str(),
         "CON"
