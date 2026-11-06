@@ -2987,6 +2987,7 @@ export default function App() {
               />
             ) : (
               <PageThumbnails
+                key={doc.id}
                 pdf={doc.pdf}
                 pageCount={doc.pageCount}
                 currentPage={currentPage}
