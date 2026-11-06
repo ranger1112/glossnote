@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { pdfjsAssets, pdfjsLib } from './pdfjs';
+import { pdfjsLib, pdfjsOpenOptions } from './pdfjs';
 import {
   assetUrl,
   deleteDocuments,
@@ -57,7 +57,7 @@ let indexRunActive = false;
 
 /** 打开 PDF 拿到页数；缺封面时顺便把首页画成 320px 宽的 JPEG。 */
 async function inspectPdf(doc: DocumentMeta): Promise<Inspection> {
-  const task = pdfjsLib.getDocument({ url: assetUrl(doc.path), ...pdfjsAssets });
+  const task = pdfjsLib.getDocument({ url: assetUrl(doc.path), ...pdfjsOpenOptions });
   try {
     const pdf = await task.promise;
     if (doc.cover) return { pageCount: pdf.numPages, cover: null };
@@ -228,7 +228,7 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
 
         const label = doc.title || doc.name;
         setIndexProgress(`正在索引「${label}」（${index + 1}/${list.length}）…`);
-        const task = pdfjsLib.getDocument({ url: assetUrl(doc.path), ...pdfjsAssets });
+        const task = pdfjsLib.getDocument({ url: assetUrl(doc.path), ...pdfjsOpenOptions });
         try {
           const pdf = await task.promise;
           const pages = await extractDocumentText(pdf, (done, total) => {

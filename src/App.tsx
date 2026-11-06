@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
-import { pdfjsAssets, pdfjsLib } from './pdfjs';
+import { pdfjsLib, pdfjsOpenOptions } from './pdfjs';
 import { PdfPage } from './PdfPage';
 import { Library } from './Library';
 import { Review } from './Review';
@@ -1241,7 +1241,7 @@ export default function App() {
         saveDoc(record);
         recordRef.current = record;
 
-        const task = pdfjsLib.getDocument({ data: bytes.slice(0), ...pdfjsAssets });
+        const task = pdfjsLib.getDocument({ data: bytes.slice(0), ...pdfjsOpenOptions });
         const pdf = await task.promise;
         await activate({
           id: docId,
@@ -1270,7 +1270,10 @@ export default function App() {
       setMessage('正在打开文档…');
       try {
         const result = await openDocument(docId);
-        const task = pdfjsLib.getDocument({ url: assetUrl(result.document.path), ...pdfjsAssets });
+        const task = pdfjsLib.getDocument({
+          url: assetUrl(result.document.path),
+          ...pdfjsOpenOptions,
+        });
         const pdf = await task.promise;
         await activate({
           id: result.document.id,

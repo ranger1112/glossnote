@@ -18,6 +18,16 @@ export const pdfjsAssets = {
   iccUrl: `${assetBase}iccs/`,
 } as const;
 
+/**
+ * 大文档只按需取范围：关闭后台整本预取，避免 90MB 文档在首屏渲染时
+ * 同时把整份文件经 asset protocol 搬进 WebView。Tauri 的 asset 协议支持 Range。
+ */
+export const pdfjsOpenOptions = {
+  ...pdfjsAssets,
+  disableAutoFetch: true,
+  rangeChunkSize: 1 << 18,
+} as const;
+
 export { pdfjsLib };
 
 /** 只保留我们用得到的字段，避免把 pdf.js 的内部类型泄漏到组件里。 */

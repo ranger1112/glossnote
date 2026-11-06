@@ -434,22 +434,21 @@ export const PdfPage = memo(function PdfPage({
         canvas.style.width = `${viewport.width}px`;
         canvas.style.height = `${viewport.height}px`;
 
+        // 文字层与画布并行准备：大页面画布渲染要几百毫秒，文字不必等它画完。
+        const textContentPromise = page.getTextContent();
         const task = page.render({
           canvas,
           viewport,
           transform: pixelRatio === 1 ? undefined : [pixelRatio, 0, 0, pixelRatio, 0, 0],
         });
         renderTask = task;
-        await task.promise;
+        const [textContent] = await Promise.all([textContentPromise, task.promise]);
         if (cancelled) return;
 
         textElement.replaceChildren();
         textElement.style.setProperty('--total-scale-factor', String(scale));
         textElement.style.setProperty('--scale-round-x', '1px');
         textElement.style.setProperty('--scale-round-y', '1px');
-
-        const textContent = await page.getTextContent();
-        if (cancelled) return;
 
         const layer = new pdfjsLib.TextLayer({
           textContentSource: textContent,
@@ -716,6 +715,7 @@ export const PdfPage = memo(function PdfPage({
       onContextMenu={handleContextMenu}
     >
       <canvas ref={canvasRef} className="pdf-canvas" />
+      {active && !ready && !error && <span className="page-loading" aria-hidden="true" />}
       <div ref={highlightRef} className="highlight-layer" />
       {/* 选区放在页面内部，和标注高亮共用 multiply 混合组，避免全屏滤镜的重影。 */}
       <div className="selection-layer" />

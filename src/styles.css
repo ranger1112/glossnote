@@ -1573,6 +1573,26 @@ select {
   height: 100%;
 }
 
+/* 扫描件或大页面首帧要解码数秒；先给一块带延迟的骨架，避免长时间白屏。 */
+.page-loading {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  background: linear-gradient(110deg, #fafafa 30%, #ededf0 50%, #fafafa 70%);
+  background-size: 200% 100%;
+  opacity: 0;
+  animation:
+    page-loading-appear 0.15s ease 0.25s forwards,
+    thumb-sheen 1.4s linear infinite;
+}
+
+@keyframes page-loading-appear {
+  to {
+    opacity: 1;
+  }
+}
+
 .highlight-layer {
   position: absolute;
   inset: 0;
