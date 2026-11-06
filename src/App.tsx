@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { pdfjsAssets, pdfjsLib } from './pdfjs';
 import { PdfPage } from './PdfPage';
@@ -11,6 +12,7 @@ import { SettingsModal } from './SettingsModal';
 import { ShortcutList } from './ShortcutList';
 import { HistoryModal } from './HistoryModal';
 import { OutlinePanel } from './OutlinePanel';
+import { PageJump } from './PageJump';
 import { PageThumbnails } from './PageThumbnails';
 import { loadOutline, type OutlineEntry } from './outline';
 import {
@@ -116,6 +118,23 @@ interface PdfImportSummary {
 
 /** 侧栏一次渲染的卡片数；滚动到底部再追加，避免上千条标注一次挂载。 */
 const SIDEBAR_PAGE = 100;
+
+const SIDEBAR_WIDTH_KEY = 'glossnote:sidebar-width';
+const SIDEBAR_MIN_WIDTH = 260;
+const SIDEBAR_MAX_WIDTH = 720;
+const SIDEBAR_DEFAULT_WIDTH = 350;
+
+function initialSidebarWidth(): number {
+  try {
+    const saved = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY));
+    if (Number.isFinite(saved) && saved >= SIDEBAR_MIN_WIDTH) {
+      return Math.min(saved, SIDEBAR_MAX_WIDTH);
+    }
+  } catch {
+    // 隐私模式或存储被禁用时用默认宽度。
+  }
+  return SIDEBAR_DEFAULT_WIDTH;
+}
 
 type RenderQuality = 'standard' | 'high';
 const RENDER_QUALITY_KEY = 'glossnote:render-quality';
@@ -343,6 +362,9 @@ export default function App() {
   const [outline, setOutline] = useState<OutlineEntry[]>([]);
   const [outlineLoading, setOutlineLoading] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(initialSidebarWidth);
+  const [sidebarResizing, setSidebarResizing] = useState(false);
+  const sidebarDrag = useRef<{ startX: number; startWidth: number } | null>(null);
   const scanEnhance = doc ? scanEnhanceDocs[doc.id] === true : false;
 
   const changeScanEnhance = useCallback(
@@ -361,6 +383,49 @@ export default function App() {
   useEffect(() => {
     persistScanEnhanceDocs(scanEnhanceDocs);
   }, [scanEnhanceDocs]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SIDEBAR_WIDTH_KEY, String(Math.round(sidebarWidth)));
+    } catch {
+      // 存储不可用时只影响下次启动的宽度记忆。
+    }
+  }, [sidebarWidth]);
+
+  const startSidebarResize = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      event.currentTarget.setPointerCapture(event.pointerId);
+      sidebarDrag.current = { startX: event.clientX, startWidth: sidebarWidth };
+      setSidebarResizing(true);
+    },
+    [sidebarWidth],
+  );
+
+  const moveSidebarResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = sidebarDrag.current;
+    if (!drag) return;
+    const workspace = event.currentTarget.parentElement;
+    // 至少给阅读区留 360px，窗口变窄时也不会把正文挤没。
+    const max = workspace
+      ? Math.max(SIDEBAR_MIN_WIDTH, workspace.clientWidth - 360)
+      : SIDEBAR_MAX_WIDTH;
+    const next = Math.min(
+      Math.max(drag.startWidth - (event.clientX - drag.startX), SIDEBAR_MIN_WIDTH),
+      Math.min(max, SIDEBAR_MAX_WIDTH),
+    );
+    setSidebarWidth(next);
+  }, []);
+
+  const endSidebarResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!sidebarDrag.current) return;
+    sidebarDrag.current = null;
+    setSidebarResizing(false);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  }, []);
+
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [scale, setScale] = useState(1.2);
   const [zoomMode, setZoomMode] = useState<ZoomMode>('fit-width');
@@ -1543,6 +1608,22 @@ export default function App() {
     }, 140);
   }, []);
 
+  // Ctrl/⌘ + 滚轮缩放阅读区；触控板双指捏合也会以 ctrlKey 的 wheel 事件到达。
+  const openDocId = doc?.id;
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewer || !openDocId) return;
+    const onWheel = (event: WheelEvent) => {
+      if (!event.ctrlKey && !event.metaKey) return;
+      event.preventDefault();
+      // 用指数曲线跟随滚轮/捏合幅度，鼠标一格约 15%，触控板小步长更细腻。
+      const factor = Math.min(1.25, Math.max(0.8, Math.exp(-event.deltaY * 0.0015)));
+      zoomTo(+(zoomTargetRef.current * factor).toFixed(3));
+    };
+    viewer.addEventListener('wheel', onWheel, { passive: false });
+    return () => viewer.removeEventListener('wheel', onWheel);
+  }, [openDocId, zoomTo]);
+
   /** 键盘翻页按视口高度滚动，略小于一屏，保留上一页的上下文。 */
   const scrollPages = useCallback((direction: 1 | -1) => {
     const viewer = viewerRef.current;
@@ -2547,7 +2628,10 @@ export default function App() {
       )}
 
       {doc ? (
-        <main className="workspace">
+        <main
+          className="workspace"
+          style={{ '--sidebar-width': `${sidebarWidth}px` } as CSSProperties}
+        >
           <section
             className="viewer"
             ref={viewerRef}
@@ -2585,6 +2669,19 @@ export default function App() {
               ))}
           </section>
 
+          <div
+            className={`sidebar-resizer ${sidebarResizing ? 'dragging' : ''}`}
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="调整标注栏宽度"
+            title="拖动调整标注栏宽度，双击恢复默认"
+            onPointerDown={startSidebarResize}
+            onPointerMove={moveSidebarResize}
+            onPointerUp={endSidebarResize}
+            onPointerCancel={endSidebarResize}
+            onDoubleClick={() => setSidebarWidth(SIDEBAR_DEFAULT_WIDTH)}
+          />
+
           <aside className="sidebar">
             <div className="sidebar-head">
               <h2>
@@ -2608,9 +2705,11 @@ export default function App() {
                     : `${filtered.length} / ${visible.length}`}
                 </span>
               )}
-              <span className="sidebar-progress">
-                {currentPage + 1} / {doc.pageCount}
-              </span>
+              <PageJump
+                currentPage={currentPage}
+                pageCount={doc.pageCount}
+                onJump={goToPage}
+              />
               <button
                 type="button"
                 className="ai-head-button import-head-button"

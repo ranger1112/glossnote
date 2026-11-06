@@ -1530,7 +1530,8 @@ select {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 350px;
+  /* 中间 5px 是拖拽分割线；侧栏宽度由 --sidebar-width 控制并持久化。 */
+  grid-template-columns: minmax(0, 1fr) 5px var(--sidebar-width, 350px);
 }
 
 .workspace.welcome {
@@ -1810,11 +1811,29 @@ select {
    Annotation sidebar
    ========================================================= */
 
+.sidebar-resizer {
+  position: relative;
+  cursor: col-resize;
+  background: var(--line);
+  touch-action: none;
+}
+
+/* 视觉上只有 1px，但左右各多给 4px 命中区域，拖动更容易。 */
+.sidebar-resizer::after {
+  content: '';
+  position: absolute;
+  inset: 0 -4px;
+}
+
+.sidebar-resizer:hover,
+.sidebar-resizer.dragging {
+  background: var(--accent);
+}
+
 .sidebar {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  border-left: 1px solid var(--line);
   background: var(--panel);
 }
 
@@ -1832,11 +1851,43 @@ select {
   letter-spacing: 0.01em;
 }
 
-.sidebar-progress {
+.page-jump {
   margin-left: auto;
+  padding: 2px 6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  color: var(--faint);
+  font: inherit;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.page-jump:hover {
+  border-color: var(--line);
+  color: var(--ink);
+}
+
+.page-jump.editing {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   color: var(--faint);
   font-size: 10.5px;
   font-variant-numeric: tabular-nums;
+}
+
+.page-jump input {
+  width: 48px;
+  padding: 2px 4px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+  font-size: 11px;
+  text-align: center;
 }
 
 .ai-head-button {
@@ -4159,7 +4210,7 @@ button.color-dot:hover {
 
 @media (max-width: 1100px) {
   .workspace {
-    grid-template-columns: minmax(0, 1fr) 320px;
+    grid-template-columns: minmax(0, 1fr) 5px min(var(--sidebar-width, 350px), 320px);
   }
 }
 

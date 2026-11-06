@@ -10,10 +10,28 @@ export interface OutlineEntry {
 }
 
 type OutlineNodes = NonNullable<Awaited<ReturnType<PDFDocumentProxy['getOutline']>>>;
+type OutlineNode = OutlineNodes[number];
+
+/** 有些 PDF 把跳转目标放在 action 里，pdf.js 的 dest 会是 null；两种都要看。 */
+function nodeDestination(node: OutlineNode): OutlineNode['dest'] {
+  if (node.dest !== null && node.dest !== undefined) return node.dest;
+
+  const action = (node as { action?: unknown }).action;
+  if (typeof action === 'string' || Array.isArray(action)) {
+    return action as OutlineNode['dest'];
+  }
+  if (action && typeof action === 'object' && 'dest' in action) {
+    const dest = (action as { dest?: unknown }).dest;
+    if (typeof dest === 'string' || Array.isArray(dest)) {
+      return dest as OutlineNode['dest'];
+    }
+  }
+  return null;
+}
 
 async function destPage(
   pdf: PDFDocumentProxy,
-  dest: OutlineNodes[number]['dest'],
+  dest: OutlineNode['dest'],
 ): Promise<number | null> {
   try {
     const resolved = typeof dest === 'string' ? await pdf.getDestination(dest) : dest;
@@ -49,7 +67,7 @@ export async function loadOutline(pdf: PDFDocumentProxy): Promise<OutlineEntry[]
   const walk = async (nodes: OutlineNodes, depth: number) => {
     for (const node of nodes) {
       if (entries.length >= 2000) return;
-      const page = await destPage(pdf, node.dest);
+      const page = await destPage(pdf, nodeDestination(node));
       if (page !== null) {
         entries.push({
           id: `outline-${counter}`,

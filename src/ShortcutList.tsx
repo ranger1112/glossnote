@@ -6,6 +6,7 @@ const SHORTCUTS: Array<{ keys: string[]; label: string }> = [
   { keys: ['PageUp', 'Shift', 'Space'], label: '向上翻一屏' },
   { keys: ['Home', 'End'], label: '第一页 / 最后一页' },
   { keys: ['Ctrl', '+', '−'], label: '放大 / 缩小' },
+  { keys: ['Ctrl', '滚轮'], label: '缩放阅读区' },
   { keys: ['Ctrl', '0'], label: '适应宽度' },
   { keys: ['Esc'], label: '关闭浮层、清除选区' },
   { keys: ['?'], label: '打开快捷键列表' },
