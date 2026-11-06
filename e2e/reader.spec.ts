@@ -341,7 +341,7 @@ test('设置面板：主题、阅读清晰度、扫描件增黑与关闭', async
   await expect(modal).toContainText('外观');
   await expect(modal).toContainText('快捷键');
   await expect(modal).toContainText('关于');
-  await expect(modal.locator('.shortcut-list > div')).toHaveCount(10);
+  await expect(modal.locator('.shortcut-list > div')).toHaveCount(11);
 
   // 浏览器模式没有书库命令，相关的设置节不出现。
   await expect(modal).not.toContainText('书库位置');
@@ -452,4 +452,73 @@ test('页内查找：Ctrl+F 搜索并定位命中', async ({ page }) => {
 
   await page.keyboard.press('Escape');
   await expect(page.locator('.find-bar')).toHaveCount(0);
+});
+
+test('侧栏目录、书签与页面缩略图', async ({ page }) => {
+  await page.goto('/?sample');
+  await expect(
+    page.locator('.pdf-page').first().locator('.text-layer span').first(),
+  ).toBeVisible({ timeout: 30_000 });
+
+  await page.getByRole('tab', { name: '目录' }).click();
+  await expect(page.locator('.outline-panel')).toBeVisible();
+  await expect(page.getByText('还没有书签')).toBeVisible();
+
+  await page.getByRole('button', { name: '给本页加书签' }).click();
+  await expect(page.locator('.bookmark-row')).toHaveCount(1);
+  await expect(page.locator('.bookmark-label')).toHaveText('第 1 页');
+
+  await page.locator('.bookmark-row').hover();
+  await page.getByRole('button', { name: /重命名书签/ }).click();
+  const rename = page.getByRole('textbox', { name: '书签名称' });
+  await rename.fill('重点');
+  await rename.press('Enter');
+  await expect(page.locator('.bookmark-label')).toHaveText('重点');
+
+  await page.getByRole('tab', { name: '页面' }).click();
+  await expect(page.locator('.page-thumb').first()).toBeVisible();
+  await expect(page.locator('.page-thumb img').first()).toBeVisible({ timeout: 30_000 });
+
+  await page.getByRole('tab', { name: '标注' }).click();
+  await expect(page.locator('.sidebar-tabs button.active')).toHaveText(/标注/);
+});
+
+test('阅读器：分割线调整标注栏宽度，页码输入跳转', async ({ page }) => {
+  await page.goto('/?sample');
+  await expect(page.locator('.pdf-page').first().locator('.text-layer span').first()).toBeVisible({
+    timeout: 30_000,
+  });
+
+  const sidebar = page.locator('.sidebar');
+  const resizer = page.locator('.sidebar-resizer');
+  await expect(resizer).toBeVisible();
+
+  const before = await sidebar.boundingBox();
+  const handle = await resizer.boundingBox();
+  if (!before || !handle) throw new Error('没有找到标注栏或分割线');
+  await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(handle.x - 120, handle.y + handle.height / 2, { steps: 10 });
+  await page.mouse.up();
+
+  const after = await sidebar.boundingBox();
+  if (!after) throw new Error('标注栏消失了');
+  expect(after.width).toBeGreaterThan(before.width + 80);
+
+  // 页码：点开输入 2 回车，应跳到第二页。
+  const jump = page.locator('.page-jump');
+  await expect(jump).toHaveText('1 / 2');
+  await jump.click();
+  await page.locator('.page-jump input').fill('2');
+  await page.locator('.page-jump input').press('Enter');
+  await expect(page.locator('.page-jump')).toHaveText('2 / 2');
+
+  // Ctrl + 滚轮缩放阅读区。
+  const zoomLabel = page.locator('.zoom-controls span');
+  const beforeZoom = await zoomLabel.textContent();
+  await page.locator('.viewer').hover();
+  await page.keyboard.down('Control');
+  await page.mouse.wheel(0, -240);
+  await page.keyboard.up('Control');
+  await expect.poll(() => zoomLabel.textContent()).not.toBe(beforeZoom);
 });

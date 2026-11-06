@@ -1,10 +1,13 @@
 use crate::models::{
-    Annotation, Card, CardRef, CardView, Chunk, DocumentRow, PageTextInput, SearchHit,
+    Annotation, Bookmark, Card, CardRef, CardView, Chunk, DocumentRow, PageHit, PageIndexStatus,
+    PageTextInput, SearchHit,
 };
+use crate::search;
 use rusqlite::{params, Connection, OptionalExtension, Row};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-const DOCUMENT_SELECT: &str = "SELECT d.id, d.name, d.title, d.author, d.page_count, d.rel_path, d.size, d.mtime, d.added_at, d.last_opened_at, d.cover, d.last_page, d.favorite, d.tags, d.folder, d.position, d.meta_updated_at, (SELECT COUNT(*) FROM annotations a WHERE a.doc_id = d.id AND a.deleted = 0) FROM documents d";
+const DOCUMENT_SELECT: &str = "SELECT d.id, d.name, d.title, d.author, d.page_count, d.rel_path, d.size, d.mtime, d.added_at, d.last_opened_at, d.cover, d.last_page, d.favorite, d.tags, d.bookmarks, d.folder, d.position, d.meta_updated_at, (SELECT COUNT(*) FROM annotations a WHERE a.doc_id = d.id AND a.deleted = 0) FROM documents d";
 
 pub fn open(path: &Path) -> Result<Connection, String> {
     let conn = Connection::open(path).map_err(|error| format!("打开数据库失败：{error}"))?;
@@ -95,6 +98,7 @@ fn migrate(conn: &Connection) -> Result<(), String> {
           last_page INTEGER NOT NULL DEFAULT 0,
           favorite INTEGER NOT NULL DEFAULT 0,
           tags TEXT NOT NULL DEFAULT '[]',
+          bookmarks TEXT NOT NULL DEFAULT '[]',
           folder TEXT NOT NULL DEFAULT '',
           position INTEGER NOT NULL DEFAULT 0,
           meta_updated_at INTEGER NOT NULL DEFAULT 0,
@@ -157,6 +161,7 @@ fn migrate(conn: &Connection) -> Result<(), String> {
           doc_id TEXT NOT NULL,
           page INTEGER NOT NULL,
           text TEXT NOT NULL,
+          tokens TEXT NOT NULL DEFAULT '',
           PRIMARY KEY (doc_id, page)
         );
         "#,
@@ -168,6 +173,7 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     ensure_column(conn, "documents", "last_page", "INTEGER NOT NULL DEFAULT 0")?;
     ensure_column(conn, "documents", "favorite", "INTEGER NOT NULL DEFAULT 0")?;
     ensure_column(conn, "documents", "tags", "TEXT NOT NULL DEFAULT '[]'")?;
+    ensure_column(conn, "documents", "bookmarks", "TEXT NOT NULL DEFAULT '[]'")?;
     ensure_column(conn, "documents", "folder", "TEXT NOT NULL DEFAULT ''")?;
     ensure_column(conn, "documents", "position", "INTEGER NOT NULL DEFAULT 0")?;
     ensure_column(
@@ -182,6 +188,101 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         "text_indexed_at",
         "INTEGER NOT NULL DEFAULT 0",
     )?;
+    ensure_column(conn, "page_texts", "tokens", "TEXT NOT NULL DEFAULT ''")?;
+
+    // 正文搜索索引：FTS5 只存分词后的 token，原始页面文字仍以 page_texts 为准。
+    // 外部内容表的 rowid 直接复用 page_texts 的隐式 rowid，触发器负责同步。
+    conn.execute_batch(
+        r#"
+        CREATE VIRTUAL TABLE IF NOT EXISTS page_search USING fts5(
+          tokens,
+          content='page_texts',
+          content_rowid='rowid',
+          tokenize='unicode61 remove_diacritics 2'
+        );
+        CREATE TRIGGER IF NOT EXISTS page_texts_ai AFTER INSERT ON page_texts BEGIN
+          INSERT INTO page_search(rowid, tokens) VALUES (new.rowid, new.tokens);
+        END;
+        CREATE TRIGGER IF NOT EXISTS page_texts_ad AFTER DELETE ON page_texts BEGIN
+          INSERT INTO page_search(page_search, rowid, tokens) VALUES ('delete', old.rowid, old.tokens);
+        END;
+        CREATE TRIGGER IF NOT EXISTS page_texts_au AFTER UPDATE ON page_texts BEGIN
+          INSERT INTO page_search(page_search, rowid, tokens) VALUES ('delete', old.rowid, old.tokens);
+          INSERT INTO page_search(rowid, tokens) VALUES (new.rowid, new.tokens);
+        END;
+        "#,
+    )
+    .map_err(|error| format!("初始化正文搜索索引失败：{error}"))?;
+
+    upgrade_page_search(conn)?;
+    Ok(())
+}
+
+/// 0.3 之前没有正文索引：FTS 表刚建好时还是空的，而 page_texts 里可能已有行。
+/// 必须先按内容表整体重建索引，再回填 tokens——否则回填的 UPDATE 触发器会对
+/// 不存在的索引行执行 'delete'，FTS5 会直接报「database disk image is malformed」，
+/// 上层再把 library.db 当成坏库备份重建，阅读进度等本机状态就丢了。
+/// 用 user_version 记住迁移已完成，避免每次启动都重建整本索引。
+fn upgrade_page_search(conn: &Connection) -> Result<(), String> {
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(|error| format!("读取索引版本失败：{error}"))?;
+    if version >= 1 {
+        return Ok(());
+    }
+
+    conn.execute(
+        "INSERT INTO page_search(page_search) VALUES ('rebuild')",
+        [],
+    )
+    .map_err(|error| format!("重建正文搜索索引失败：{error}"))?;
+    backfill_page_search(conn)?;
+    conn.pragma_update(None, "user_version", 1)
+        .map_err(|error| format!("更新索引版本失败：{error}"))?;
+    Ok(())
+}
+
+/// 旧版本只缓存了原文，没有分词列；升级后补齐一次。
+fn backfill_page_search(conn: &Connection) -> Result<(), String> {
+    let pending: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM page_texts WHERE tokens = '' AND text <> ''",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("检查正文索引失败：{error}"))?;
+    if pending == 0 {
+        return Ok(());
+    }
+
+    let rows: Vec<(i64, String)> = {
+        let mut statement = conn
+            .prepare("SELECT rowid, text FROM page_texts WHERE tokens = '' AND text <> ''")
+            .map_err(|error| format!("准备正文索引回填失败：{error}"))?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|error| format!("读取正文索引回填数据失败：{error}"))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| format!("读取正文索引回填数据失败：{error}"))?
+    };
+
+    let transaction = conn
+        .unchecked_transaction()
+        .map_err(|error| format!("开始正文索引回填事务失败：{error}"))?;
+    {
+        let mut statement = transaction
+            .prepare("UPDATE page_texts SET tokens = ?1 WHERE rowid = ?2")
+            .map_err(|error| format!("准备正文索引回填写入失败：{error}"))?;
+        for (rowid, text) in rows {
+            let tokens = search::tokens(&text).join(" ");
+            statement
+                .execute(params![tokens, rowid])
+                .map_err(|error| format!("写入正文索引回填失败：{error}"))?;
+        }
+    }
+    transaction
+        .commit()
+        .map_err(|error| format!("提交正文索引回填失败：{error}"))?;
     Ok(())
 }
 
@@ -232,10 +333,11 @@ fn row_to_document(row: &Row<'_>) -> rusqlite::Result<DocumentRow> {
         last_page: row.get::<_, i64>(11)? as u32,
         favorite: row.get::<_, i64>(12)? != 0,
         tags: serde_json::from_str(&row.get::<_, String>(13)?).unwrap_or_default(),
-        folder: row.get(14)?,
-        position: row.get(15)?,
-        meta_updated_at: row.get(16)?,
-        annotation_count: row.get::<_, i64>(17)? as usize,
+        bookmarks: serde_json::from_str(&row.get::<_, String>(14)?).unwrap_or_default(),
+        folder: row.get(15)?,
+        position: row.get(16)?,
+        meta_updated_at: row.get(17)?,
+        annotation_count: row.get::<_, i64>(18)? as usize,
     })
 }
 
@@ -267,10 +369,12 @@ pub fn list_documents(conn: &Connection) -> Result<Vec<DocumentRow>, String> {
 pub fn upsert_document(conn: &Connection, document: &DocumentRow) -> Result<(), String> {
     let tags = serde_json::to_string(&document.tags)
         .map_err(|error| format!("序列化文档标签失败：{error}"))?;
+    let bookmarks = serde_json::to_string(&document.bookmarks)
+        .map_err(|error| format!("序列化书签失败：{error}"))?;
     conn.execute(
         "INSERT INTO documents
-           (id, name, title, author, page_count, rel_path, size, mtime, added_at, last_opened_at, cover, last_page, favorite, tags, folder, position, meta_updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+           (id, name, title, author, page_count, rel_path, size, mtime, added_at, last_opened_at, cover, last_page, favorite, tags, bookmarks, folder, position, meta_updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
          ON CONFLICT(id) DO UPDATE SET
            name = excluded.name,
            title = excluded.title,
@@ -283,6 +387,7 @@ pub fn upsert_document(conn: &Connection, document: &DocumentRow) -> Result<(), 
            last_page = excluded.last_page,
            favorite = excluded.favorite,
            tags = excluded.tags,
+           bookmarks = excluded.bookmarks,
            folder = excluded.folder,
            position = excluded.position,
            meta_updated_at = excluded.meta_updated_at",
@@ -301,6 +406,7 @@ pub fn upsert_document(conn: &Connection, document: &DocumentRow) -> Result<(), 
             document.last_page as i64,
             document.favorite as i64,
             tags,
+            bookmarks,
             document.folder,
             document.position,
             document.meta_updated_at,
@@ -317,6 +423,7 @@ pub fn update_organization(
     favorite: Option<bool>,
     tags: Option<&[String]>,
     folder: Option<&str>,
+    bookmarks: Option<&[Bookmark]>,
     now: i64,
 ) -> Result<DocumentRow, String> {
     let mut row = find_by_id(conn, id)?.ok_or_else(|| "文档不存在".to_string())?;
@@ -329,16 +436,22 @@ pub fn update_organization(
     if let Some(value) = folder {
         row.folder = value.to_string();
     }
+    if let Some(value) = bookmarks {
+        row.bookmarks = value.to_vec();
+    }
     row.meta_updated_at = now;
 
     let tags_json =
         serde_json::to_string(&row.tags).map_err(|error| format!("序列化文档标签失败：{error}"))?;
+    let bookmarks_json = serde_json::to_string(&row.bookmarks)
+        .map_err(|error| format!("序列化书签失败：{error}"))?;
     conn.execute(
-        "UPDATE documents SET favorite = ?1, tags = ?2, folder = ?3, meta_updated_at = ?4 WHERE id = ?5",
+        "UPDATE documents SET favorite = ?1, tags = ?2, folder = ?3, bookmarks = ?4, meta_updated_at = ?5 WHERE id = ?6",
         params![
             row.favorite as i64,
             tags_json,
             row.folder,
+            bookmarks_json,
             row.meta_updated_at,
             id
         ],
@@ -676,13 +789,16 @@ pub fn save_page_texts(
     {
         let mut statement = transaction
             .prepare(
-                "INSERT INTO page_texts (doc_id, page, text) VALUES (?1, ?2, ?3)
-                 ON CONFLICT(doc_id, page) DO UPDATE SET text = excluded.text",
+                "INSERT INTO page_texts (doc_id, page, text, tokens) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(doc_id, page) DO UPDATE SET
+                   text = excluded.text,
+                   tokens = excluded.tokens",
             )
             .map_err(|error| format!("准备页面文字写入失败：{error}"))?;
         for page in pages {
+            let tokens = search::tokens(&page.text).join(" ");
             statement
-                .execute(params![doc_id, page.page as i64, &page.text])
+                .execute(params![doc_id, page.page as i64, &page.text, tokens])
                 .map_err(|error| format!("写入页面文字失败：{error}"))?;
         }
     }
@@ -690,6 +806,143 @@ pub fn save_page_texts(
         .commit()
         .map_err(|error| format!("提交页面文字失败：{error}"))?;
     Ok(pages.len())
+}
+
+fn escape_like(term: &str) -> String {
+    term.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+/// 全库正文搜索。命中来自 page_texts（已缓存正文的页面），片段从原文截取。
+pub fn search_pages(conn: &Connection, query: &str) -> Result<Vec<PageHit>, String> {
+    let term = query.trim();
+    if term.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut hits = Vec::new();
+    if search::has_single_cjk_term(term) {
+        // 单字无法形成二元组，FTS 索引里没有它；整条查询退回 LIKE。
+        // 多个词之间用 AND 连接，避免「我 认知」被当成连续字符串去匹配。
+        let mut patterns: Vec<String> = Vec::new();
+        for token in search::tokens(term) {
+            let pattern = format!("%{}%", escape_like(&token));
+            if !patterns.contains(&pattern) {
+                patterns.push(pattern);
+            }
+        }
+        if patterns.is_empty() {
+            return Ok(hits);
+        }
+        let conditions = vec!["p.text LIKE ? ESCAPE '\\'"; patterns.len()].join(" AND ");
+        let sql = format!(
+            "SELECT p.doc_id, d.name, p.page, p.text
+             FROM page_texts p
+             JOIN documents d ON d.id = p.doc_id
+             WHERE {conditions}
+             ORDER BY d.added_at DESC, p.page ASC
+             LIMIT 100"
+        );
+        let mut statement = conn
+            .prepare(&sql)
+            .map_err(|error| format!("准备正文搜索失败：{error}"))?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(patterns.iter()), |row| {
+                let text: String = row.get(3)?;
+                Ok(PageHit {
+                    doc_id: row.get(0)?,
+                    doc_name: row.get(1)?,
+                    page: row.get::<_, i64>(2)? as u32,
+                    snippet: search::snippet(&text, term),
+                })
+            })
+            .map_err(|error| format!("搜索正文失败：{error}"))?;
+        hits.extend(
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|error| format!("读取正文搜索结果失败：{error}"))?,
+        );
+        return Ok(hits);
+    }
+
+    let Some(expression) = search::match_query(term) else {
+        return Ok(Vec::new());
+    };
+    let mut statement = conn
+        .prepare(
+            "SELECT p.doc_id, d.name, p.page, p.text
+             FROM page_search
+             JOIN page_texts p ON p.rowid = page_search.rowid
+             JOIN documents d ON d.id = p.doc_id
+             WHERE page_search MATCH ?1
+             ORDER BY bm25(page_search)
+             LIMIT 100",
+        )
+        .map_err(|error| format!("准备正文搜索失败：{error}"))?;
+    let rows = statement
+        .query_map(params![expression], |row| {
+            let text: String = row.get(3)?;
+            Ok(PageHit {
+                doc_id: row.get(0)?,
+                doc_name: row.get(1)?,
+                page: row.get::<_, i64>(2)? as u32,
+                snippet: search::snippet(&text, term),
+            })
+        })
+        .map_err(|error| format!("搜索正文失败：{error}"))?;
+    hits.extend(
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| format!("读取正文搜索结果失败：{error}"))?,
+    );
+    Ok(hits)
+}
+
+pub fn page_index_status(conn: &Connection) -> Result<PageIndexStatus, String> {
+    let documents: i64 = conn
+        .query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))
+        .map_err(|error| format!("统计文档失败：{error}"))?;
+    let pages: i64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(page_count), 0) FROM documents",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("统计页数失败：{error}"))?;
+    // 只有缓存覆盖了全部页面的文档才算完整索引：一次搜索命中 500 条就停下时
+    // 只缓存了前几页，不能把这份文档当成「已索引」而隐藏建索引入口。
+    let indexed_documents: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM documents d
+             WHERE d.page_count > 0
+               AND (SELECT COUNT(*) FROM page_texts p WHERE p.doc_id = d.id) >= d.page_count",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("统计已索引文档失败：{error}"))?;
+    let indexed_pages: i64 = conn
+        .query_row("SELECT COUNT(*) FROM page_texts", [], |row| row.get(0))
+        .map_err(|error| format!("统计已索引页数失败：{error}"))?;
+
+    Ok(PageIndexStatus {
+        documents: documents as usize,
+        indexed_documents: indexed_documents as usize,
+        pages: pages as usize,
+        indexed_pages: indexed_pages as usize,
+    })
+}
+
+/// 每份文档已缓存的页面数；书库页用它判断哪些文档已经建好正文索引。
+pub fn page_text_counts(conn: &Connection) -> Result<HashMap<String, usize>, String> {
+    let mut statement = conn
+        .prepare("SELECT doc_id, COUNT(*) FROM page_texts GROUP BY doc_id")
+        .map_err(|error| format!("准备页面文字统计失败：{error}"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
+        })
+        .map_err(|error| format!("读取页面文字统计失败：{error}"))?;
+    rows.collect::<rusqlite::Result<HashMap<String, usize>>>()
+        .map_err(|error| format!("读取页面文字统计失败：{error}"))
 }
 
 /// 切换书库时清空索引；书库目录里的 PDF 与 sidecar 不受影响。
@@ -1075,6 +1328,198 @@ mod tests {
             })
             .unwrap();
         assert_eq!(status, "active");
+    }
+
+    #[test]
+    fn full_text_search_matches_chinese_english_and_single_char() {
+        let conn = seeded();
+        save_page_texts(
+            &conn,
+            "d1",
+            &[
+                PageTextInput {
+                    page: 0,
+                    text: "认知科学是研究心智的科学。Annotating is the heart.".to_string(),
+                },
+                PageTextInput {
+                    page: 1,
+                    text: "第二页没有关键词。".to_string(),
+                },
+                PageTextInput {
+                    page: 2,
+                    text: "认知与科学分开写，不算一个短语。".to_string(),
+                },
+            ],
+        )
+        .unwrap();
+
+        let hits = search_pages(&conn, "认知").unwrap();
+        let mut pages: Vec<u32> = hits.iter().map(|hit| hit.page).collect();
+        pages.sort_unstable();
+        assert_eq!(pages, vec![0, 2]);
+        assert!(hits
+            .iter()
+            .find(|hit| hit.page == 0)
+            .unwrap()
+            .snippet
+            .contains("认知科学"));
+
+        // 连续中文按二元组短语匹配：分开写的「认知」「科学」不算「认知科学」。
+        let phrase = search_pages(&conn, "认知科学").unwrap();
+        assert_eq!(phrase.len(), 1);
+        assert_eq!(phrase[0].page, 0);
+
+        assert_eq!(search_pages(&conn, "annot").unwrap().len(), 1);
+        assert_eq!(search_pages(&conn, "科").unwrap().len(), 2);
+        assert!(search_pages(&conn, "不存在").unwrap().is_empty());
+
+        // 覆盖写同一页后，FTS 里不能残留旧内容。
+        save_page_texts(
+            &conn,
+            "d1",
+            &[PageTextInput {
+                page: 0,
+                text: "全新的页面文字。".to_string(),
+            }],
+        )
+        .unwrap();
+        assert!(search_pages(&conn, "认知科学").unwrap().is_empty());
+        assert_eq!(search_pages(&conn, "全新").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn backfill_indexes_existing_page_texts() {
+        let conn = seeded();
+        conn.execute(
+            "INSERT INTO page_texts (doc_id, page, text, tokens)
+             VALUES ('d1', 0, '旧缓存正文', '')",
+            [],
+        )
+        .unwrap();
+
+        backfill_page_search(&conn).unwrap();
+        let hits = search_pages(&conn, "旧缓存").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].snippet.contains("旧缓存正文"));
+    }
+
+    #[test]
+    fn upgrade_rebuilds_index_before_backfill() {
+        let conn = seeded();
+        conn.execute(
+            "INSERT INTO page_texts (doc_id, page, text, tokens)
+             VALUES ('d1', 0, '旧缓存正文', '')",
+            [],
+        )
+        .unwrap();
+        // 模拟 0.2.2 的库：内容表已有行，FTS 索引还是空的，迁移标记未写。
+        conn.execute(
+            "INSERT INTO page_search(page_search) VALUES ('delete-all')",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 0).unwrap();
+
+        // 修复前：回填的 UPDATE 触发器对空索引执行 delete，报 SQLITE_CORRUPT。
+        migrate(&conn).unwrap();
+        assert_eq!(search_pages(&conn, "旧缓存").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn upgrade_with_only_empty_pages_keeps_deletes_working() {
+        let conn = seeded();
+        conn.execute(
+            "INSERT INTO page_texts (doc_id, page, text, tokens) VALUES ('d1', 0, '', '')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO page_search(page_search) VALUES ('delete-all')",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 0).unwrap();
+
+        // 空文本页不会触发回填；索引也必须先重建，否则 DELETE 触发器的 delete 会报损坏。
+        migrate(&conn).unwrap();
+        remove_document(&conn, "d1", 2).unwrap();
+    }
+
+    #[test]
+    fn single_char_term_in_multi_word_query_falls_back_to_like() {
+        let conn = seeded();
+        save_page_texts(
+            &conn,
+            "d1",
+            &[
+                PageTextInput {
+                    page: 0,
+                    text: "我的认知".to_string(),
+                },
+                PageTextInput {
+                    page: 1,
+                    text: "人与物".to_string(),
+                },
+            ],
+        )
+        .unwrap();
+
+        let hits = search_pages(&conn, "我 认知").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].page, 0);
+
+        let hits = search_pages(&conn, "人，物").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].page, 1);
+    }
+
+    #[test]
+    fn page_index_status_requires_every_page() {
+        let conn = seeded();
+        conn.execute("UPDATE documents SET page_count = 3 WHERE id = 'd1'", [])
+            .unwrap();
+        save_page_texts(
+            &conn,
+            "d1",
+            &[PageTextInput {
+                page: 0,
+                text: "第一页".to_string(),
+            }],
+        )
+        .unwrap();
+
+        let status = page_index_status(&conn).unwrap();
+        assert_eq!(status.documents, 1);
+        // 只缓存了 1/3 页：不能算作已建好正文索引。
+        assert_eq!(status.indexed_documents, 0);
+        assert_eq!(status.pages, 3);
+        assert_eq!(status.indexed_pages, 1);
+    }
+
+    #[test]
+    fn page_index_status_counts_documents_and_pages() {
+        let conn = seeded();
+        save_page_texts(
+            &conn,
+            "d1",
+            &[
+                PageTextInput {
+                    page: 0,
+                    text: "第一页".to_string(),
+                },
+                PageTextInput {
+                    page: 1,
+                    text: String::new(),
+                },
+            ],
+        )
+        .unwrap();
+
+        let status = page_index_status(&conn).unwrap();
+        assert_eq!(status.documents, 1);
+        assert_eq!(status.indexed_documents, 1);
+        assert_eq!(status.pages, 1);
+        assert_eq!(status.indexed_pages, 2);
     }
 
     #[test]

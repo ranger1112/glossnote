@@ -6,14 +6,15 @@ mod fsrs;
 mod library;
 mod models;
 mod pdf_export;
+mod search;
 mod settings;
 mod state;
 
 use crate::{
     models::{
-        AiAnswer, AiSettingsInput, AiSettingsView, Annotation, CardView, ChatTurn, DeleteReport,
-        Document, DocumentMetaPatch, ImportResult, PageTextInput, ScanReport, SearchHit,
-        SmartCollection,
+        AiAnswer, AiSettingsInput, AiSettingsView, Annotation, Bookmark, CardView, ChatTurn,
+        DeleteReport, Document, DocumentMetaPatch, ImportResult, PageHit, PageIndexStatus,
+        PageTextInput, ScanReport, SearchHit, SidecarVersion, SmartCollection,
     },
     state::AppState,
 };
@@ -386,6 +387,39 @@ fn save_smart_collections(
     library::save_smart_collections(&app, collections)
 }
 
+#[tauri::command(async)]
+fn search_pages(app: AppHandle, query: String) -> Result<Vec<PageHit>, String> {
+    library::search_pages(&app, query)
+}
+
+#[tauri::command(async)]
+fn page_index_status(app: AppHandle) -> Result<PageIndexStatus, String> {
+    library::page_index_status(&app)
+}
+
+#[tauri::command(async)]
+fn save_bookmarks(
+    app: AppHandle,
+    doc_id: String,
+    bookmarks: Vec<Bookmark>,
+) -> Result<Document, String> {
+    library::save_bookmarks(&app, &doc_id, bookmarks)
+}
+
+#[tauri::command(async)]
+fn list_sidecar_versions(app: AppHandle, doc_id: String) -> Result<Vec<SidecarVersion>, String> {
+    library::list_sidecar_versions(&app, &doc_id)
+}
+
+#[tauri::command(async)]
+fn restore_sidecar_version(
+    app: AppHandle,
+    doc_id: String,
+    version_id: String,
+) -> Result<ImportResult, String> {
+    library::restore_sidecar_version(&app, &doc_id, &version_id)
+}
+
 /// 默认窗口是 1280×860 逻辑像素；在 125%/150% 缩放的小屏笔记本上，
 /// 外框会高过屏幕工作区，底部（例如 AI 追问输入框）被任务栏裁掉。
 /// 启动时把窗口收缩并挪回工作区内，已有窗口能放下就不动。
@@ -545,6 +579,11 @@ fn main() {
             save_folders,
             list_smart_collections,
             save_smart_collections,
+            search_pages,
+            page_index_status,
+            save_bookmarks,
+            list_sidecar_versions,
+            restore_sidecar_version,
         ])
         .run(tauri::generate_context!())
         .expect("GlossNote 启动失败");

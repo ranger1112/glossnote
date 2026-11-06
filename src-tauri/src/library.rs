@@ -2,8 +2,9 @@ use crate::{
     db,
     fsrs::{self, MemoryState},
     models::{
-        Annotation, Card, CardView, DeleteReport, Document, DocumentMetaPatch, DocumentRow,
-        ImportResult, PageTextInput, ScanReport, SearchHit, Sidecar, SmartCollection,
+        Annotation, Bookmark, Card, CardView, DeleteReport, Document, DocumentMetaPatch,
+        DocumentRow, ImportResult, PageHit, PageIndexStatus, PageTextInput, ScanReport, SearchHit,
+        Sidecar, SidecarVersion, SmartCollection,
     },
     settings,
     state::AppState,
@@ -333,10 +334,13 @@ fn apply_sidecar(
         db::update_meta(conn, &document.id, Some(sidecar.page_count), None, None)?;
     }
 
-    // 收藏/标签/文件夹按时间戳做 LWW；旧 sidecar 没有这些字段，时间戳为 0，不会覆盖本机设置。
+    // 收藏/标签/书签/文件夹按时间戳做 LWW；旧 sidecar 没有的字段不会覆盖本机设置。
     if sidecar.meta_updated_at > document.meta_updated_at {
         document.favorite = sidecar.favorite;
         document.tags = sidecar.tags.clone();
+        if let Some(bookmarks) = &sidecar.bookmarks {
+            document.bookmarks = bookmarks.clone();
+        }
         // 旧版应用写 sidecar 时没有 folder 字段，不能把已有的文件夹清空。
         if let Some(folder) = &sidecar.folder {
             document.folder = folder.clone();
@@ -348,6 +352,7 @@ fn apply_sidecar(
             Some(document.favorite),
             Some(&document.tags),
             Some(&document.folder),
+            Some(&document.bookmarks),
             document.meta_updated_at,
         )?;
     }
@@ -460,6 +465,7 @@ fn serialized_sidecar(conn: &rusqlite::Connection, doc_id: &str) -> Result<Vec<u
         cards,
         favorite: document.favorite,
         tags: document.tags.clone(),
+        bookmarks: Some(document.bookmarks.clone()),
         folder: Some(document.folder.clone()),
         meta_updated_at: document.meta_updated_at,
     };
@@ -469,9 +475,67 @@ fn serialized_sidecar(conn: &rusqlite::Connection, doc_id: &str) -> Result<Vec<u
     Ok(bytes)
 }
 
-fn write_sidecar_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
+const HISTORY_VERSIONS: usize = 30;
+
+fn history_dir(root: &Path, doc_id: &str) -> PathBuf {
+    root.join(".glossnote").join("history").join(doc_id)
+}
+
+/// 覆盖 sidecar 之前把旧内容留一份；文件名用毫秒时间戳，同毫秒追加序号。
+fn snapshot_sidecar(root: &Path, doc_id: &str, previous: &[u8]) -> Result<(), String> {
+    let directory = history_dir(root, doc_id);
+    fs::create_dir_all(&directory).map_err(|error| format!("创建版本目录失败：{error}"))?;
+
+    // 固定宽度的序号保证同一毫秒内的多份快照也能按文件名正确排序。
+    let stamp = now_ms();
+    let mut suffix = 0u32;
+    let path = loop {
+        let candidate = directory.join(format!("{stamp}-{suffix:04}.json"));
+        if !candidate.exists() {
+            break candidate;
+        }
+        suffix += 1;
+    };
+    fs::write(&path, previous).map_err(|error| format!("保存标注历史失败：{error}"))?;
+
+    prune_history(&directory);
+    Ok(())
+}
+
+fn prune_history(directory: &Path) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .collect();
+    // 文件名是「毫秒时间戳-四位序号」，按名字倒序就是新到旧。
+    files.sort_by(|left, right| right.file_name().cmp(&left.file_name()));
+    for path in files.into_iter().skip(HISTORY_VERSIONS) {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn write_sidecar_bytes(root: &Path, path: &Path, bytes: &[u8]) -> Result<(), String> {
     let directory = path.parent().ok_or_else(|| "标注路径无效".to_string())?;
     fs::create_dir_all(directory).map_err(|error| format!("创建标注目录失败：{error}"))?;
+
+    if let Ok(existing) = fs::read(path) {
+        // 内容没变就不碰文件：否则云盘客户端会把每次启动都当成一次修改。
+        if existing == bytes {
+            return Ok(());
+        }
+        let doc_id = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("sidecar");
+        if let Err(error) = snapshot_sidecar(root, doc_id, &existing) {
+            // 历史版本是附加保护，不能因为它失败而丢当前标注。
+            eprintln!("保存标注历史失败：{error}");
+        }
+    }
 
     let temp = directory.join(format!(
         "{}.json.tmp-{}-{}",
@@ -492,25 +556,18 @@ fn write_sidecar_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
 
 pub fn write_sidecar(conn: &rusqlite::Connection, root: &Path, doc_id: &str) -> Result<(), String> {
     let bytes = serialized_sidecar(conn, doc_id)?;
-    write_sidecar_bytes(&sidecar_path(root, doc_id), &bytes)
+    write_sidecar_bytes(root, &sidecar_path(root, doc_id), &bytes)
 }
 
 /// 扫描/打开文档时会走一遍合并，即使什么都没变也会被调到这里。
-/// 内容相同就跳过写盘，否则云盘客户端会把每次启动都当成一次修改。
+/// 内容相同就在 `write_sidecar_bytes` 里直接跳过，不产生历史版本。
 fn write_sidecar_if_changed(
     conn: &rusqlite::Connection,
     root: &Path,
     doc_id: &str,
 ) -> Result<(), String> {
     let bytes = serialized_sidecar(conn, doc_id)?;
-    let path = sidecar_path(root, doc_id);
-    if fs::read(&path)
-        .map(|existing| existing == bytes)
-        .unwrap_or(false)
-    {
-        return Ok(());
-    }
-    write_sidecar_bytes(&path, &bytes)
+    write_sidecar_bytes(root, &sidecar_path(root, doc_id), &bytes)
 }
 
 pub fn import_pdf(app: &AppHandle, source: &str) -> Result<ImportResult, String> {
@@ -599,6 +656,7 @@ pub fn import_pdf(app: &AppHandle, source: &str) -> Result<ImportResult, String>
         last_page: 0,
         favorite: false,
         tags: Vec::new(),
+        bookmarks: Vec::new(),
         folder: String::new(),
         // 新导入的文档排在手动排序的最后；之后重排会写成 0..N。
         position: now,
@@ -736,6 +794,10 @@ pub fn scan(app: &AppHandle) -> Result<ScanReport, String> {
             tags: prior
                 .as_ref()
                 .map(|row| row.tags.clone())
+                .unwrap_or_default(),
+            bookmarks: prior
+                .as_ref()
+                .map(|row| row.bookmarks.clone())
                 .unwrap_or_default(),
             folder: prior
                 .as_ref()
@@ -905,6 +967,51 @@ pub fn search(app: &AppHandle, query: String) -> Result<Vec<SearchHit>, String> 
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     db::search_annotations(&conn, &query)
+}
+
+pub fn search_pages(app: &AppHandle, query: String) -> Result<Vec<PageHit>, String> {
+    let state = app.state::<AppState>();
+    let conn = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    db::search_pages(&conn, &query)
+}
+
+pub fn page_index_status(app: &AppHandle) -> Result<PageIndexStatus, String> {
+    let state = app.state::<AppState>();
+    let root = state.root();
+    let conn = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let mut status = db::page_index_status(&conn)?;
+    let documents = db::list_documents(&conn)?;
+    let counts = db::page_text_counts(&conn)?;
+    for document in documents {
+        // 云盘还没同步下来、或已经被删掉的 PDF 不该让覆盖率永远差几份。
+        if root
+            .join(
+                document
+                    .rel_path
+                    .replace('/', std::path::MAIN_SEPARATOR_STR),
+            )
+            .is_file()
+        {
+            continue;
+        }
+        let pages = document.page_count as usize;
+        let cached = counts.get(&document.id).copied().unwrap_or(0);
+        status.documents = status.documents.saturating_sub(1);
+        status.pages = status.pages.saturating_sub(pages);
+        status.indexed_pages = status.indexed_pages.saturating_sub(cached.min(pages));
+        // 只有缓存覆盖全部页面才算完整索引；搜索命中上限截断的缓存不算。
+        if pages > 0 && cached >= pages {
+            status.indexed_documents = status.indexed_documents.saturating_sub(1);
+        }
+    }
+    Ok(status)
 }
 
 /// 导出一份带 GlossNote 标注的 PDF 副本；只读取索引与源文件。
@@ -1221,6 +1328,7 @@ pub fn organize_document(
         favorite,
         tags.as_deref(),
         folder.as_deref(),
+        None,
         now_ms(),
     )?;
     write_sidecar(&conn, &root, doc_id)?;
@@ -1271,6 +1379,7 @@ pub fn organize_documents(
             favorite,
             Some(&tags),
             folder.as_deref(),
+            None,
             now,
         )?;
         write_sidecar(&conn, &root, &doc_id)?;
@@ -1292,6 +1401,307 @@ pub fn reorder_documents(app: &AppHandle, doc_ids: Vec<String>) -> Result<Vec<Do
         .iter()
         .map(|row| row.to_document(&root))
         .collect())
+}
+
+fn clean_bookmarks(bookmarks: Vec<Bookmark>, now: i64) -> Vec<Bookmark> {
+    let mut cleaned: Vec<Bookmark> = Vec::new();
+    for bookmark in bookmarks {
+        let label = bookmark.label.trim();
+        if label.is_empty() || label.chars().count() > 80 {
+            continue;
+        }
+        // 一页一个书签，避免同一页出现多条重复入口。
+        if cleaned.iter().any(|item| item.page == bookmark.page) {
+            continue;
+        }
+        let id = if bookmark.id.trim().is_empty() {
+            format!("bm-{}-{now}", bookmark.page)
+        } else {
+            bookmark.id
+        };
+        cleaned.push(Bookmark {
+            id,
+            page: bookmark.page,
+            label: label.to_string(),
+            created_at: if bookmark.created_at == 0 {
+                now
+            } else {
+                bookmark.created_at
+            },
+        });
+        if cleaned.len() >= 200 {
+            break;
+        }
+    }
+    cleaned.sort_by_key(|item| item.page);
+    cleaned
+}
+
+/// 保存整份书签列表；与收藏/标签共用 `meta_updated_at` 做 LWW。
+pub fn save_bookmarks(
+    app: &AppHandle,
+    doc_id: &str,
+    bookmarks: Vec<Bookmark>,
+) -> Result<Document, String> {
+    let state = app.state::<AppState>();
+    let root = state.root();
+    let conn = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let now = now_ms();
+    let mut valid = Vec::new();
+    let page_count = db::find_by_id(&conn, doc_id)?
+        .ok_or_else(|| "文档不存在".to_string())?
+        .page_count;
+    for bookmark in bookmarks {
+        if page_count > 0 && bookmark.page >= page_count {
+            continue;
+        }
+        valid.push(bookmark);
+    }
+    let cleaned = clean_bookmarks(valid, now);
+    db::update_organization(&conn, doc_id, None, None, None, Some(&cleaned), now)?;
+    write_sidecar(&conn, &root, doc_id)?;
+
+    let document = db::find_by_id(&conn, doc_id)?.ok_or_else(|| "文档不存在".to_string())?;
+    Ok(document.to_document(&root))
+}
+
+/// 只接受可以安全拼进目录的单个文件名。
+/// Windows 上 `C:evil.json` 这类盘符相对路径会让 `Path::join` 丢掉基目录，
+/// `CON`、`COM1` 等设备名（带任意扩展名）也会被系统特殊处理，都要挡掉。
+fn valid_file_name(value: &str) -> bool {
+    if value.is_empty()
+        || value.contains('/')
+        || value.contains('\\')
+        || value.contains(':')
+        || value == "."
+        || value == ".."
+        || value.ends_with(' ')
+        || value.ends_with('.')
+        || value
+            .chars()
+            .any(|ch| matches!(ch, '<' | '>' | '"' | '|' | '?' | '*' | '\0'))
+    {
+        return false;
+    }
+
+    let stem = value
+        .split('.')
+        .next()
+        .unwrap_or(value)
+        .to_ascii_uppercase();
+    !matches!(
+        stem.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
+}
+
+fn valid_doc_id(doc_id: &str) -> Result<(), String> {
+    if !valid_file_name(doc_id) {
+        return Err("文档 id 无效".to_string());
+    }
+    Ok(())
+}
+
+fn version_path(root: &Path, doc_id: &str, version_id: &str) -> Result<PathBuf, String> {
+    valid_doc_id(doc_id)?;
+    if !valid_file_name(version_id) || !version_id.ends_with(".json") {
+        return Err("版本 id 无效".to_string());
+    }
+    Ok(history_dir(root, doc_id).join(version_id))
+}
+
+fn version_created_at(path: &Path, id: &str) -> i64 {
+    let from_name = id
+        .split('-')
+        .next()
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(0);
+    if from_name > 0 {
+        return from_name;
+    }
+    fs::metadata(path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// 读取某份文档自动保存的 sidecar 快照，按时间从新到旧。
+fn list_versions(root: &Path, doc_id: &str) -> Result<Vec<SidecarVersion>, String> {
+    valid_doc_id(doc_id)?;
+    let directory = history_dir(root, doc_id);
+    let Ok(entries) = fs::read_dir(&directory) else {
+        return Ok(Vec::new());
+    };
+
+    let mut versions = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(id) = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        if !id.ends_with(".json") {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(sidecar) = serde_json::from_str::<Sidecar>(&text) else {
+            continue;
+        };
+        versions.push(SidecarVersion {
+            created_at: version_created_at(&path, &id),
+            id,
+            annotations: sidecar
+                .annotations
+                .iter()
+                .filter(|annotation| !annotation.deleted)
+                .count(),
+            cards: sidecar.cards.iter().filter(|card| !card.deleted).count(),
+            bookmarks: sidecar.bookmarks.as_ref().map(Vec::len).unwrap_or(0),
+            favorite: sidecar.favorite,
+            tags: sidecar.tags.clone(),
+            folder: sidecar.folder.unwrap_or_default(),
+        });
+    }
+
+    versions.sort_by(|left, right| {
+        right
+            .created_at
+            .cmp(&left.created_at)
+            .then_with(|| right.id.cmp(&left.id))
+    });
+    versions.truncate(60);
+    Ok(versions)
+}
+
+pub fn list_sidecar_versions(app: &AppHandle, doc_id: &str) -> Result<Vec<SidecarVersion>, String> {
+    let state = app.state::<AppState>();
+    list_versions(&state.root(), doc_id)
+}
+
+/// 把一份快照写回为当前状态：快照里的标注更新时间推进到 now，
+/// 快照里没有的当前标注写墓碑，保证跨设备同步时“恢复”也能赢。
+fn restore_from_sidecar(
+    conn: &rusqlite::Connection,
+    root: &Path,
+    doc_id: &str,
+    sidecar: Sidecar,
+) -> Result<(DocumentRow, Vec<Annotation>), String> {
+    valid_doc_id(doc_id)?;
+    if sidecar.doc_id != doc_id {
+        return Err("版本文件与当前文档不匹配".to_string());
+    }
+
+    let now = now_ms();
+    // 恢复要么整体成功，要么什么都不改：逐条自动提交时磁盘满或写盘失败，
+    // 会留下一半标注被恢复、一半被墓碑的中间状态。
+    let transaction = conn
+        .unchecked_transaction()
+        .map_err(|error| format!("开始恢复事务失败：{error}"))?;
+
+    let current = db::list_annotations(&transaction, doc_id)?;
+    for annotation in &current {
+        let in_snapshot = sidecar
+            .annotations
+            .iter()
+            .any(|item| item.id == annotation.id);
+        if !in_snapshot && !annotation.deleted {
+            let mut tombstone = annotation.clone();
+            tombstone.deleted = true;
+            tombstone.updated_at = now;
+            db::upsert_annotation(&transaction, doc_id, &tombstone)?;
+        }
+    }
+    for annotation in &sidecar.annotations {
+        let mut restored = annotation.clone();
+        restored.updated_at = now;
+        db::upsert_annotation(&transaction, doc_id, &restored)?;
+    }
+    db::orphan_cards_for_document(&transaction, doc_id, now)?;
+
+    // 旧格式快照没有 bookmarks/folder 字段：None 表示快照没提供，恢复时保留当前值，
+    // 不能像空数组一样把现有书签和文件夹清掉。
+    let bookmarks = sidecar
+        .bookmarks
+        .as_ref()
+        .map(|items| clean_bookmarks(items.clone(), now));
+    db::update_organization(
+        &transaction,
+        doc_id,
+        Some(sidecar.favorite),
+        Some(&sidecar.tags),
+        sidecar.folder.as_deref(),
+        bookmarks.as_deref(),
+        now,
+    )?;
+
+    // 写盘时会先把“恢复前”的 sidecar 留成一份新历史，误恢复还能再退回来。
+    // 在提交前写：写盘失败就回滚，不会出现库改了、文件没改的半恢复状态。
+    write_sidecar(&transaction, root, doc_id)?;
+    transaction
+        .commit()
+        .map_err(|error| format!("提交恢复事务失败：{error}"))?;
+
+    let document = db::find_by_id(conn, doc_id)?.ok_or_else(|| "文档不存在".to_string())?;
+    let annotations = db::list_annotations(conn, doc_id)?;
+    Ok((document, annotations))
+}
+
+pub fn restore_sidecar_version(
+    app: &AppHandle,
+    doc_id: &str,
+    version_id: &str,
+) -> Result<ImportResult, String> {
+    let state = app.state::<AppState>();
+    let root = state.root();
+    let path = version_path(&root, doc_id, version_id)?;
+    let text = fs::read_to_string(&path).map_err(|error| format!("读取版本失败：{error}"))?;
+    let sidecar: Sidecar =
+        serde_json::from_str(&text).map_err(|error| format!("版本文件无法解析：{error}"))?;
+
+    let conn = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (document, annotations) = restore_from_sidecar(&conn, &root, doc_id, sidecar)?;
+    Ok(ImportResult {
+        document: document.to_document(&root),
+        annotations,
+    })
 }
 
 pub fn list_folders(app: &AppHandle) -> Vec<String> {
@@ -1425,6 +1835,11 @@ fn trash_document_files(
         .join(format!("{}.jpg", row.id));
     if thumbnail.exists() {
         let _ = fs::remove_file(&thumbnail);
+    }
+    // 文档已经从书库移除，历史版本也不再有任何入口；一并清掉，避免留下孤儿文件。
+    let history = history_dir(root, &row.id);
+    if history.exists() {
+        let _ = fs::remove_dir_all(&history);
     }
 
     Ok(TrashOutcome {
@@ -1769,6 +2184,7 @@ mod tests {
             last_page: 0,
             favorite: false,
             tags: Vec::new(),
+            bookmarks: Vec::new(),
             folder: String::new(),
             position: 0,
             meta_updated_at: 0,
@@ -1867,6 +2283,7 @@ mod tests {
             Some(true),
             Some(&["论文".to_string()]),
             Some("研究"),
+            None,
             10,
         )
         .unwrap();
@@ -2030,6 +2447,181 @@ mod tests {
     }
 
     #[test]
+    fn bookmarks_drop_duplicate_pages_and_sort() {
+        let cleaned = clean_bookmarks(
+            vec![
+                Bookmark {
+                    id: "b2".to_string(),
+                    page: 5,
+                    label: " 第五章 ".to_string(),
+                    created_at: 0,
+                },
+                Bookmark {
+                    id: "b1".to_string(),
+                    page: 1,
+                    label: String::new(),
+                    created_at: 0,
+                },
+                Bookmark {
+                    id: "b3".to_string(),
+                    page: 5,
+                    label: "重复".to_string(),
+                    created_at: 0,
+                },
+                Bookmark {
+                    id: String::new(),
+                    page: 2,
+                    label: "第二章".to_string(),
+                    created_at: 0,
+                },
+            ],
+            100,
+        );
+
+        assert_eq!(cleaned.len(), 2);
+        assert_eq!(cleaned[0].page, 2);
+        assert_eq!(cleaned[1].page, 5);
+        assert_eq!(cleaned[1].label, "第五章");
+        assert_eq!(cleaned[0].created_at, 100);
+        assert!(cleaned[0].id.starts_with("bm-2-"));
+    }
+
+    #[test]
+    fn bookmarks_follow_sidecar_timestamps() {
+        let dir = temp_dir("doc-bookmarks");
+        let root = dir.join("library");
+        ensure_dirs(&root).unwrap();
+        let conn = db::open(&dir.join("test.db")).unwrap();
+        let row = document("doc1", "books/doc1.pdf");
+        db::upsert_document(&conn, &row).unwrap();
+
+        let bookmark = Bookmark {
+            id: "bm1".to_string(),
+            page: 3,
+            label: "重点".to_string(),
+            created_at: 1,
+        };
+        db::update_organization(
+            &conn,
+            "doc1",
+            None,
+            None,
+            None,
+            Some(std::slice::from_ref(&bookmark)),
+            10,
+        )
+        .unwrap();
+        write_sidecar(&conn, &root, "doc1").unwrap();
+        let path = sidecar_path(&root, "doc1");
+        let mut sidecar: Sidecar = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(sidecar.bookmarks.as_ref().unwrap().len(), 1);
+
+        // 更旧的 sidecar 不能清空本机书签。
+        sidecar.bookmarks = Some(Vec::new());
+        sidecar.meta_updated_at = 5;
+        fs::write(&path, serde_json::to_vec(&sidecar).unwrap()).unwrap();
+        let current = db::find_by_id(&conn, "doc1").unwrap().unwrap();
+        merge_from_disk(&conn, &root, &current);
+        let fresh = db::find_by_id(&conn, "doc1").unwrap().unwrap();
+        assert_eq!(fresh.bookmarks.len(), 1);
+
+        // 更新的 sidecar 覆盖本机书签。
+        sidecar.bookmarks = Some(vec![Bookmark {
+            id: "bm2".to_string(),
+            page: 7,
+            label: "同步".to_string(),
+            created_at: 2,
+        }]);
+        sidecar.meta_updated_at = 20;
+        fs::write(&path, serde_json::to_vec(&sidecar).unwrap()).unwrap();
+        let current = db::find_by_id(&conn, "doc1").unwrap().unwrap();
+        merge_from_disk(&conn, &root, &current);
+        let fresh = db::find_by_id(&conn, "doc1").unwrap().unwrap();
+        assert_eq!(fresh.bookmarks[0].label, "同步");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sidecar_history_snapshots_changes_and_restores() {
+        let dir = temp_dir("history");
+        let root = dir.join("library");
+        ensure_dirs(&root).unwrap();
+        let conn = db::open(&dir.join("test.db")).unwrap();
+        let mut row = document("doc1", "books/doc1.pdf");
+        row.page_count = 10;
+        db::upsert_document(&conn, &row).unwrap();
+
+        db::upsert_annotation(&conn, "doc1", &annotation("a1", 1, "first")).unwrap();
+        db::update_organization(
+            &conn,
+            "doc1",
+            None,
+            None,
+            None,
+            Some(std::slice::from_ref(&Bookmark {
+                id: "bm1".to_string(),
+                page: 0,
+                label: "重点".to_string(),
+                created_at: 1,
+            })),
+            5,
+        )
+        .unwrap();
+        write_sidecar(&conn, &root, "doc1").unwrap();
+        assert!(list_versions(&root, "doc1").unwrap().is_empty());
+
+        db::upsert_annotation(&conn, "doc1", &annotation("a1", 2, "second")).unwrap();
+        write_sidecar(&conn, &root, "doc1").unwrap();
+
+        db::upsert_annotation(&conn, "doc1", &annotation("a2", 3, "extra")).unwrap();
+        write_sidecar(&conn, &root, "doc1").unwrap();
+
+        let versions = list_versions(&root, "doc1").unwrap();
+        assert_eq!(versions.len(), 2);
+        let oldest = versions.last().unwrap();
+        let text = fs::read_to_string(history_dir(&root, "doc1").join(&oldest.id)).unwrap();
+        let snapshot: Sidecar = serde_json::from_str(&text).unwrap();
+
+        let (restored, annotations) = restore_from_sidecar(&conn, &root, "doc1", snapshot).unwrap();
+        assert_eq!(restored.id, "doc1");
+        assert_eq!(restored.bookmarks.len(), 1);
+        assert_eq!(restored.bookmarks[0].label, "重点");
+        let a1 = annotations.iter().find(|item| item.id == "a1").unwrap();
+        assert_eq!(a1.body, "first");
+        assert!(!a1.deleted);
+        let a2 = annotations.iter().find(|item| item.id == "a2").unwrap();
+        assert!(a2.deleted);
+
+        // 恢复前状态也要留下历史，误恢复可以再退回来。
+        assert!(list_versions(&root, "doc1").unwrap().len() >= 3);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn history_prunes_to_thirty_versions() {
+        let dir = temp_dir("history-prune");
+        let root = dir.join("library");
+        ensure_dirs(&root).unwrap();
+        let conn = db::open(&dir.join("test.db")).unwrap();
+        db::upsert_document(&conn, &document("doc1", "books/doc1.pdf")).unwrap();
+
+        for index in 1..=35 {
+            db::upsert_annotation(
+                &conn,
+                "doc1",
+                &annotation("a1", index, &format!("版本 {index}")),
+            )
+            .unwrap();
+            write_sidecar(&conn, &root, "doc1").unwrap();
+        }
+
+        assert_eq!(list_versions(&root, "doc1").unwrap().len(), 30);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn sidecar_round_trip_and_last_write_wins() {
         let dir = temp_dir("sidecar");
         let root = dir.join("library");
@@ -2072,6 +2664,7 @@ mod tests {
             cards: Vec::new(),
             favorite: false,
             tags: Vec::new(),
+            bookmarks: None,
             folder: None,
             meta_updated_at: 0,
         }

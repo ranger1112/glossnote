@@ -25,6 +25,14 @@ export interface Annotation {
 
 export type LibrarySort = 'recent' | 'added' | 'title' | 'annotations' | 'manual';
 
+export interface Bookmark {
+  id: string;
+  /** 0 基页码。 */
+  page: number;
+  label: string;
+  createdAt: number;
+}
+
 export interface DocumentMeta {
   id: string;
   name: string;
@@ -39,11 +47,37 @@ export interface DocumentMeta {
   lastPage: number;
   favorite: boolean;
   tags: string[];
+  bookmarks: Bookmark[];
   /** 虚拟文件夹；空字符串表示未分类。 */
   folder: string;
   /** 手动排序位置，只存在本机索引里。 */
   position: number;
   annotationCount: number;
+}
+
+export interface PageHit {
+  docId: string;
+  docName: string;
+  page: number;
+  snippet: string;
+}
+
+export interface PageIndexStatus {
+  documents: number;
+  indexedDocuments: number;
+  pages: number;
+  indexedPages: number;
+}
+
+export interface SidecarVersion {
+  id: string;
+  createdAt: number;
+  annotations: number;
+  cards: number;
+  bookmarks: number;
+  favorite: boolean;
+  tags: string[];
+  folder: string;
 }
 
 /** 智能收藏夹：保存一组筛选条件，点开时动态匹配文档。 */

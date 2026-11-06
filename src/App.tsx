@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { pdfjsAssets, pdfjsLib } from './pdfjs';
 import { PdfPage } from './PdfPage';
@@ -9,9 +10,18 @@ import { AiPanel } from './AiPanel';
 import { AiSettingsModal } from './AiSettingsModal';
 import { SettingsModal } from './SettingsModal';
 import { ShortcutList } from './ShortcutList';
+import { HistoryModal } from './HistoryModal';
+import { OutlinePanel } from './OutlinePanel';
+import { PageJump } from './PageJump';
+import { PageThumbnails } from './PageThumbnails';
+import { loadOutline, type OutlineEntry } from './outline';
 import {
   IconArrowLeft,
+  IconBookmark,
   IconDownload,
+  IconHistory,
+  IconList,
+  IconPages,
   IconRedo,
   IconSettings,
   IconSparkles,
@@ -22,10 +32,12 @@ import type {
   AiSettingsView,
   Annotation,
   AnnotationKind,
+  Bookmark,
   CardView,
   DocRecord,
   DocumentMeta,
   HighlightColor,
+  ImportResult,
   PageTextInput,
 } from './types';
 import { loadDoc, saveDoc, sha256Hex } from './storage';
@@ -57,6 +69,7 @@ import {
   listCards,
   loadPageTexts,
   openDocument,
+  saveBookmarks,
   savePageTexts,
   saveProgress,
   scanLibrary,
@@ -74,6 +87,7 @@ interface OpenedDoc {
   name: string;
   pageCount: number;
   pdf: PDFDocumentProxy;
+  bookmarks: Bookmark[];
   dispose: () => void;
 }
 
@@ -104,6 +118,23 @@ interface PdfImportSummary {
 
 /** 侧栏一次渲染的卡片数；滚动到底部再追加，避免上千条标注一次挂载。 */
 const SIDEBAR_PAGE = 100;
+
+const SIDEBAR_WIDTH_KEY = 'glossnote:sidebar-width';
+const SIDEBAR_MIN_WIDTH = 260;
+const SIDEBAR_MAX_WIDTH = 720;
+const SIDEBAR_DEFAULT_WIDTH = 350;
+
+function initialSidebarWidth(): number {
+  try {
+    const saved = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY));
+    if (Number.isFinite(saved) && saved >= SIDEBAR_MIN_WIDTH) {
+      return Math.min(saved, SIDEBAR_MAX_WIDTH);
+    }
+  } catch {
+    // 隐私模式或存储被禁用时用默认宽度。
+  }
+  return SIDEBAR_DEFAULT_WIDTH;
+}
 
 type RenderQuality = 'standard' | 'high';
 const RENDER_QUALITY_KEY = 'glossnote:render-quality';
@@ -174,6 +205,7 @@ interface Activation {
   pdf: PDFDocumentProxy;
   task: ReturnType<typeof pdfjsLib.getDocument>;
   annotations: Annotation[];
+  bookmarks?: Bookmark[];
   desktopMeta?: DocumentMeta;
   initialPage?: number;
 }
@@ -326,6 +358,13 @@ export default function App() {
   }, []);
 
   const [doc, setDoc] = useState<OpenedDoc | null>(null);
+  const [sideTab, setSideTab] = useState<'annotations' | 'outline' | 'pages'>('annotations');
+  const [outline, setOutline] = useState<OutlineEntry[]>([]);
+  const [outlineLoading, setOutlineLoading] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(initialSidebarWidth);
+  const [sidebarResizing, setSidebarResizing] = useState(false);
+  const sidebarDrag = useRef<{ startX: number; startWidth: number } | null>(null);
   const scanEnhance = doc ? scanEnhanceDocs[doc.id] === true : false;
 
   const changeScanEnhance = useCallback(
@@ -344,6 +383,49 @@ export default function App() {
   useEffect(() => {
     persistScanEnhanceDocs(scanEnhanceDocs);
   }, [scanEnhanceDocs]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SIDEBAR_WIDTH_KEY, String(Math.round(sidebarWidth)));
+    } catch {
+      // 存储不可用时只影响下次启动的宽度记忆。
+    }
+  }, [sidebarWidth]);
+
+  const startSidebarResize = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      event.currentTarget.setPointerCapture(event.pointerId);
+      sidebarDrag.current = { startX: event.clientX, startWidth: sidebarWidth };
+      setSidebarResizing(true);
+    },
+    [sidebarWidth],
+  );
+
+  const moveSidebarResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = sidebarDrag.current;
+    if (!drag) return;
+    const workspace = event.currentTarget.parentElement;
+    // 至少给阅读区留 360px，窗口变窄时也不会把正文挤没。
+    const max = workspace
+      ? Math.max(SIDEBAR_MIN_WIDTH, workspace.clientWidth - 360)
+      : SIDEBAR_MAX_WIDTH;
+    const next = Math.min(
+      Math.max(drag.startWidth - (event.clientX - drag.startX), SIDEBAR_MIN_WIDTH),
+      Math.min(max, SIDEBAR_MAX_WIDTH),
+    );
+    setSidebarWidth(next);
+  }, []);
+
+  const endSidebarResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!sidebarDrag.current) return;
+    sidebarDrag.current = null;
+    setSidebarResizing(false);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  }, []);
+
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [scale, setScale] = useState(1.2);
   const [zoomMode, setZoomMode] = useState<ZoomMode>('fit-width');
@@ -416,6 +498,8 @@ export default function App() {
   const undoRef = useRef<Annotation[][]>([]);
   const redoRef = useRef<Annotation[][]>([]);
   const savingRef = useRef(0);
+  // 书签保存是并发命令：用序号丢弃过期响应，避免较早的保存或回滚覆盖较新的编辑。
+  const bookmarkSaveSeq = useRef(0);
   const saveTimerRef = useRef<number | null>(null);
   const viewerRef = useRef<HTMLElement | null>(null);
   const currentPageRef = useRef(0);
@@ -1065,6 +1149,7 @@ export default function App() {
       name: input.name,
       pageCount: input.pageCount,
       pdf: input.pdf,
+      bookmarks: input.bookmarks ?? [],
       dispose: () => {
         void input.task.destroy().catch(() => undefined);
       },
@@ -1101,6 +1186,17 @@ export default function App() {
     setFocusId(null);
     setAiPanel(null);
     setMessage('');
+    setSideTab('annotations');
+    setOutline([]);
+    setOutlineLoading(true);
+    void loadOutline(input.pdf)
+      .then((entries) => {
+        if (docRef.current?.id === input.id) setOutline(entries);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (docRef.current?.id === input.id) setOutlineLoading(false);
+      });
 
     requestAnimationFrame(() => {
       if (startPage > 0) scrollToPage(startPage);
@@ -1153,6 +1249,7 @@ export default function App() {
           pdf,
           task,
           annotations: record.annotations,
+          bookmarks: [],
         });
       } catch (error) {
         setMessage(`打开失败：${errorText(error)}`);
@@ -1181,6 +1278,7 @@ export default function App() {
           pdf,
           task,
           annotations: result.annotations,
+          bookmarks: result.document.bookmarks,
           desktopMeta: result.document,
           initialPage: page ?? result.document.lastPage,
         });
@@ -1212,6 +1310,8 @@ export default function App() {
     }
 
     const finish = () => {
+      // 关闭文档后在途的书签保存不应再写回状态。
+      bookmarkSaveSeq.current += 1;
       docRef.current?.dispose();
       docRef.current = null;
       recordRef.current = null;
@@ -1234,6 +1334,10 @@ export default function App() {
       setCards([]);
       setCardEditing(null);
       setAiPanel(null);
+      setSideTab('annotations');
+      setOutline([]);
+      setOutlineLoading(false);
+      setHistoryOpen(false);
       setMessage('');
       closingRef.current = false;
     };
@@ -1246,6 +1350,101 @@ export default function App() {
       finish();
     }
   }, [resetHistory, resetSaveState]);
+
+  const currentBookmark =
+    doc?.bookmarks.find((bookmark) => bookmark.page === currentPage) ?? null;
+
+  const persistBookmarks = useCallback(
+    async (next: Bookmark[]) => {
+      const active = doc;
+      if (!active) return;
+      const previous = active.bookmarks;
+      const seq = bookmarkSaveSeq.current + 1;
+      bookmarkSaveSeq.current = seq;
+      setDoc((current) =>
+        current && current.id === active.id ? { ...current, bookmarks: next } : current,
+      );
+      if (!isTauri()) return;
+
+      try {
+        const updated = await saveBookmarks(active.id, next);
+        // 已有更新的保存发出：它的响应/回滚才是当前状态。
+        if (bookmarkSaveSeq.current !== seq) return;
+        setDoc((current) =>
+          current && current.id === active.id
+            ? { ...current, bookmarks: updated.bookmarks }
+            : current,
+        );
+      } catch (error) {
+        if (bookmarkSaveSeq.current !== seq) return;
+        setDoc((current) =>
+          current && current.id === active.id
+            ? { ...current, bookmarks: previous }
+            : current,
+        );
+        setMessage(`保存书签失败：${errorText(error)}`);
+      }
+    },
+    [doc, setMessage],
+  );
+
+  const toggleBookmark = useCallback(() => {
+    if (!doc) return;
+    const page = currentPageRef.current;
+    const exists = doc.bookmarks.some((bookmark) => bookmark.page === page);
+    const next = exists
+      ? doc.bookmarks.filter((bookmark) => bookmark.page !== page)
+      : [
+          ...doc.bookmarks,
+          {
+            id: crypto.randomUUID(),
+            page,
+            label: `第 ${page + 1} 页`,
+            createdAt: Date.now(),
+          },
+        ].sort((left, right) => left.page - right.page);
+    void persistBookmarks(next);
+  }, [doc, persistBookmarks]);
+
+  const removeBookmark = useCallback(
+    (id: string) => {
+      if (!doc) return;
+      void persistBookmarks(doc.bookmarks.filter((bookmark) => bookmark.id !== id));
+    },
+    [doc, persistBookmarks],
+  );
+
+  const renameBookmark = useCallback(
+    (id: string, label: string) => {
+      if (!doc) return;
+      const value = label.trim();
+      if (!value) return;
+      void persistBookmarks(
+        doc.bookmarks.map((bookmark) =>
+          bookmark.id === id ? { ...bookmark, label: value } : bookmark,
+        ),
+      );
+    },
+    [doc, persistBookmarks],
+  );
+
+  const handleRestored = useCallback(
+    (result: ImportResult) => {
+      annotationsRef.current = result.annotations;
+      setAnnotations(result.annotations);
+      resetHistory();
+      resetSaveState();
+      setToolbar(null);
+      setHover(null);
+      setDoc((current) =>
+        current && current.id === result.document.id
+          ? { ...current, bookmarks: result.document.bookmarks }
+          : current,
+      );
+      void refreshCards();
+    },
+    [refreshCards, resetHistory, resetSaveState],
+  );
 
   const handleViewerScroll = useCallback(() => {
     if (scrollFrame.current !== null) return;
@@ -1408,6 +1607,22 @@ export default function App() {
       setScale(zoomTargetRef.current);
     }, 140);
   }, []);
+
+  // Ctrl/⌘ + 滚轮缩放阅读区；触控板双指捏合也会以 ctrlKey 的 wheel 事件到达。
+  const openDocId = doc?.id;
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewer || !openDocId) return;
+    const onWheel = (event: WheelEvent) => {
+      if (!event.ctrlKey && !event.metaKey) return;
+      event.preventDefault();
+      // 用指数曲线跟随滚轮/捏合幅度，鼠标一格约 15%，触控板小步长更细腻。
+      const factor = Math.min(1.25, Math.max(0.8, Math.exp(-event.deltaY * 0.0015)));
+      zoomTo(+(zoomTargetRef.current * factor).toFixed(3));
+    };
+    viewer.addEventListener('wheel', onWheel, { passive: false });
+    return () => viewer.removeEventListener('wheel', onWheel);
+  }, [openDocId, zoomTo]);
 
   /** 键盘翻页按视口高度滚动，略小于一屏，保留上一页的上下文。 */
   const scrollPages = useCallback((direction: 1 | -1) => {
@@ -2056,8 +2271,8 @@ export default function App() {
 
       // 输入控件里的按键交给文本自身：撤销、空格与翻页都不拦截。
       if (isTypingTarget(event.target)) return;
-      // 设置、帮助或卡片弹窗打开时，不让快捷键操作后面的文档。
-      if (settingsOpen || helpOpen || aiSettingsOpen || cardEditing) return;
+      // 设置、帮助、版本历史或卡片弹窗打开时，不让快捷键操作后面的文档。
+      if (settingsOpen || helpOpen || aiSettingsOpen || cardEditing || historyOpen) return;
 
       if (event.ctrlKey || event.metaKey) {
         const key = event.key.toLowerCase();
@@ -2120,6 +2335,7 @@ export default function App() {
     doc,
     goToPage,
     helpOpen,
+    historyOpen,
     redo,
     scrollPages,
     settingsOpen,
@@ -2253,6 +2469,27 @@ export default function App() {
             >
               <IconRedo size={16} />
             </button>
+            <button
+              type="button"
+              className={`theme-toggle ${currentBookmark ? 'ready' : ''}`}
+              title={currentBookmark ? '移除本页书签' : '给本页加书签'}
+              aria-label={currentBookmark ? '移除本页书签' : '给本页加书签'}
+              aria-pressed={!!currentBookmark}
+              onClick={toggleBookmark}
+            >
+              <IconBookmark size={16} filled={!!currentBookmark} />
+            </button>
+            {desktop && (
+              <button
+                type="button"
+                className="theme-toggle"
+                title="版本历史"
+                aria-label="版本历史"
+                onClick={() => setHistoryOpen(true)}
+              >
+                <IconHistory size={16} />
+              </button>
+            )}
           </div>
         )}
 
@@ -2391,7 +2628,10 @@ export default function App() {
       )}
 
       {doc ? (
-        <main className="workspace">
+        <main
+          className="workspace"
+          style={{ '--sidebar-width': `${sidebarWidth}px` } as CSSProperties}
+        >
           <section
             className="viewer"
             ref={viewerRef}
@@ -2429,24 +2669,47 @@ export default function App() {
               ))}
           </section>
 
+          <div
+            className={`sidebar-resizer ${sidebarResizing ? 'dragging' : ''}`}
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="调整标注栏宽度"
+            title="拖动调整标注栏宽度，双击恢复默认"
+            onPointerDown={startSidebarResize}
+            onPointerMove={moveSidebarResize}
+            onPointerUp={endSidebarResize}
+            onPointerCancel={endSidebarResize}
+            onDoubleClick={() => setSidebarWidth(SIDEBAR_DEFAULT_WIDTH)}
+          />
+
           <aside className="sidebar">
             <div className="sidebar-head">
-              <h2>标注</h2>
-              <span
-                className="count"
-                title={
-                  filtered.length === visible.length
-                    ? undefined
-                    : `已筛选 ${filtered.length} 条，共 ${visible.length} 条`
-                }
-              >
-                {filtered.length === visible.length
-                  ? visible.length
-                  : `${filtered.length} / ${visible.length}`}
-              </span>
-              <span className="sidebar-progress">
-                {currentPage + 1} / {doc.pageCount}
-              </span>
+              <h2>
+                {sideTab === 'annotations'
+                  ? '标注'
+                  : sideTab === 'outline'
+                    ? '目录'
+                    : '页面'}
+              </h2>
+              {sideTab === 'annotations' && (
+                <span
+                  className="count"
+                  title={
+                    filtered.length === visible.length
+                      ? undefined
+                      : `已筛选 ${filtered.length} 条，共 ${visible.length} 条`
+                  }
+                >
+                  {filtered.length === visible.length
+                    ? visible.length
+                    : `${filtered.length} / ${visible.length}`}
+                </span>
+              )}
+              <PageJump
+                currentPage={currentPage}
+                pageCount={doc.pageCount}
+                onJump={goToPage}
+              />
               <button
                 type="button"
                 className="ai-head-button import-head-button"
@@ -2470,6 +2733,40 @@ export default function App() {
               )}
             </div>
 
+            <div className="sidebar-tabs" role="tablist" aria-label="侧栏视图">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={sideTab === 'annotations'}
+                className={sideTab === 'annotations' ? 'active' : ''}
+                onClick={() => setSideTab('annotations')}
+              >
+                标注
+                <span className="tab-count">{filtered.length}</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={sideTab === 'outline'}
+                className={sideTab === 'outline' ? 'active' : ''}
+                onClick={() => setSideTab('outline')}
+              >
+                <IconList size={13} />
+                目录
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={sideTab === 'pages'}
+                className={sideTab === 'pages' ? 'active' : ''}
+                onClick={() => setSideTab('pages')}
+              >
+                <IconPages size={13} />
+                页面
+              </button>
+            </div>
+
+            {/* 导入入口在侧栏头部，横幅必须对所有标签页可见，否则在目录/页面页触发后看不到进度与确认。 */}
             {(pdfImport || pdfImportProgress) && (
               <div className="pdf-import-banner">
                 {pdfImportProgress ? (
@@ -2518,6 +2815,8 @@ export default function App() {
               </div>
             )}
 
+            {sideTab === 'annotations' ? (
+              <>
             {showPageHint && (
               <div className="pdf-page-hint">
                 <span>本页有 {pageNativeCount} 条 PDF 自带标注</span>
@@ -2671,6 +2970,27 @@ export default function App() {
                   </button>
                 )}
               </div>
+            )}
+              </>
+            ) : sideTab === 'outline' ? (
+              <OutlinePanel
+                outline={outline}
+                loading={outlineLoading}
+                bookmarks={doc.bookmarks}
+                currentPage={currentPage}
+                onJump={goToPage}
+                onToggleBookmark={toggleBookmark}
+                onRemoveBookmark={removeBookmark}
+                onRenameBookmark={renameBookmark}
+              />
+            ) : (
+              <PageThumbnails
+                pdf={doc.pdf}
+                pageCount={doc.pageCount}
+                currentPage={currentPage}
+                bookmarks={doc.bookmarks}
+                onJump={goToPage}
+              />
             )}
 
             <div className="sidebar-foot">
@@ -2876,6 +3196,16 @@ export default function App() {
           onClose={() => setAiPanel(null)}
           onJumpPage={goToPage}
           onOpenSettings={() => void openAiSettings()}
+          onMessage={setMessage}
+        />
+      )}
+
+      {historyOpen && doc && (
+        <HistoryModal
+          docId={doc.id}
+          docName={doc.name}
+          onClose={() => setHistoryOpen(false)}
+          onRestored={handleRestored}
           onMessage={setMessage}
         />
       )}

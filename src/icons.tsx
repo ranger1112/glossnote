@@ -58,6 +58,48 @@ export function IconFolder({ size = 16, className }: IconProps) {
   );
 }
 
+export function IconBookmark({
+  size = 16,
+  className,
+  filled = false,
+}: IconProps & { filled?: boolean }) {
+  return (
+    <svg {...iconProps(size, className)} fill={filled ? 'currentColor' : 'none'}>
+      <path d="M6 4h12a1 1 0 0 1 1 1v15l-7-4-7 4V5a1 1 0 0 1 1-1Z" />
+    </svg>
+  );
+}
+
+export function IconHistory({ size = 16, className }: IconProps) {
+  return (
+    <svg {...iconProps(size, className)}>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 7.5V12l3 2" />
+      <path d="M4.5 9.5 3 8m1.5 1.5L6 7.5" />
+    </svg>
+  );
+}
+
+export function IconList({ size = 16, className }: IconProps) {
+  return (
+    <svg {...iconProps(size, className)}>
+      <path d="M9 6h11M9 12h11M9 18h11" />
+      <path d="M4 6h.01M4 12h.01M4 18h.01" />
+    </svg>
+  );
+}
+
+export function IconPages({ size = 16, className }: IconProps) {
+  return (
+    <svg {...iconProps(size, className)}>
+      <rect x="3.5" y="4" width="7" height="7" rx="1.2" />
+      <rect x="13.5" y="4" width="7" height="7" rx="1.2" />
+      <rect x="3.5" y="13" width="7" height="7" rx="1.2" />
+      <rect x="13.5" y="13" width="7" height="7" rx="1.2" />
+    </svg>
+  );
+}
+
 export function IconTrash({ size = 16, className }: IconProps) {
   return (
     <svg {...iconProps(size, className)}>
