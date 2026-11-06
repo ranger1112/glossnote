@@ -980,11 +980,34 @@ pub fn search_pages(app: &AppHandle, query: String) -> Result<Vec<PageHit>, Stri
 
 pub fn page_index_status(app: &AppHandle) -> Result<PageIndexStatus, String> {
     let state = app.state::<AppState>();
+    let root = state.root();
     let conn = state
         .db
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    db::page_index_status(&conn)
+
+    let mut status = db::page_index_status(&conn)?;
+    let documents = db::list_documents(&conn)?;
+    let counts = db::page_text_counts(&conn)?;
+    for document in documents {
+        // 云盘还没同步下来、或已经被删掉的 PDF 不该让覆盖率永远差几份。
+        if root
+            .join(document.rel_path.replace('/', std::path::MAIN_SEPARATOR_STR))
+            .is_file()
+        {
+            continue;
+        }
+        let pages = document.page_count as usize;
+        let cached = counts.get(&document.id).copied().unwrap_or(0);
+        status.documents = status.documents.saturating_sub(1);
+        status.pages = status.pages.saturating_sub(pages);
+        status.indexed_pages = status.indexed_pages.saturating_sub(cached.min(pages));
+        // 只有缓存覆盖全部页面才算完整索引；搜索命中上限截断的缓存不算。
+        if pages > 0 && cached >= pages {
+            status.indexed_documents = status.indexed_documents.saturating_sub(1);
+        }
+    }
+    Ok(status)
 }
 
 /// 导出一份带 GlossNote 标注的 PDF 副本；只读取索引与源文件。
@@ -1442,8 +1465,55 @@ pub fn save_bookmarks(
     Ok(document.to_document(&root))
 }
 
+/// 只接受可以安全拼进目录的单个文件名。
+/// Windows 上 `C:evil.json` 这类盘符相对路径会让 `Path::join` 丢掉基目录，
+/// `CON`、`COM1` 等设备名（带任意扩展名）也会被系统特殊处理，都要挡掉。
+fn valid_file_name(value: &str) -> bool {
+    if value.is_empty()
+        || value.contains('/')
+        || value.contains('\\')
+        || value.contains(':')
+        || value == "."
+        || value == ".."
+        || value.ends_with(' ')
+        || value.ends_with('.')
+        || value
+            .chars()
+            .any(|ch| matches!(ch, '<' | '>' | '"' | '|' | '?' | '*' | '\0'))
+    {
+        return false;
+    }
+
+    let stem = value.split('.').next().unwrap_or(value).to_ascii_uppercase();
+    !matches!(
+        stem.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
+}
+
 fn valid_doc_id(doc_id: &str) -> Result<(), String> {
-    if doc_id.is_empty() || doc_id.contains('/') || doc_id.contains('\\') || doc_id.contains("..") {
+    if !valid_file_name(doc_id) {
         return Err("文档 id 无效".to_string());
     }
     Ok(())
@@ -1451,12 +1521,7 @@ fn valid_doc_id(doc_id: &str) -> Result<(), String> {
 
 fn version_path(root: &Path, doc_id: &str, version_id: &str) -> Result<PathBuf, String> {
     valid_doc_id(doc_id)?;
-    if version_id.is_empty()
-        || version_id.contains('/')
-        || version_id.contains('\\')
-        || version_id.contains("..")
-        || !version_id.ends_with(".json")
-    {
+    if !valid_file_name(version_id) || !version_id.ends_with(".json") {
         return Err("版本 id 无效".to_string());
     }
     Ok(history_dir(root, doc_id).join(version_id))
@@ -1554,7 +1619,13 @@ fn restore_from_sidecar(
     }
 
     let now = now_ms();
-    let current = db::list_annotations(conn, doc_id)?;
+    // 恢复要么整体成功，要么什么都不改：逐条自动提交时磁盘满或写盘失败，
+    // 会留下一半标注被恢复、一半被墓碑的中间状态。
+    let transaction = conn
+        .unchecked_transaction()
+        .map_err(|error| format!("开始恢复事务失败：{error}"))?;
+
+    let current = db::list_annotations(&transaction, doc_id)?;
     for annotation in &current {
         let in_snapshot = sidecar
             .annotations
@@ -1564,29 +1635,39 @@ fn restore_from_sidecar(
             let mut tombstone = annotation.clone();
             tombstone.deleted = true;
             tombstone.updated_at = now;
-            db::upsert_annotation(conn, doc_id, &tombstone)?;
+            db::upsert_annotation(&transaction, doc_id, &tombstone)?;
         }
     }
     for annotation in &sidecar.annotations {
         let mut restored = annotation.clone();
         restored.updated_at = now;
-        db::upsert_annotation(conn, doc_id, &restored)?;
+        db::upsert_annotation(&transaction, doc_id, &restored)?;
     }
-    db::orphan_cards_for_document(conn, doc_id, now)?;
+    db::orphan_cards_for_document(&transaction, doc_id, now)?;
 
-    let bookmarks = clean_bookmarks(sidecar.bookmarks.unwrap_or_default(), now);
+    // 旧格式快照没有 bookmarks/folder 字段：None 表示快照没提供，恢复时保留当前值，
+    // 不能像空数组一样把现有书签和文件夹清掉。
+    let bookmarks = sidecar
+        .bookmarks
+        .as_ref()
+        .map(|items| clean_bookmarks(items.clone(), now));
     db::update_organization(
-        conn,
+        &transaction,
         doc_id,
         Some(sidecar.favorite),
         Some(&sidecar.tags),
-        Some(&sidecar.folder.unwrap_or_default()),
-        Some(&bookmarks),
+        sidecar.folder.as_deref(),
+        bookmarks.as_deref(),
         now,
     )?;
 
     // 写盘时会先把“恢复前”的 sidecar 留成一份新历史，误恢复还能再退回来。
-    write_sidecar(conn, root, doc_id)?;
+    // 在提交前写：写盘失败就回滚，不会出现库改了、文件没改的半恢复状态。
+    write_sidecar(&transaction, root, doc_id)?;
+    transaction
+        .commit()
+        .map_err(|error| format!("提交恢复事务失败：{error}"))?;
+
     let document = db::find_by_id(conn, doc_id)?.ok_or_else(|| "文档不存在".to_string())?;
     let annotations = db::list_annotations(conn, doc_id)?;
     Ok((document, annotations))

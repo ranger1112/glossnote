@@ -17,16 +17,39 @@ const thumbnailCache = new WeakMap<PDFDocumentProxy, Map<number, string>>();
 let activeRenders = 0;
 const renderQueue: Array<() => void> = [];
 
-function withRenderSlot<T>(task: () => Promise<T>): Promise<T> {
+/** 关闭文档时 pdf.js 的 getPage 可能永远不 settle；超时兜底，避免永久占住槽位。 */
+const RENDER_TIMEOUT_MS = 15_000;
+
+function withRenderSlot<T>(
+  task: () => Promise<T>,
+  cancelled: () => boolean = () => false,
+): Promise<T | null> {
   return new Promise((resolve, reject) => {
     const run = () => {
+      if (cancelled()) {
+        resolve(null);
+        return;
+      }
       activeRenders += 1;
-      task()
-        .then(resolve, reject)
-        .finally(() => {
-          activeRenders -= 1;
-          renderQueue.shift()?.();
-        });
+      let settled = false;
+      const finish = (settle: () => void) => {
+        if (settled) return;
+        settled = true;
+        activeRenders -= 1;
+        renderQueue.shift()?.();
+        settle();
+      };
+      const timer = window.setTimeout(() => finish(() => resolve(null)), RENDER_TIMEOUT_MS);
+      task().then(
+        (value) => {
+          window.clearTimeout(timer);
+          finish(() => resolve(value));
+        },
+        (error) => {
+          window.clearTimeout(timer);
+          finish(() => reject(error));
+        },
+      );
     };
     if (activeRenders < 2) run();
     else renderQueue.push(run);
@@ -78,7 +101,7 @@ function Thumbnail({ pdf, page, current, bookmarked, onJump }: ThumbnailProps) {
       (entries) => {
         if (!entries.some((entry) => entry.isIntersecting)) return;
         observer.disconnect();
-        void withRenderSlot(() => renderThumbnail(pdf, page))
+        void withRenderSlot(() => renderThumbnail(pdf, page), () => cancelled)
           .then((data) => {
             if (cancelled || !data) return;
             let cache = thumbnailCache.get(pdf);

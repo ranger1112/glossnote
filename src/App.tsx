@@ -433,6 +433,8 @@ export default function App() {
   const undoRef = useRef<Annotation[][]>([]);
   const redoRef = useRef<Annotation[][]>([]);
   const savingRef = useRef(0);
+  // 书签保存是并发命令：用序号丢弃过期响应，避免较早的保存或回滚覆盖较新的编辑。
+  const bookmarkSaveSeq = useRef(0);
   const saveTimerRef = useRef<number | null>(null);
   const viewerRef = useRef<HTMLElement | null>(null);
   const currentPageRef = useRef(0);
@@ -1243,6 +1245,8 @@ export default function App() {
     }
 
     const finish = () => {
+      // 关闭文档后在途的书签保存不应再写回状态。
+      bookmarkSaveSeq.current += 1;
       docRef.current?.dispose();
       docRef.current = null;
       recordRef.current = null;
@@ -1290,6 +1294,8 @@ export default function App() {
       const active = doc;
       if (!active) return;
       const previous = active.bookmarks;
+      const seq = bookmarkSaveSeq.current + 1;
+      bookmarkSaveSeq.current = seq;
       setDoc((current) =>
         current && current.id === active.id ? { ...current, bookmarks: next } : current,
       );
@@ -1297,12 +1303,15 @@ export default function App() {
 
       try {
         const updated = await saveBookmarks(active.id, next);
+        // 已有更新的保存发出：它的响应/回滚才是当前状态。
+        if (bookmarkSaveSeq.current !== seq) return;
         setDoc((current) =>
           current && current.id === active.id
             ? { ...current, bookmarks: updated.bookmarks }
             : current,
         );
       } catch (error) {
+        if (bookmarkSaveSeq.current !== seq) return;
         setDoc((current) =>
           current && current.id === active.id
             ? { ...current, bookmarks: previous }
@@ -2181,8 +2190,8 @@ export default function App() {
 
       // 输入控件里的按键交给文本自身：撤销、空格与翻页都不拦截。
       if (isTypingTarget(event.target)) return;
-      // 设置、帮助或卡片弹窗打开时，不让快捷键操作后面的文档。
-      if (settingsOpen || helpOpen || aiSettingsOpen || cardEditing) return;
+      // 设置、帮助、版本历史或卡片弹窗打开时，不让快捷键操作后面的文档。
+      if (settingsOpen || helpOpen || aiSettingsOpen || cardEditing || historyOpen) return;
 
       if (event.ctrlKey || event.metaKey) {
         const key = event.key.toLowerCase();
@@ -2245,6 +2254,7 @@ export default function App() {
     doc,
     goToPage,
     helpOpen,
+    historyOpen,
     redo,
     scrollPages,
     settingsOpen,
@@ -2657,8 +2667,7 @@ export default function App() {
               </button>
             </div>
 
-            {sideTab === 'annotations' ? (
-              <>
+            {/* 导入入口在侧栏头部，横幅必须对所有标签页可见，否则在目录/页面页触发后看不到进度与确认。 */}
             {(pdfImport || pdfImportProgress) && (
               <div className="pdf-import-banner">
                 {pdfImportProgress ? (
@@ -2707,6 +2716,8 @@ export default function App() {
               </div>
             )}
 
+            {sideTab === 'annotations' ? (
+              <>
             {showPageHint && (
               <div className="pdf-page-hint">
                 <span>本页有 {pageNativeCount} 条 PDF 自带标注</span>

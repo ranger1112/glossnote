@@ -52,6 +52,9 @@ type ConfirmState =
   | { kind: 'delete-docs'; ids: string[] }
   | { kind: 'delete-folder'; name: string };
 
+/** 索引任务跨组件存在：离开书库后仍在后台收尾，重新进入时不能并发再开一轮。 */
+let indexRunActive = false;
+
 /** 打开 PDF 拿到页数；缺封面时顺便把首页画成 320px 宽的 JPEG。 */
 async function inspectPdf(doc: DocumentMeta): Promise<Inspection> {
   const task = pdfjsLib.getDocument({ url: assetUrl(doc.path), ...pdfjsAssets });
@@ -202,7 +205,12 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
       setIndexProgress('正在停止…');
       return;
     }
+    if (indexRunActive) {
+      onMessage('上一轮正文索引还在后台收尾，请稍候再试。');
+      return;
+    }
 
+    indexRunActive = true;
     setIndexing(true);
     indexCancel.current = false;
     let updated = 0;
@@ -256,6 +264,7 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
     } catch (error) {
       onMessage(`建立正文索引失败：${errorText(error)}`);
     } finally {
+      indexRunActive = false;
       setIndexing(false);
       setIndexProgress('');
       await refreshIndexStatus();
@@ -266,6 +275,8 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
     void refresh();
     return () => {
       coverRun.current += 1;
+      // 书库卸载后索引不能继续无限跑下去；下一轮由新组件重新发起。
+      indexCancel.current = true;
     };
   }, [refresh]);
 
@@ -281,17 +292,27 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
     let cancelled = false;
     setSearching(true);
     const timer = window.setTimeout(() => {
-      Promise.allSettled([searchAnnotations(term), searchPages(term)])
-        .then(([annotations, pages]) => {
-          if (cancelled) return;
-          if (annotations.status === 'fulfilled') setHits(annotations.value);
-          if (pages.status === 'fulfilled') setPageHits(pages.value);
-          const failed = [annotations, pages].find((item) => item.status === 'rejected');
-          if (failed) onMessage(`搜索失败：${errorText(failed.reason)}`);
+      // 新查询开始前清掉上一轮结果：某个来源失败时，旧命中不能挂在新查询下面。
+      setHits([]);
+      setPageHits([]);
+      const annotations = searchAnnotations(term)
+        .then((value) => {
+          if (!cancelled) setHits(value);
         })
-        .finally(() => {
-          if (!cancelled) setSearching(false);
+        .catch((error) => {
+          if (!cancelled) onMessage(`搜索失败：${errorText(error)}`);
         });
+      const pages = searchPages(term)
+        .then((value) => {
+          if (!cancelled) setPageHits(value);
+        })
+        .catch((error) => {
+          if (!cancelled) onMessage(`搜索失败：${errorText(error)}`);
+        });
+      // 标注命中先到先显示；正文扫描慢时不挡标注。
+      Promise.allSettled([annotations, pages]).finally(() => {
+        if (!cancelled) setSearching(false);
+      });
     }, 240);
 
     return () => {
@@ -816,7 +837,7 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
 
           {searchingNow ? (
             <section className="search-results">
-              {searching ? (
+              {searching && hits.length === 0 && pageHits.length === 0 ? (
                 <p className="library-empty">搜索中…</p>
               ) : hits.length === 0 && pageHits.length === 0 ? (
                 <div className="search-empty">

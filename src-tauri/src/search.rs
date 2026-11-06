@@ -55,10 +55,13 @@ pub fn tokens(text: &str) -> Vec<String> {
     tokens
 }
 
-/// 单个汉字无法组成二元组，FTS 索引里不会有它；这种查询退回 LIKE。
-pub fn is_single_cjk_query(query: &str) -> bool {
-    let mut chars = query.trim().chars();
-    matches!((chars.next(), chars.next()), (Some(ch), None) if is_cjk(ch))
+/// 查询里只要含有一个单字中文词，FTS 索引里就没有它（二元组无法表示单字），
+/// 整条查询都要退回 LIKE 子串匹配。
+pub fn has_single_cjk_term(query: &str) -> bool {
+    tokens(query).iter().any(|token| {
+        let mut chars = token.chars();
+        matches!((chars.next(), chars.next()), (Some(ch), None) if is_cjk(ch))
+    })
 }
 
 /// 把查询转换成 FTS5 MATCH 表达式；英文词加 `*` 支持前缀，中文二元组精确匹配。
@@ -167,8 +170,11 @@ mod tests {
     fn tokenizes_mixed_and_single_cjk() {
         assert_eq!(tokens("AI标注"), vec!["ai", "标注"]);
         assert_eq!(tokens("人"), vec!["人"]);
-        assert!(is_single_cjk_query("人"));
-        assert!(!is_single_cjk_query("认知"));
+        assert!(has_single_cjk_term("人"));
+        assert!(has_single_cjk_term("我 认知"));
+        assert!(has_single_cjk_term("人，物"));
+        assert!(!has_single_cjk_term("认知"));
+        assert!(!has_single_cjk_term("AI 标注"));
     }
 
     #[test]
