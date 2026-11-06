@@ -218,16 +218,21 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-/// 0.3 之前没有正文索引：FTS 表刚建好时还是空的，而 page_texts 里可能已有行。
-/// 必须先按内容表整体重建索引，再回填 tokens——否则回填的 UPDATE 触发器会对
-/// 不存在的索引行执行 'delete'，FTS5 会直接报「database disk image is malformed」，
-/// 上层再把 library.db 当成坏库备份重建，阅读进度等本机状态就丢了。
+/// 索引版本：
+/// - 0：没有 FTS 索引，page_texts 可能已有行；
+/// - 1：索引只有二元组，单字查询回退 LIKE；
+/// - 2：单字 + 二元组，单字查询也走 FTS。
+///
+/// 升级时先按内容表整体重建索引，再按新分词改写 tokens——否则回填的 UPDATE
+/// 触发器会对不存在的索引行执行 'delete'，FTS5 会直接报「database disk image
+/// is malformed」，上层再把 library.db 当成坏库备份重建，阅读进度等本机状态就丢了。
 /// 用 user_version 记住迁移已完成，避免每次启动都重建整本索引。
 fn upgrade_page_search(conn: &Connection) -> Result<(), String> {
+    const INDEX_VERSION: i64 = 2;
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(|error| format!("读取索引版本失败：{error}"))?;
-    if version >= 1 {
+    if version >= INDEX_VERSION {
         return Ok(());
     }
 
@@ -236,28 +241,17 @@ fn upgrade_page_search(conn: &Connection) -> Result<(), String> {
         [],
     )
     .map_err(|error| format!("重建正文搜索索引失败：{error}"))?;
-    backfill_page_search(conn)?;
-    conn.pragma_update(None, "user_version", 1)
+    reindex_page_tokens(conn)?;
+    conn.pragma_update(None, "user_version", INDEX_VERSION)
         .map_err(|error| format!("更新索引版本失败：{error}"))?;
     Ok(())
 }
 
-/// 旧版本只缓存了原文，没有分词列；升级后补齐一次。
-fn backfill_page_search(conn: &Connection) -> Result<(), String> {
-    let pending: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM page_texts WHERE tokens = '' AND text <> ''",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|error| format!("检查正文索引失败：{error}"))?;
-    if pending == 0 {
-        return Ok(());
-    }
-
+/// 用当前分词规则重写所有非空页面的 tokens；空页面没有可索引内容，跳过。
+fn reindex_page_tokens(conn: &Connection) -> Result<(), String> {
     let rows: Vec<(i64, String)> = {
         let mut statement = conn
-            .prepare("SELECT rowid, text FROM page_texts WHERE tokens = '' AND text <> ''")
+            .prepare("SELECT rowid, text FROM page_texts WHERE text <> ''")
             .map_err(|error| format!("准备正文索引回填失败：{error}"))?;
         let rows = statement
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
@@ -265,6 +259,9 @@ fn backfill_page_search(conn: &Connection) -> Result<(), String> {
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|error| format!("读取正文索引回填数据失败：{error}"))?
     };
+    if rows.is_empty() {
+        return Ok(());
+    }
 
     let transaction = conn
         .unchecked_transaction()
@@ -808,61 +805,11 @@ pub fn save_page_texts(
     Ok(pages.len())
 }
 
-fn escape_like(term: &str) -> String {
-    term.replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_")
-}
-
 /// 全库正文搜索。命中来自 page_texts（已缓存正文的页面），片段从原文截取。
 pub fn search_pages(conn: &Connection, query: &str) -> Result<Vec<PageHit>, String> {
     let term = query.trim();
     if term.is_empty() {
         return Ok(Vec::new());
-    }
-
-    let mut hits = Vec::new();
-    if search::has_single_cjk_term(term) {
-        // 单字无法形成二元组，FTS 索引里没有它；整条查询退回 LIKE。
-        // 多个词之间用 AND 连接，避免「我 认知」被当成连续字符串去匹配。
-        let mut patterns: Vec<String> = Vec::new();
-        for token in search::tokens(term) {
-            let pattern = format!("%{}%", escape_like(&token));
-            if !patterns.contains(&pattern) {
-                patterns.push(pattern);
-            }
-        }
-        if patterns.is_empty() {
-            return Ok(hits);
-        }
-        let conditions = vec!["p.text LIKE ? ESCAPE '\\'"; patterns.len()].join(" AND ");
-        let sql = format!(
-            "SELECT p.doc_id, d.name, p.page, p.text
-             FROM page_texts p
-             JOIN documents d ON d.id = p.doc_id
-             WHERE {conditions}
-             ORDER BY d.added_at DESC, p.page ASC
-             LIMIT 100"
-        );
-        let mut statement = conn
-            .prepare(&sql)
-            .map_err(|error| format!("准备正文搜索失败：{error}"))?;
-        let rows = statement
-            .query_map(rusqlite::params_from_iter(patterns.iter()), |row| {
-                let text: String = row.get(3)?;
-                Ok(PageHit {
-                    doc_id: row.get(0)?,
-                    doc_name: row.get(1)?,
-                    page: row.get::<_, i64>(2)? as u32,
-                    snippet: search::snippet(&text, term),
-                })
-            })
-            .map_err(|error| format!("搜索正文失败：{error}"))?;
-        hits.extend(
-            rows.collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(|error| format!("读取正文搜索结果失败：{error}"))?,
-        );
-        return Ok(hits);
     }
 
     let Some(expression) = search::match_query(term) else {
@@ -890,11 +837,8 @@ pub fn search_pages(conn: &Connection, query: &str) -> Result<Vec<PageHit>, Stri
             })
         })
         .map_err(|error| format!("搜索正文失败：{error}"))?;
-    hits.extend(
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|error| format!("读取正文搜索结果失败：{error}"))?,
-    );
-    Ok(hits)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error| format!("读取正文搜索结果失败：{error}"))
 }
 
 pub fn page_index_status(conn: &Connection) -> Result<PageIndexStatus, String> {
@@ -1388,7 +1332,7 @@ mod tests {
     }
 
     #[test]
-    fn backfill_indexes_existing_page_texts() {
+    fn reindexes_existing_page_texts() {
         let conn = seeded();
         conn.execute(
             "INSERT INTO page_texts (doc_id, page, text, tokens)
@@ -1397,7 +1341,7 @@ mod tests {
         )
         .unwrap();
 
-        backfill_page_search(&conn).unwrap();
+        reindex_page_tokens(&conn).unwrap();
         let hits = search_pages(&conn, "旧缓存").unwrap();
         assert_eq!(hits.len(), 1);
         assert!(hits[0].snippet.contains("旧缓存正文"));
@@ -1423,6 +1367,27 @@ mod tests {
         // 修复前：回填的 UPDATE 触发器对空索引执行 delete，报 SQLITE_CORRUPT。
         migrate(&conn).unwrap();
         assert_eq!(search_pages(&conn, "旧缓存").unwrap().len(), 1);
+        // 单字查询也要在迁移后立即可用。
+        assert_eq!(search_pages(&conn, "缓").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn upgrade_v1_index_adds_single_char_tokens() {
+        let conn = seeded();
+        // 模拟 0.3.2 的索引：只有二元组，没有单字。
+        conn.execute(
+            "INSERT INTO page_texts (doc_id, page, text, tokens)
+             VALUES ('d1', 0, '认知科学', '认知 知科 科学')",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+
+        // 旧索引下单字查询命中不了；迁移后重写 tokens 才能走 FTS。
+        migrate(&conn).unwrap();
+        assert_eq!(search_pages(&conn, "科").unwrap().len(), 1);
+        assert_eq!(search_pages(&conn, "认知科学").unwrap().len(), 1);
+        assert_eq!(search_pages(&conn, "认知").unwrap().len(), 1);
     }
 
     #[test]
@@ -1446,7 +1411,7 @@ mod tests {
     }
 
     #[test]
-    fn single_char_term_in_multi_word_query_falls_back_to_like() {
+    fn single_char_terms_use_fts_index() {
         let conn = seeded();
         save_page_texts(
             &conn,

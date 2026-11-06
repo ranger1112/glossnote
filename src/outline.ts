@@ -51,6 +51,22 @@ async function destPage(
   }
 }
 
+/**
+ * 当前章节：起始页不晚于当前阅读页的最后一条目录项。
+ * 同一页有多条时取最后一条，通常是更具体的子章节。
+ */
+export function activeOutlineEntry(
+  outline: OutlineEntry[],
+  currentPage: number,
+): OutlineEntry | null {
+  let active: OutlineEntry | null = null;
+  for (const entry of outline) {
+    if (entry.page > currentPage) continue;
+    if (!active || entry.page >= active.page) active = entry;
+  }
+  return active;
+}
+
 /** 把 pdf.js 的目录树拍平成按顺序排列的条目；没有目录时返回空数组。 */
 export async function loadOutline(pdf: PDFDocumentProxy): Promise<OutlineEntry[]> {
   let outline: OutlineNodes | null = null;

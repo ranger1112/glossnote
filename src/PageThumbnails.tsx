@@ -1,5 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import type { CSSProperties } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { IconBookmark } from './icons';
 import type { Bookmark } from './types';
@@ -14,6 +13,11 @@ interface PageThumbnailsProps {
 
 /** 同一份 PDF 的缩略图在标签页来回切换时复用，避免重新渲染整本。 */
 const thumbnailCache = new WeakMap<PDFDocumentProxy, Map<number, string>>();
+
+/** 阅读器远跳时如果有该页的缩略图缓存，先拿它垫一帧。 */
+export function cachedThumbnail(pdf: PDFDocumentProxy, page: number): string | null {
+  return thumbnailCache.get(pdf)?.get(page) ?? null;
+}
 
 let activeRenders = 0;
 const renderQueue: Array<() => void> = [];
@@ -148,6 +152,18 @@ function Thumbnail({ pdf, page, current, bookmarked, onJump, register }: Thumbna
   );
 }
 
+/** 两列网格的行距，和 .thumbnail-list 的 row-gap 保持一致。 */
+const ROW_GAP = 12;
+/** 视口上下各多渲染几行，快速滚动时不会露出空白。 */
+const OVERSCAN_ROWS = 3;
+
+function initialRange(pageCount: number, currentPage: number) {
+  const row = Math.floor(currentPage / 2);
+  const startRow = Math.max(0, row - OVERSCAN_ROWS);
+  const endRow = Math.min(Math.ceil(pageCount / 2), row + OVERSCAN_ROWS + 4);
+  return { start: startRow * 2, end: Math.min(pageCount, endRow * 2) };
+}
+
 export function PageThumbnails({
   pdf,
   pageCount,
@@ -155,12 +171,20 @@ export function PageThumbnails({
   bookmarks,
   onJump,
 }: PageThumbnailsProps) {
+  const panelRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const observerRef = useRef<IntersectionObserver | null>(null);
   const callbacksRef = useRef(new Map<Element, () => void>());
-  const [intrinsicHeight, setIntrinsicHeight] = useState(220);
+  // 行高必须用真实渲染值：估值误差会在几百行后累积成整屏偏移。
+  // 0 表示还没量到，此时先不撑占位高度，量到后在同一帧内重排再定位。
+  const [rowHeight, setRowHeight] = useState(0);
+  const rowHeightRef = useRef(rowHeight);
+  rowHeightRef.current = rowHeight;
+  // 500 页的书没必要挂 500 个按钮；只渲染视口附近的行，上下用 padding 撑住高度。
+  const [range, setRange] = useState(() => initialRange(pageCount, currentPage));
+  const didInitialScroll = useRef(false);
 
-  // 一本 500 页的书会挂 500 个缩略图；共用一个 observer，避免每页各建一个。
+  // 缩略图列表共用一个 observer，避免每页各建一个。
   const getObserver = useCallback(() => {
     if (!observerRef.current) {
       observerRef.current = new IntersectionObserver(
@@ -202,42 +226,87 @@ export function PageThumbnails({
     };
   }, []);
 
-  // 两列网格的缩略图高度只跟侧栏宽度有关；用它给屏外内容一个准确的占位高度，
-  // 这样 content-visibility 跳过布局时不会让滚动条跳动。
-  useEffect(() => {
+  // 侧栏宽度变了，缩略图行高跟着变；用真实渲染出来的第一项测量。
+  useLayoutEffect(() => {
     const list = listRef.current;
     if (!list) return;
-    const update = () => {
-      const itemWidth = Math.max(1, (list.clientWidth - 10) / 2);
-      setIntrinsicHeight(Math.round((itemWidth * 4.15) / 3 + 22));
+    const measure = () => {
+      const item = list.querySelector<HTMLElement>('.page-thumb');
+      const measured = item?.offsetHeight ?? 0;
+      if (measured > 0) {
+        setRowHeight((current) => (current === measured + ROW_GAP ? current : measured + ROW_GAP));
+      }
     };
-    update();
-    const observer = new ResizeObserver(update);
+    measure();
+    const observer = new ResizeObserver(measure);
     observer.observe(list);
     return () => observer.disconnect();
   }, []);
 
+  const updateRange = useCallback(() => {
+    const panel = panelRef.current;
+    const list = listRef.current;
+    if (!panel || !list || rowHeightRef.current <= 0) return;
+
+    const totalRows = Math.ceil(pageCount / 2);
+    // 行 i 相对列表顶部的偏移恒为 i * rowHeight：上方 padding 正好补上被裁掉的行。
+    const listTop =
+      list.getBoundingClientRect().top - panel.getBoundingClientRect().top + panel.scrollTop;
+    const offset = Math.max(0, panel.scrollTop - listTop);
+    const firstRow = Math.floor(offset / rowHeightRef.current);
+    const visibleRows = Math.ceil(panel.clientHeight / rowHeightRef.current) + 1;
+    const startRow = Math.max(0, firstRow - OVERSCAN_ROWS);
+    const endRow = Math.min(totalRows, firstRow + visibleRows + OVERSCAN_ROWS);
+    const start = startRow * 2;
+    const end = Math.min(pageCount, endRow * 2);
+    setRange((current) =>
+      current.start === start && current.end === end ? current : { start, end },
+    );
+  }, [pageCount]);
+
+  // 行高量准后（绘制前）再定位当前页；之后翻页只更新渲染窗口，
+  // 不强行滚动列表，避免打断用户浏览缩略图。
+  useLayoutEffect(() => {
+    if (rowHeight === 0) return;
+    if (!didInitialScroll.current) {
+      didInitialScroll.current = true;
+      listRef.current
+        ?.querySelector<HTMLElement>('.page-thumb.active')
+        ?.scrollIntoView({ block: 'center' });
+    }
+    updateRange();
+  }, [rowHeight, updateRange]);
+
   const marked = new Set(bookmarks.map((bookmark) => bookmark.page));
+  const totalRows = Math.ceil(pageCount / 2);
+  const startRow = Math.floor(range.start / 2);
+  const endRow = Math.ceil(range.end / 2);
 
   return (
-    <div className="sidebar-panel thumbnail-panel">
+    <div ref={panelRef} className="sidebar-panel thumbnail-panel" onScroll={updateRange}>
       <p className="sidebar-hint">点击缩略图跳到页面；加了书签的页面带标记。</p>
       <div
         ref={listRef}
         className="thumbnail-list"
-        style={{ '--thumb-intrinsic': `${intrinsicHeight}px` } as CSSProperties}
+        style={{
+          paddingTop: startRow * rowHeight,
+          paddingBottom: (totalRows - endRow) * rowHeight + 12,
+        }}
       >
-        {Array.from({ length: pageCount }, (_, page) => (
-          <Thumbnail
-            key={page}
-            pdf={pdf}
-            page={page}
-            current={page === currentPage}
-            bookmarked={marked.has(page)}
-            onJump={onJump}
-            register={register}
-          />
-        ))}
+        {Array.from({ length: range.end - range.start }, (_, offset) => {
+          const page = range.start + offset;
+          return (
+            <Thumbnail
+              key={page}
+              pdf={pdf}
+              page={page}
+              current={page === currentPage}
+              bookmarked={marked.has(page)}
+              onJump={onJump}
+              register={register}
+            />
+          );
+        })}
       </div>
     </div>
   );

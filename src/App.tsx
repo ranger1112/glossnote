@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { pdfjsLib, pdfjsOpenOptions } from './pdfjs';
-import { PdfPage } from './PdfPage';
+import { PdfPage, cachedPageSize } from './PdfPage';
 import { Library } from './Library';
 import { Review } from './Review';
 import { CardEditor, type CardDraft } from './CardEditor';
@@ -88,6 +88,8 @@ interface OpenedDoc {
   pageCount: number;
   pdf: PDFDocumentProxy;
   bookmarks: Bookmark[];
+  /** 书库封面（首页缩略图）；打开文档时先垫在首屏下面，避免长时间白屏。 */
+  cover?: string;
   dispose: () => void;
 }
 
@@ -949,6 +951,9 @@ export default function App() {
   // 放大后一页可达数千像素；减少同时渲染的页数，避免画布内存再次爆掉。
   const pageHeight = baseSize ? baseSize.height * scale : 0;
   const activeRadius = pageHeight > 1100 ? 1 : 2;
+  // 只挂载当前页附近的 PdfPage；其余页用等尺寸占位 div 撑住滚动高度，
+  // 500 页的书 DOM 从 500 个组件降到十几个。
+  const pageMountWindow = activeRadius + 4;
 
   const syncHistory = useCallback(() => {
     setHistoryDepth({ undo: undoRef.current.length, redo: redoRef.current.length });
@@ -1152,6 +1157,7 @@ export default function App() {
       pageCount: input.pageCount,
       pdf: input.pdf,
       bookmarks: input.bookmarks ?? [],
+      cover: input.desktopMeta?.cover ? assetUrl(input.desktopMeta.cover) : undefined,
       dispose: () => {
         void input.task.destroy().catch(() => undefined);
       },
@@ -2644,34 +2650,53 @@ export default function App() {
             data-pan-x={panXAllowed ? 'true' : 'false'}
           >
             {baseSize &&
-              Array.from({ length: doc.pageCount }, (_, index) => (
-                <PdfPage
-                  key={`${doc.id}-${index}`}
-                  pdf={doc.pdf}
-                  pageIndex={index}
-                  scale={scale}
-                  baseSize={baseSize}
-                  active={Math.abs(index - currentPage) <= activeRadius}
-                  priority={index === currentPage}
-                  pixelBudget={renderQuality === 'high' ? 32_000_000 : 16_000_000}
-                  scanEnhance={scanEnhance}
-                  annotations={byPage.get(index) ?? EMPTY}
-                  focusId={focusId}
-                  onSelect={handleSelect}
-                  onHover={handleHover}
-                  hoverId={hover?.annotation.id ?? null}
-                  onHoverKeepAlive={keepHoverAlive}
-                  searchMatch={
-                    searchTarget?.page === index
-                      ? {
-                          start: searchTarget.start,
-                          end: searchTarget.end,
-                          token: searchTarget.token,
-                        }
-                      : undefined
-                  }
-                />
-              ))}
+              Array.from({ length: doc.pageCount }, (_, index) => {
+                if (Math.abs(index - currentPage) > pageMountWindow) {
+                  const size = cachedPageSize(doc.pdf, index) ?? baseSize;
+                  return (
+                    <div
+                      key={`${doc.id}-${index}`}
+                      className="pdf-page"
+                      data-page-index={index}
+                      style={{
+                        width: Math.round(size.width * scale),
+                        height: Math.round(size.height * scale),
+                      }}
+                    >
+                      <span className="page-number">{index + 1}</span>
+                    </div>
+                  );
+                }
+                return (
+                  <PdfPage
+                    key={`${doc.id}-${index}`}
+                    pdf={doc.pdf}
+                    pageIndex={index}
+                    scale={scale}
+                    baseSize={baseSize}
+                    active={Math.abs(index - currentPage) <= activeRadius}
+                    priority={index === currentPage}
+                    pixelBudget={renderQuality === 'high' ? 32_000_000 : 16_000_000}
+                    scanEnhance={scanEnhance}
+                    annotations={byPage.get(index) ?? EMPTY}
+                    preview={index === 0 ? doc.cover : undefined}
+                    focusId={focusId}
+                    onSelect={handleSelect}
+                    onHover={handleHover}
+                    hoverId={hover?.annotation.id ?? null}
+                    onHoverKeepAlive={keepHoverAlive}
+                    searchMatch={
+                      searchTarget?.page === index
+                        ? {
+                            start: searchTarget.start,
+                            end: searchTarget.end,
+                            token: searchTarget.token,
+                          }
+                        : undefined
+                    }
+                  />
+                );
+              })}
           </section>
 
           <div

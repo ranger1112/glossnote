@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist';
 import { pdfjsLib, type PdfTextItem } from './pdfjs';
+import { cachedThumbnail } from './PageThumbnails';
 import { joinPdfItems } from './pdfText';
 import {
   buildAnchor,
@@ -26,6 +27,8 @@ interface PdfPageProps {
   /** 扫描件增黑：只给 canvas 加 gamma 滤镜，不改 PDF 与标注。 */
   scanEnhance: boolean;
   annotations: Annotation[];
+  /** 首屏预览图（书库封面），在真实画布就绪前先垫在下面。 */
+  preview?: string;
   focusId: string | null;
   /** context 是选区前后各一段正文，供 AI 解释使用；不写进锚点。 */
   onSelect: (anchor: Anchor, box: { x: number; y: number }, context: string) => void;
@@ -60,6 +63,22 @@ interface PageModel {
 interface Point {
   node: Text;
   offset: number;
+}
+
+/**
+ * 页面真实尺寸缓存：虚拟化后离屏页会卸载，重新挂载时按真实尺寸占位，
+ * 避免不同开本的页面来回切换时高度跳变。
+ */
+const pageSizeCache = new WeakMap<
+  PDFDocumentProxy,
+  Map<number, { width: number; height: number }>
+>();
+
+export function cachedPageSize(
+  pdf: PDFDocumentProxy,
+  page: number,
+): { width: number; height: number } | null {
+  return pageSizeCache.get(pdf)?.get(page) ?? null;
 }
 
 /** 下划线/删除线不用高亮底色，改用与标注颜色一致的线条。 */
@@ -241,6 +260,7 @@ export const PdfPage = memo(function PdfPage({
   pixelBudget,
   scanEnhance,
   annotations,
+  preview,
   focusId,
   onSelect,
   onHover,
@@ -248,11 +268,14 @@ export const PdfPage = memo(function PdfPage({
   onHoverKeepAlive,
   searchMatch,
 }: PdfPageProps) {
+  // 首页优先用书库封面；其他页如果之前渲染过缩略图，也先拿它垫一帧。
+  const previewSrc = preview ?? (active ? cachedThumbnail(pdf, pageIndex) : null);
   const pageRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const textRef = useRef<HTMLDivElement>(null);
   const highlightRef = useRef<HTMLDivElement>(null);
   const modelRef = useRef<PageModel | null>(null);
+  const [previewFailed, setPreviewFailed] = useState(false);
   // pdf.js 会按页缓存 PDFPageProxy 及其图像数据；释放 canvas 之外还得让它 cleanup。
   const pageProxyRef = useRef<PDFPageProxy | null>(null);
 
@@ -262,6 +285,10 @@ export const PdfPage = memo(function PdfPage({
   focusRef.current = focusId;
   const searchRef = useRef(searchMatch);
   searchRef.current = searchMatch;
+
+  useEffect(() => {
+    setPreviewFailed(false);
+  }, [previewSrc]);
   const lastSearchToken = useRef(0);
   // 悬停命中检测用归一化矩形，避免每个 mousemove 都读一遍 DOM 布局。
   const hitRectsRef = useRef<{ id: string; rect: NormRect }[]>([]);
@@ -272,9 +299,19 @@ export const PdfPage = memo(function PdfPage({
   const longPressPointRef = useRef<{ x: number; y: number } | null>(null);
   const longPressFiredAtRef = useRef(0);
 
-  const [size, setSize] = useState(baseSize);
+  const [size, setSize] = useState(() => cachedPageSize(pdf, pageIndex) ?? baseSize);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState('');
+
+  // 记录本页真实尺寸，供虚拟化后的占位页使用。
+  useEffect(() => {
+    let cache = pageSizeCache.get(pdf);
+    if (!cache) {
+      cache = new Map();
+      pageSizeCache.set(pdf, cache);
+    }
+    cache.set(pageIndex, size);
+  }, [pdf, pageIndex, size]);
   // 优先级只决定“何时开始画”，不进渲染 effect 依赖；否则当前页变化会让
   // 仍在视口里的相邻页清空重绘，正是之前滚动闪烁的原因。
   const priorityRef = useRef(priority);
@@ -714,8 +751,19 @@ export const PdfPage = memo(function PdfPage({
       onTouchCancel={handleTouchEnd}
       onContextMenu={handleContextMenu}
     >
+      {previewSrc && !previewFailed && active && !ready && !error && (
+        <img
+          className="page-preview"
+          src={previewSrc}
+          alt=""
+          aria-hidden="true"
+          onError={() => setPreviewFailed(true)}
+        />
+      )}
       <canvas ref={canvasRef} className="pdf-canvas" />
-      {active && !ready && !error && <span className="page-loading" aria-hidden="true" />}
+      {active && !ready && !error && (!previewSrc || previewFailed) && (
+        <span className="page-loading" aria-hidden="true" />
+      )}
       <div ref={highlightRef} className="highlight-layer" />
       {/* 选区放在页面内部，和标注高亮共用 multiply 混合组，避免全屏滤镜的重影。 */}
       <div className="selection-layer" />

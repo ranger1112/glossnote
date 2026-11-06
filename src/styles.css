@@ -1573,6 +1573,17 @@ select {
   height: 100%;
 }
 
+/* 书库封面先垫在首屏下面：打开文档时立刻有内容，真实画布画完后再替换。 */
+.page-preview {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  border-radius: inherit;
+  pointer-events: none;
+}
+
 /* 扫描件或大页面首帧要解码数秒；先给一块带延迟的骨架，避免长时间白屏。 */
 .page-loading {
   position: absolute;
@@ -2542,10 +2553,6 @@ button.color-dot:hover {
   min-width: 0;
   color: var(--faint);
   font-size: 10px;
-  /* 500 页的书一次挂 500 个缩略图；屏外内容跳过布局与绘制，
-     占位高度由侧栏宽度算出，滚动条不会跳动。 */
-  content-visibility: auto;
-  contain-intrinsic-size: auto var(--thumb-intrinsic, 220px);
 }
 
 .page-thumb-frame {

@@ -186,7 +186,7 @@ page_search USING fts5(tokens, content='page_texts', content_rowid='rowid');
 0.4 把单文档阅读器扩展成「书库 ↔ 阅读器」两视图：
 
 - **书库**：扫描书库后列出文档卡片；封面与页数在缺失时由前端用 pdf.js 补齐；标注数来自 `annotations` 子查询。
-- **搜索**：输入停顿 240ms 后同时调用 `search_annotations` 与 `search_pages`。标注搜索在引文（`json_extract(anchor,'$.quote')`）、`body`、`tags` JSON、文档名与标题上做 `LIKE` 子串匹配，最多 100 条；不能直接匹配 `anchor` 整段 JSON——那会把坐标和 `pageHash` 也算进去。正文搜索走 `page_search` FTS5：中文连续段切成二元组，连续中文查询按二元组短语匹配，拉丁字母/数字切成小写词，英文查询加 `*` 做前缀匹配，单字中文退回 `LIKE`；命中的页码用原始 `page_texts.text` 截取上下文片段。结果点击后打开文档并滚到对应页。
+- **搜索**：输入停顿 240ms 后同时调用 `search_annotations` 与 `search_pages`。标注搜索在引文（`json_extract(anchor,'$.quote')`）、`body`、`tags` JSON、文档名与标题上做 `LIKE` 子串匹配，最多 100 条；不能直接匹配 `anchor` 整段 JSON——那会把坐标和 `pageHash` 也算进去。正文搜索走 `page_search` FTS5：索引时中文连续段同时写入单字与二元组，连续中文查询按二元组短语匹配，单字查询直接命中单字 token，拉丁字母/数字切成小写词，英文查询加 `*` 做前缀匹配；命中的页码用原始 `page_texts.text` 截取上下文片段。结果点击后打开文档并滚到对应页。
 - **正文索引**：书库工具栏显示已索引文档数，`索引正文` 逐本用 pdf.js 提取文字层，每 50 页批量写 `page_texts`，写盘时触发器同步 FTS；可中途停止，完成后自动刷新当前搜索。只索引已导入书库的文档，整个过程在本机完成。
 - **阅读进度**：滚动时按视口顶部命中页更新，700ms 防抖写 `last_page`；返回书库时再同步写一次，避免扫描读到旧值；打开文档时优先使用调用方传入的页码，其次使用 `last_page`。
 - **标签**：作为标注的 `tags` 数组存储，随标注写入 SQLite 与 sidecar；搜索命中会返回标签。

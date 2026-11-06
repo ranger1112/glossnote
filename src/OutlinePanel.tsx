@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { IconBookmark, IconPencil, IconTrash } from './icons';
-import type { OutlineEntry } from './outline';
+import { activeOutlineEntry, type OutlineEntry } from './outline';
 import type { Bookmark } from './types';
 
 interface OutlinePanelProps {
@@ -26,6 +26,20 @@ export function OutlinePanel({
 }: OutlinePanelProps) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
+  const activeRef = useRef<HTMLButtonElement | null>(null);
+  const scrolledOnce = useRef(false);
+
+  // 当前章节 = 起始页不晚于当前阅读页的最后一条目录项；比只高亮「页码完全相等」
+  // 更符合阅读直觉，翻页时目录会跟着走。
+  const activeId = activeOutlineEntry(outline, currentPage)?.id ?? null;
+
+  // 打开目录时居中到当前章节；之后翻页只做最小滚动，不打断用户浏览目录。
+  useEffect(() => {
+    const node = activeRef.current;
+    if (!node) return;
+    node.scrollIntoView({ block: scrolledOnce.current ? 'nearest' : 'center' });
+    scrolledOnce.current = true;
+  }, [activeId]);
 
   const sorted = [...bookmarks].sort((left, right) => left.page - right.page);
   const bookmarked = sorted.some((bookmark) => bookmark.page === currentPage);
@@ -141,8 +155,9 @@ export function OutlinePanel({
             {outline.map((entry) => (
               <button
                 key={entry.id}
+                ref={entry.id === activeId ? activeRef : undefined}
                 type="button"
-                className={`outline-row ${entry.page === currentPage ? 'active' : ''}`}
+                className={`outline-row ${entry.id === activeId ? 'active' : ''}`}
                 style={{ paddingLeft: `${8 + Math.min(entry.depth, 6) * 12}px` }}
                 title={`跳到第 ${entry.page + 1} 页`}
                 onClick={() => onJump(entry.page)}
