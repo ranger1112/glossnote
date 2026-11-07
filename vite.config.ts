@@ -3,8 +3,8 @@ import { defineConfig } from 'vite';
 
 export default defineConfig({
   plugins: [react()],
-  // Readability 首次被发现时 Vite 会重新预构建并整页刷新，预先纳入避免打断 e2e。
-  optimizeDeps: { include: ['@mozilla/readability'] },
+  // 这两个库按需加载；预先纳入预构建，避免首次打开 HTML / EPUB 时整页刷新。
+  optimizeDeps: { include: ['@mozilla/readability', 'jszip'] },
   server: {
     port: 1420,
     strictPort: true,

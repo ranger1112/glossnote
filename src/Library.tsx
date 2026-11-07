@@ -62,7 +62,7 @@ let indexRunActive = false;
 async function loadFlowDocument(doc: DocumentMeta): Promise<FlowDocument> {
   if (doc.kind === 'txt' || doc.kind === 'html') {
     const text = await readDocumentText(doc.id);
-    return doc.kind === 'html' ? buildHtmlDocument(text) : buildTextDocument(text);
+    return doc.kind === 'html' ? await buildHtmlDocument(text) : buildTextDocument(text);
   }
   if (doc.kind === 'epub') {
     const response = await fetch(assetUrl(doc.path));

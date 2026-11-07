@@ -1317,7 +1317,7 @@ export default function App() {
           : null;
         if (text !== null) {
           const isHtml = /\.html?$/i.test(file.name) || file.type === 'text/html';
-          const flow = isHtml ? buildHtmlDocument(text) : buildTextDocument(text);
+          const flow = isHtml ? await buildHtmlDocument(text) : buildTextDocument(text);
           await activate({
             id: docId,
             name: file.name,
@@ -1364,7 +1364,8 @@ export default function App() {
         const kind = normalizeDocKind(result.document.kind);
         if (kind === 'txt' || kind === 'html') {
           const text = await readDocumentText(result.document.id);
-          const flow = kind === 'html' ? buildHtmlDocument(text) : buildTextDocument(text);
+          const flow =
+            kind === 'html' ? await buildHtmlDocument(text) : buildTextDocument(text);
           await activate({
             id: result.document.id,
             name: result.document.name,

@@ -1,4 +1,4 @@
-import { Readability } from '@mozilla/readability';
+import type { Readability as ReadabilityType } from '@mozilla/readability';
 import type { OutlineEntry } from './outline';
 
 /** 流式文档（TXT / HTML / EPUB）的统一分页模型。 */
@@ -179,10 +179,12 @@ export function buildFlowFromHtml(
  * 用 Readability 提取正文；提取失败时退回整个 body。
  * 导入的是本地 HTML 文件，文件本身已是冻存快照，原网页改版不会影响标注。
  */
-export function buildHtmlDocument(source: string): FlowDocument {
+export async function buildHtmlDocument(source: string): Promise<FlowDocument> {
+  // 按需加载 Readability，避免把提取库打进首屏包。
+  const { Readability } = await import('@mozilla/readability');
   const parsed = new DOMParser().parseFromString(source, 'text/html');
 
-  let article: ReturnType<Readability['parse']> = null;
+  let article: ReturnType<ReadabilityType['parse']> = null;
   try {
     article = new Readability(parsed).parse();
   } catch {

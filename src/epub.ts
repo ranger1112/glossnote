@@ -1,4 +1,4 @@
-import JSZip from 'jszip';
+import type JSZip from 'jszip';
 import { buildFlowFromHtml, type FlowDocument, type FlowUnit } from './flow';
 import type { OutlineEntry } from './outline';
 
@@ -97,6 +97,8 @@ async function inlineImages(
 export async function buildEpubDocument(
   data: ArrayBuffer | Uint8Array,
 ): Promise<FlowDocument> {
+  // 按需加载解压库，PDF / TXT 用户不必为 EPUB 付首屏体积。
+  const { default: JSZip } = await import('jszip');
   const zip = await JSZip.loadAsync(data);
 
   const containerFile = zip.file('META-INF/container.xml');
