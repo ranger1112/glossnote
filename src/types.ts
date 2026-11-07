@@ -1,4 +1,5 @@
 import type { Anchor } from './anchoring';
+import type { DocKind } from './document';
 
 export type HighlightColor = 'yellow' | 'green' | 'blue' | 'pink';
 export type AnnotationKind =
@@ -36,6 +37,8 @@ export interface Bookmark {
 export interface DocumentMeta {
   id: string;
   name: string;
+  /** pdf / txt / html / epub；旧数据缺省按 pdf 处理。 */
+  kind: DocKind;
   title: string;
   author: string;
   pageCount: number;

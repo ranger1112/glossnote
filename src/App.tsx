@@ -3,6 +3,7 @@ import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { pdfjsLib, pdfjsOpenOptions } from './pdfjs';
 import { PdfPage, cachedPageSize } from './PdfPage';
+import { textAnchorStrategy } from './document';
 import { Library } from './Library';
 import { Review } from './Review';
 import { CardEditor, type CardDraft } from './CardEditor';
@@ -2680,6 +2681,7 @@ export default function App() {
                     scanEnhance={scanEnhance}
                     annotations={byPage.get(index) ?? EMPTY}
                     preview={index === 0 ? doc.cover : undefined}
+                    anchorStrategy={textAnchorStrategy}
                     focusId={focusId}
                     onSelect={handleSelect}
                     onHover={handleHover}

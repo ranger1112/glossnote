@@ -6,6 +6,8 @@ use std::path::Path;
 pub struct DocumentRow {
     pub id: String,
     pub name: String,
+    /// pdf / txt / html / epub；旧库没有该列时迁移补成 pdf。
+    pub kind: String,
     pub title: String,
     pub author: String,
     pub page_count: u32,
@@ -43,6 +45,7 @@ impl DocumentRow {
         Document {
             id: self.id.clone(),
             name: self.name.clone(),
+            kind: self.kind.clone(),
             title: self.title.clone(),
             author: self.author.clone(),
             page_count: self.page_count,
@@ -67,6 +70,8 @@ impl DocumentRow {
 pub struct Document {
     pub id: String,
     pub name: String,
+    /// pdf / txt / html / epub。
+    pub kind: String,
     pub title: String,
     pub author: String,
     pub page_count: u32,
@@ -141,6 +146,10 @@ pub struct Annotation {
 
 fn default_kind() -> String {
     "highlight".to_string()
+}
+
+fn default_document_kind() -> String {
+    "pdf".to_string()
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -372,6 +381,9 @@ pub struct Sidecar {
     pub schema_version: u32,
     pub doc_id: String,
     pub name: String,
+    /// 旧 sidecar 没有格式字段：缺省按 PDF 处理。
+    #[serde(default = "default_document_kind")]
+    pub kind: String,
     pub size: u64,
     #[serde(default)]
     pub page_count: u32,

@@ -3,13 +3,8 @@ import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist';
 import { pdfjsLib, type PdfTextItem } from './pdfjs';
 import { cachedThumbnail } from './PageThumbnails';
 import { joinPdfItems } from './pdfText';
-import {
-  buildAnchor,
-  resolveAnchor,
-  type Anchor,
-  type NormRect,
-  type Resolution,
-} from './anchoring';
+import type { Anchor, NormRect, Resolution } from './anchoring';
+import type { AnchorStrategy } from './document';
 import type { Annotation } from './types';
 
 interface PdfPageProps {
@@ -29,6 +24,8 @@ interface PdfPageProps {
   annotations: Annotation[];
   /** 首屏预览图（书库封面），在真实画布就绪前先垫在下面。 */
   preview?: string;
+  /** 该文档格式的锚定策略；PDF 使用文本偏移策略。 */
+  anchorStrategy: AnchorStrategy;
   focusId: string | null;
   /** context 是选区前后各一段正文，供 AI 解释使用；不写进锚点。 */
   onSelect: (anchor: Anchor, box: { x: number; y: number }, context: string) => void;
@@ -115,11 +112,15 @@ function buildModel(items: PdfTextItem[], divs: HTMLElement[]): PageModel {
   return { text, items: infoList, byItem, resolutions: new Map() };
 }
 
-function resolveCached(model: PageModel, anchor: Anchor): Resolution | null {
+function resolveCached(
+  strategy: AnchorStrategy,
+  model: PageModel,
+  anchor: Anchor,
+): Resolution | null {
   const key = `${anchor.pageHash}:${anchor.start}:${anchor.end}:${anchor.quote}`;
   if (model.resolutions.has(key)) return model.resolutions.get(key) ?? null;
 
-  const resolved = resolveAnchor(anchor, model.text);
+  const resolved = strategy.resolve(anchor, model.text);
   model.resolutions.set(key, resolved);
   return resolved;
 }
@@ -261,6 +262,7 @@ export const PdfPage = memo(function PdfPage({
   scanEnhance,
   annotations,
   preview,
+  anchorStrategy,
   focusId,
   onSelect,
   onHover,
@@ -337,7 +339,7 @@ export const PdfPage = memo(function PdfPage({
     if (pageRect.width === 0 || pageRect.height === 0) return;
 
     for (const annotation of annotationsRef.current) {
-      const resolved = resolveCached(model, annotation.anchor);
+      const resolved = resolveCached(anchorStrategy, model, annotation.anchor);
       if (!resolved) continue;
 
       const computed = rectsForRange(model, resolved.start, resolved.end, pageElement);
@@ -407,7 +409,7 @@ export const PdfPage = memo(function PdfPage({
         viewer.scrollTo({ top: Math.max(0, viewer.scrollTop + delta), behavior: 'instant' });
       }
     }
-  }, []);
+  }, [anchorStrategy]);
 
   useEffect(() => {
     const pageElement = pageRef.current;
@@ -605,7 +607,7 @@ export const PdfPage = memo(function PdfPage({
       );
       if (rects.length === 0) return;
 
-      const anchor = buildAnchor(pageIndex, model.text, start, end, rects);
+      const anchor = anchorStrategy.build(pageIndex, model.text, start, end, rects);
       if (!anchor) return;
 
       // AI 解释需要比锚点宽得多的上下文；锚点本身仍只存前后 24 字。
@@ -620,7 +622,7 @@ export const PdfPage = memo(function PdfPage({
       const box = range.getBoundingClientRect();
       onSelect(anchor, { x: box.left + box.width / 2, y: box.top }, context);
     }, 0);
-  }, [pageIndex, onSelect]);
+  }, [pageIndex, onSelect, anchorStrategy]);
 
   /** 把屏幕坐标换成页面内最近的标注；鼠标与长按共用。 */
   const hitAt = useCallback((clientX: number, clientY: number) => {

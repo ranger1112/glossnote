@@ -459,6 +459,7 @@ fn serialized_sidecar(conn: &rusqlite::Connection, doc_id: &str) -> Result<Vec<u
         schema_version: SIDECAR_VERSION,
         doc_id: document.id.clone(),
         name: document.name.clone(),
+        kind: document.kind.clone(),
         size: document.size,
         page_count: document.page_count,
         annotations,
@@ -635,6 +636,7 @@ pub fn import_pdf(app: &AppHandle, source: &str) -> Result<ImportResult, String>
     let mut row = DocumentRow {
         id: id.clone(),
         name: document_name,
+        kind: "pdf".to_string(),
         title: String::new(),
         author: String::new(),
         page_count: 0,
@@ -765,6 +767,10 @@ pub fn scan(app: &AppHandle) -> Result<ScanReport, String> {
         let mut row = DocumentRow {
             id: id.clone(),
             name,
+            kind: prior
+                .as_ref()
+                .map(|row| row.kind.clone())
+                .unwrap_or_else(|| "pdf".to_string()),
             title: prior
                 .as_ref()
                 .map(|row| row.title.clone())
@@ -2163,6 +2169,7 @@ mod tests {
         DocumentRow {
             id: id.to_string(),
             name: "doc.pdf".to_string(),
+            kind: "pdf".to_string(),
             title: String::new(),
             author: String::new(),
             page_count: 0,
@@ -2644,11 +2651,21 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn sidecar_without_kind_defaults_to_pdf() {
+        let sidecar: Sidecar = serde_json::from_str(
+            r#"{"schemaVersion":1,"docId":"d1","name":"doc.pdf","size":10}"#,
+        )
+        .unwrap();
+        assert_eq!(sidecar.kind, "pdf");
+    }
+
     fn sidecar_for(doc_id: &str, annotations: Vec<Annotation>) -> Sidecar {
         Sidecar {
             schema_version: SIDECAR_VERSION,
             doc_id: doc_id.to_string(),
             name: "doc.pdf".to_string(),
+            kind: "pdf".to_string(),
             size: 10,
             page_count: 2,
             annotations,

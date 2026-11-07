@@ -7,7 +7,7 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-const DOCUMENT_SELECT: &str = "SELECT d.id, d.name, d.title, d.author, d.page_count, d.rel_path, d.size, d.mtime, d.added_at, d.last_opened_at, d.cover, d.last_page, d.favorite, d.tags, d.bookmarks, d.folder, d.position, d.meta_updated_at, (SELECT COUNT(*) FROM annotations a WHERE a.doc_id = d.id AND a.deleted = 0) FROM documents d";
+const DOCUMENT_SELECT: &str = "SELECT d.id, d.name, d.title, d.author, d.page_count, d.rel_path, d.size, d.mtime, d.added_at, d.last_opened_at, d.cover, d.last_page, d.favorite, d.tags, d.bookmarks, d.folder, d.position, d.meta_updated_at, (SELECT COUNT(*) FROM annotations a WHERE a.doc_id = d.id AND a.deleted = 0), d.kind FROM documents d";
 
 pub fn open(path: &Path) -> Result<Connection, String> {
     let conn = Connection::open(path).map_err(|error| format!("打开数据库失败：{error}"))?;
@@ -86,6 +86,7 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         CREATE TABLE IF NOT EXISTS documents (
           id TEXT PRIMARY KEY,
           name TEXT NOT NULL,
+          kind TEXT NOT NULL DEFAULT 'pdf',
           title TEXT NOT NULL DEFAULT '',
           author TEXT NOT NULL DEFAULT '',
           page_count INTEGER NOT NULL DEFAULT 0,
@@ -169,6 +170,7 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     .map_err(|error| format!("初始化数据库失败：{error}"))?;
 
     // 0.3 的库没有 cover / last_page，升级时补列。
+    ensure_column(conn, "documents", "kind", "TEXT NOT NULL DEFAULT 'pdf'")?;
     ensure_column(conn, "documents", "cover", "TEXT NOT NULL DEFAULT ''")?;
     ensure_column(conn, "documents", "last_page", "INTEGER NOT NULL DEFAULT 0")?;
     ensure_column(conn, "documents", "favorite", "INTEGER NOT NULL DEFAULT 0")?;
@@ -335,6 +337,7 @@ fn row_to_document(row: &Row<'_>) -> rusqlite::Result<DocumentRow> {
         position: row.get(16)?,
         meta_updated_at: row.get(17)?,
         annotation_count: row.get::<_, i64>(18)? as usize,
+        kind: row.get(19)?,
     })
 }
 
@@ -370,10 +373,11 @@ pub fn upsert_document(conn: &Connection, document: &DocumentRow) -> Result<(), 
         .map_err(|error| format!("序列化书签失败：{error}"))?;
     conn.execute(
         "INSERT INTO documents
-           (id, name, title, author, page_count, rel_path, size, mtime, added_at, last_opened_at, cover, last_page, favorite, tags, bookmarks, folder, position, meta_updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+           (id, name, title, author, page_count, rel_path, size, mtime, added_at, last_opened_at, cover, last_page, favorite, tags, bookmarks, folder, position, meta_updated_at, kind)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
          ON CONFLICT(id) DO UPDATE SET
            name = excluded.name,
+           kind = excluded.kind,
            title = excluded.title,
            author = excluded.author,
            page_count = excluded.page_count,
@@ -407,6 +411,7 @@ pub fn upsert_document(conn: &Connection, document: &DocumentRow) -> Result<(), 
             document.folder,
             document.position,
             document.meta_updated_at,
+            document.kind,
         ],
     )
     .map_err(|error| format!("写入文档失败：{error}"))?;
@@ -1185,6 +1190,17 @@ mod tests {
         };
         upsert_annotation(&conn, "d1", &annotation).unwrap();
         conn
+    }
+
+    #[test]
+    fn document_kind_defaults_to_pdf_and_round_trips() {
+        let conn = seeded();
+        let mut row = find_by_id(&conn, "d1").unwrap().unwrap();
+        assert_eq!(row.kind, "pdf");
+
+        row.kind = "epub".to_string();
+        upsert_document(&conn, &row).unwrap();
+        assert_eq!(find_by_id(&conn, "d1").unwrap().unwrap().kind, "epub");
     }
 
     #[test]

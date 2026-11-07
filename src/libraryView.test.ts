@@ -12,6 +12,7 @@ function doc(id: string, patch: Partial<DocumentMeta> = {}): DocumentMeta {
   return {
     id,
     name: `${id}.pdf`,
+    kind: 'pdf',
     title: '',
     author: '',
     pageCount: 1,
