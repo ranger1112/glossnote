@@ -6,6 +6,7 @@ import { PdfPage, cachedPageSize } from './PdfPage';
 import { FlowPage, FLOW_PAGE_WIDTH } from './FlowPage';
 import { textAnchorStrategy, normalizeDocKind, type DocKind } from './document';
 import { buildHtmlDocument, buildTextDocument, type FlowDocument } from './flow';
+import { buildEpubDocument } from './epub';
 import { Library } from './Library';
 import { Review } from './Review';
 import { CardEditor, type CardDraft } from './CardEditor';
@@ -1296,6 +1297,21 @@ export default function App() {
         saveDoc(record);
         recordRef.current = record;
 
+        if (/\.epub$/i.test(file.name) || file.type === 'application/epub+zip') {
+          const flow = await buildEpubDocument(bytes);
+          await activate({
+            id: docId,
+            name: file.name,
+            size: file.size,
+            kind: 'epub',
+            pageCount: flow.units.length,
+            flow,
+            annotations: record.annotations,
+            bookmarks: [],
+          });
+          return;
+        }
+
         const text = /\.(txt|html?)$/i.test(file.name) || file.type.startsWith('text/')
           ? new TextDecoder().decode(bytes)
           : null;
@@ -1361,8 +1377,22 @@ export default function App() {
             desktopMeta: result.document,
             initialPage: page ?? result.document.lastPage,
           });
-        } else if (kind !== 'pdf') {
-          setMessage('EPUB 阅读器正在开发中，目前可以打开 PDF、TXT 与 HTML。');
+        } else if (kind === 'epub') {
+          const response = await fetch(assetUrl(result.document.path));
+          if (!response.ok) throw new Error(`读取 EPUB 失败：HTTP ${response.status}`);
+          const flow = await buildEpubDocument(await response.arrayBuffer());
+          await activate({
+            id: result.document.id,
+            name: result.document.name,
+            size: result.document.size,
+            kind,
+            pageCount: flow.units.length,
+            flow,
+            annotations: result.annotations,
+            bookmarks: result.document.bookmarks,
+            desktopMeta: result.document,
+            initialPage: page ?? result.document.lastPage,
+          });
         } else {
           const task = pdfjsLib.getDocument({
             url: assetUrl(result.document.path),
@@ -2647,7 +2677,7 @@ export default function App() {
         <input
           ref={fileRef}
           type="file"
-          accept="application/pdf,.txt,text/plain,.html,.htm,text/html"
+          accept="application/pdf,.txt,text/plain,.html,.htm,text/html,.epub,application/epub+zip"
           hidden
           onChange={(event) => {
             const file = event.target.files?.[0];

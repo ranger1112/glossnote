@@ -112,7 +112,7 @@ function sanitizeFragment(root: Element): void {
  * 把 HTML 正文拆成阅读页：通用容器按累计文本量下钻，再按目标字数分组。
  * 标题同时写入大纲，目录面板可以直接跳转。
  */
-function buildFromHtml(
+export function buildFlowFromHtml(
   html: string,
   kind: FlowKind,
   title?: string,
@@ -190,7 +190,7 @@ export function buildHtmlDocument(source: string): FlowDocument {
   }
 
   if (article?.content) {
-    return buildFromHtml(
+    return buildFlowFromHtml(
       article.content,
       'html',
       article.title?.trim() || undefined,
@@ -202,7 +202,7 @@ export function buildHtmlDocument(source: string): FlowDocument {
   const fallback = new DOMParser().parseFromString(source, 'text/html');
   const body = fallback.body;
   sanitizeFragment(body);
-  return buildFromHtml(
+  return buildFlowFromHtml(
     body.innerHTML,
     'html',
     fallback.title?.trim() || undefined,

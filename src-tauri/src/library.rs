@@ -24,6 +24,7 @@ use tauri::{AppHandle, Manager};
 const MAX_DOCUMENT_BYTES: u64 = 200 * 1024 * 1024;
 /// 文本会整份读进前端内存，限制比 PDF 更保守。
 const MAX_TEXT_BYTES: u64 = 20 * 1024 * 1024;
+const MAX_EPUB_BYTES: u64 = 50 * 1024 * 1024;
 const SUPPORTED_EXTENSIONS: [&str; 5] = ["pdf", "txt", "html", "htm", "epub"];
 const SIDECAR_VERSION: u32 = 1;
 
@@ -603,17 +604,16 @@ pub fn import_document(app: &AppHandle, source: &str) -> Result<ImportResult, St
     if !metadata.is_file() {
         return Err("所选路径不是文件".to_string());
     }
-    let limit = if kind == "pdf" {
-        MAX_DOCUMENT_BYTES
-    } else {
-        MAX_TEXT_BYTES
+    let (limit, too_large) = match kind.as_str() {
+        "pdf" => (
+            MAX_DOCUMENT_BYTES,
+            "文件超过 200 MB，请先压缩或拆分后再导入",
+        ),
+        "epub" => (MAX_EPUB_BYTES, "EPUB 超过 50 MB，请先压缩图片后再导入"),
+        _ => (MAX_TEXT_BYTES, "文本文件超过 20 MB，请先拆分后再导入"),
     };
     if metadata.len() > limit {
-        return Err(if kind == "pdf" {
-            "文件超过 200 MB，请先压缩或拆分后再导入".to_string()
-        } else {
-            "文本文件超过 20 MB，请先拆分后再导入".to_string()
-        });
+        return Err(too_large.to_string());
     }
 
     let id = hash_file(&source)?;

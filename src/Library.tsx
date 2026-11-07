@@ -11,6 +11,7 @@ import {
   organizeDocument,
   organizeDocuments,
   pageIndexStatus,
+  readDocumentText,
   reorderDocuments as persistOrder,
   saveCover,
   saveFolders,
@@ -22,6 +23,8 @@ import {
   updateDocumentMeta,
 } from './desktop';
 import { extractDocumentText } from './pdfText';
+import { buildHtmlDocument, buildTextDocument, type FlowDocument } from './flow';
+import { buildEpubDocument } from './epub';
 import { pickDocumentPath } from './platform';
 import { IconSearch, IconStar, IconTrash, IconUpload } from './icons';
 import type {
@@ -54,6 +57,20 @@ type ConfirmState =
 
 /** 索引任务跨组件存在：离开书库后仍在后台收尾，重新进入时不能并发再开一轮。 */
 let indexRunActive = false;
+
+/** 流式文档在书库里也能建立正文索引，不必先打开一次。 */
+async function loadFlowDocument(doc: DocumentMeta): Promise<FlowDocument> {
+  if (doc.kind === 'txt' || doc.kind === 'html') {
+    const text = await readDocumentText(doc.id);
+    return doc.kind === 'html' ? buildHtmlDocument(text) : buildTextDocument(text);
+  }
+  if (doc.kind === 'epub') {
+    const response = await fetch(assetUrl(doc.path));
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return buildEpubDocument(await response.arrayBuffer());
+  }
+  throw new Error(`不支持的格式：${doc.kind}`);
+}
 
 /** 打开 PDF 拿到页数；缺封面时顺便把首页画成 320px 宽的 JPEG。 */
 async function inspectPdf(doc: DocumentMeta): Promise<Inspection> {
@@ -223,9 +240,32 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
       for (let index = 0; index < list.length; index += 1) {
         if (indexCancel.current) break;
         const doc = list[index];
-        // 流式文档在打开时自动索引；这里只处理需要 pdf.js 提取文字的 PDF。
-        if ((doc.kind ?? 'pdf') !== 'pdf' || doc.pageCount <= 0) continue;
+        const kind = doc.kind ?? 'pdf';
 
+        // 流式文档不需要 pdf.js：直接解析文本/HTML/EPUB 后落库。
+        if (kind !== 'pdf') {
+          const cached = await loadPageTexts(doc.id);
+          if (doc.pageCount > 0 && cached.length >= doc.pageCount) continue;
+
+          const label = doc.title || doc.name;
+          setIndexProgress(`正在索引「${label}」（${index + 1}/${list.length}）…`);
+          try {
+            const flow = await loadFlowDocument(doc);
+            const pages = flow.units.map((unit, page) => ({ page, text: unit.text }));
+            for (let start = 0; start < pages.length; start += 50) {
+              if (indexCancel.current) break;
+              await savePageTexts(doc.id, pages.slice(start, start + 50));
+            }
+            await updateDocumentMeta(doc.id, { pageCount: flow.units.length });
+            updated += 1;
+          } catch (error) {
+            failed += 1;
+            console.warn('建立正文索引失败', doc.name, error);
+          }
+          continue;
+        }
+
+        if (doc.pageCount <= 0) continue;
         const cached = await loadPageTexts(doc.id);
         if (cached.length >= doc.pageCount) continue;
 
