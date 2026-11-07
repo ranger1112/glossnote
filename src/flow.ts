@@ -112,6 +112,20 @@ function sanitizeFragment(root: Element): void {
  * 把 HTML 正文拆成阅读页：通用容器按累计文本量下钻，再按目标字数分组。
  * 标题同时写入大纲，目录面板可以直接跳转。
  */
+/** HTML 的相对图片按导入源目录解析；解析不了就移除 src，避免 broken image。 */
+function rewriteImages(
+  root: Element,
+  resolveImage?: (src: string) => string | null,
+): void {
+  for (const image of Array.from(root.querySelectorAll('img[src]'))) {
+    const src = image.getAttribute('src')?.trim();
+    if (!src || /^(data:|https?:|\/\/)/i.test(src)) continue;
+    const resolved = resolveImage?.(src) ?? null;
+    if (resolved) image.setAttribute('src', resolved);
+    else image.removeAttribute('src');
+  }
+}
+
 export function buildFlowFromHtml(
   html: string,
   kind: FlowKind,
@@ -179,7 +193,10 @@ export function buildFlowFromHtml(
  * 用 Readability 提取正文；提取失败时退回整个 body。
  * 导入的是本地 HTML 文件，文件本身已是冻存快照，原网页改版不会影响标注。
  */
-export async function buildHtmlDocument(source: string): Promise<FlowDocument> {
+export async function buildHtmlDocument(
+  source: string,
+  resolveImage?: (src: string) => string | null,
+): Promise<FlowDocument> {
   // 按需加载 Readability，避免把提取库打进首屏包。
   const { Readability } = await import('@mozilla/readability');
   const parsed = new DOMParser().parseFromString(source, 'text/html');
@@ -192,8 +209,11 @@ export async function buildHtmlDocument(source: string): Promise<FlowDocument> {
   }
 
   if (article?.content) {
+    const container = document.createElement('div');
+    container.innerHTML = article.content;
+    rewriteImages(container, resolveImage);
     return buildFlowFromHtml(
-      article.content,
+      container.innerHTML,
       'html',
       article.title?.trim() || undefined,
       article.byline?.trim() || undefined,
@@ -203,6 +223,7 @@ export async function buildHtmlDocument(source: string): Promise<FlowDocument> {
   // Readability 会改写传入的 document，兜底路径重新解析一次。
   const fallback = new DOMParser().parseFromString(source, 'text/html');
   const body = fallback.body;
+  rewriteImages(body, resolveImage);
   sanitizeFragment(body);
   return buildFlowFromHtml(
     body.innerHTML,

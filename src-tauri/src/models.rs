@@ -26,6 +26,8 @@ pub struct DocumentRow {
     pub folder: String,
     /// 手动排序位置，只存在本机索引里，不写 sidecar。
     pub position: i64,
+    /// 导入时的原始路径，仅本机使用：HTML 的相对图片按它解析；不写 sidecar。
+    pub source_path: String,
     /// 收藏、文档标签与文件夹的 LWW 时间戳，随 sidecar 同步。
     pub meta_updated_at: i64,
     pub annotation_count: usize,
@@ -60,6 +62,7 @@ impl DocumentRow {
             bookmarks: self.bookmarks.clone(),
             folder: self.folder.clone(),
             position: self.position,
+            source_path: self.source_path.clone(),
             annotation_count: self.annotation_count,
         }
     }
@@ -86,6 +89,8 @@ pub struct Document {
     pub bookmarks: Vec<Bookmark>,
     pub folder: String,
     pub position: i64,
+    /// 导入时的原始路径，仅本机使用。
+    pub source_path: String,
     pub annotation_count: usize,
 }
 

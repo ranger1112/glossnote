@@ -2,6 +2,7 @@ import {
   buildAnchor,
   resolveAnchor,
   type Anchor,
+  type AnchorLocator,
   type NormRect,
   type Resolution,
 } from './anchoring';
@@ -38,6 +39,7 @@ export interface AnchorStrategy {
     start: number,
     end: number,
     rects: NormRect[],
+    locator?: AnchorLocator,
   ): Anchor | null;
   resolve(anchor: Anchor, unitText: string): Resolution | null;
 }

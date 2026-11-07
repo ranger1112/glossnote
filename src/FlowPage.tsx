@@ -1,18 +1,20 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef } from 'react';
-import type { Anchor, NormRect, Resolution } from './anchoring';
-import type { AnchorStrategy } from './document';
+import type { Anchor, AnchorLocator, NormRect, Resolution } from './anchoring';
+import type { AnchorStrategy, DocKind } from './document';
 import type { FlowUnit } from './flow';
 import { rectsFromRange } from './rects';
 import type { Annotation } from './types';
 
 /** 流式文档的基准版心宽度；实际宽度按缩放比例放大。 */
 export const FLOW_PAGE_WIDTH = 720;
-const BASE_FONT_SIZE = 16;
+export const FLOW_BASE_FONT_SIZE = 16;
 
 interface FlowPageProps {
   unit: FlowUnit;
   pageIndex: number;
   scale: number;
+  /** 文档格式；EPUB 会额外写入章节内定位符。 */
+  kind: DocKind;
   anchorStrategy: AnchorStrategy;
   annotations: Annotation[];
   focusId: string | null;
@@ -25,6 +27,8 @@ interface FlowPageProps {
   hoverId: string | null;
   onHoverKeepAlive: () => void;
   searchMatch?: { start: number; end: number; token: number };
+  /** 上报页面在 scale=1 时的高度，供窗口化占位使用。 */
+  onMeasure: (pageIndex: number, baseHeight: number) => void;
 }
 
 interface TextNodeInfo {
@@ -36,6 +40,7 @@ interface TextNodeInfo {
 interface FlowModel {
   text: string;
   nodes: TextNodeInfo[];
+  byNode: Map<Text, TextNodeInfo>;
   resolutions: Map<string, Resolution | null>;
 }
 
@@ -47,19 +52,62 @@ interface Point {
 function buildModel(root: HTMLElement): FlowModel {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   const nodes: TextNodeInfo[] = [];
+  const byNode = new Map<Text, TextNodeInfo>();
   let text = '';
   let current = walker.nextNode();
 
   while (current) {
     const node = current as Text;
     if (node.data.length > 0) {
-      nodes.push({ node, start: text.length, end: text.length + node.data.length });
+      const info = { node, start: text.length, end: text.length + node.data.length };
+      nodes.push(info);
+      byNode.set(node, info);
       text += node.data;
     }
     current = walker.nextNode();
   }
 
-  return { text, nodes, resolutions: new Map() };
+  return { text, nodes, byNode, resolutions: new Map() };
+}
+
+/** 从内容根到文本节点的子节点索引路径；EPUB 章节重渲染后结构不变。 */
+function locatorFor(root: HTMLElement, node: Node, offset: number): AnchorLocator | null {
+  const path: number[] = [];
+  let current: Node | null = node;
+  while (current && current !== root) {
+    const parent: Node | null = current.parentNode;
+    if (!parent) return null;
+    path.unshift(Array.prototype.indexOf.call(parent.childNodes, current));
+    current = parent;
+  }
+  if (current !== root) return null;
+  return { kind: 'epub', path, offset };
+}
+
+function resolveLocator(
+  root: HTMLElement,
+  model: FlowModel,
+  locator: AnchorLocator | undefined,
+  quote: string,
+): Resolution | null {
+  if (!locator || locator.kind !== 'epub') return null;
+
+  let node: Node | null = root;
+  for (const index of locator.path) {
+    node = node?.childNodes[index] ?? null;
+    if (!node) return null;
+  }
+  if (!(node instanceof Text)) return null;
+
+  const info = model.byNode.get(node);
+  if (!info) return null;
+
+  const offset = Math.max(0, Math.min(locator.offset, node.data.length));
+  const start = info.start + offset;
+  const end = Math.min(model.text.length, start + quote.length);
+  // 文本仍然对得上才信任定位符，否则回退到文本匹配。
+  if (model.text.slice(start, end) !== quote.slice(0, end - start)) return null;
+  return { start, end, kind: 'exact' };
 }
 
 function pointAt(model: FlowModel, offset: number): Point | null {
@@ -134,6 +182,7 @@ export const FlowPage = memo(function FlowPage({
   unit,
   pageIndex,
   scale,
+  kind,
   anchorStrategy,
   annotations,
   focusId,
@@ -142,6 +191,7 @@ export const FlowPage = memo(function FlowPage({
   hoverId,
   onHoverKeepAlive,
   searchMatch,
+  onMeasure,
 }: FlowPageProps) {
   const pageRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
@@ -164,9 +214,10 @@ export const FlowPage = memo(function FlowPage({
 
   const paintHighlights = useCallback(() => {
     const pageElement = pageRef.current;
+    const content = contentRef.current;
     const layer = highlightRef.current;
     const model = modelRef.current;
-    if (!pageElement || !layer || !model) return;
+    if (!pageElement || !content || !layer || !model) return;
 
     layer.replaceChildren();
     hitRectsRef.current = [];
@@ -175,7 +226,10 @@ export const FlowPage = memo(function FlowPage({
     if (pageRect.width === 0 || pageRect.height === 0) return;
 
     for (const annotation of annotationsRef.current) {
-      const resolved = resolveCached(anchorStrategy, model, annotation.anchor);
+      // EPUB 优先用章节内定位符；失效时回退到文本偏移匹配。
+      const resolved =
+        resolveLocator(content, model, annotation.anchor.locator, annotation.anchor.quote) ??
+        resolveCached(anchorStrategy, model, annotation.anchor);
       if (!resolved) continue;
 
       const range = rangeFor(model, resolved.start, resolved.end);
@@ -269,6 +323,19 @@ export const FlowPage = memo(function FlowPage({
     [],
   );
 
+  // 把真实高度回报给父组件；占位页按 scale=1 的高度缓存，缩放时直接乘比例。
+  useEffect(() => {
+    const node = pageRef.current;
+    if (!node) return;
+    const report = () => {
+      if (node.offsetHeight > 0) onMeasure(pageIndex, node.offsetHeight / scale);
+    };
+    report();
+    const observer = new ResizeObserver(report);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [onMeasure, pageIndex, scale, unit.text]);
+
   const handleMouseUp = useCallback(() => {
     if (Date.now() - longPressFiredAtRef.current < 1200) return;
 
@@ -292,7 +359,19 @@ export const FlowPage = memo(function FlowPage({
       const rects = rectsFromRange(range, pageElement);
       if (rects.length === 0) return;
 
-      const anchor = anchorStrategy.build(pageIndex, model.text, start, end, rects);
+      const startNode = range.startContainer instanceof Text ? range.startContainer : null;
+      const locator =
+        kind === 'epub' && startNode
+          ? locatorFor(content, startNode, range.startOffset)
+          : null;
+      const anchor = anchorStrategy.build(
+        pageIndex,
+        model.text,
+        start,
+        end,
+        rects,
+        locator ?? undefined,
+      );
       if (!anchor) return;
 
       const CONTEXT_CHARS = 400;
@@ -306,7 +385,7 @@ export const FlowPage = memo(function FlowPage({
       const box = range.getBoundingClientRect();
       onSelect(anchor, { x: box.left + box.width / 2, y: box.top }, context);
     }, 0);
-  }, [pageIndex, onSelect, anchorStrategy]);
+  }, [pageIndex, onSelect, anchorStrategy, kind]);
 
   const hitAt = useCallback((clientX: number, clientY: number) => {
     const pageElement = pageRef.current;
@@ -441,7 +520,7 @@ export const FlowPage = memo(function FlowPage({
       <div
         ref={contentRef}
         className="flow-content"
-        style={{ fontSize: `${BASE_FONT_SIZE * scale}px` }}
+        style={{ fontSize: `${FLOW_BASE_FONT_SIZE * scale}px` }}
         onClick={handleContentClick}
       >
         {unit.html !== undefined ? (

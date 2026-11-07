@@ -27,6 +27,7 @@ function doc(id: string, patch: Partial<DocumentMeta> = {}): DocumentMeta {
     bookmarks: [],
     folder: '',
     position: 0,
+    sourcePath: '',
     annotationCount: 0,
     ...patch,
   };

@@ -596,6 +596,7 @@ pub fn import_document(app: &AppHandle, source: &str) -> Result<ImportResult, St
     let root = state.root();
     ensure_dirs(&root)?;
 
+    let source_path = source.to_string();
     let source = PathBuf::from(source);
     let kind = document_kind(&source)
         .ok_or_else(|| "只支持 PDF、TXT、HTML 与 EPUB 文件".to_string())?
@@ -693,6 +694,7 @@ pub fn import_document(app: &AppHandle, source: &str) -> Result<ImportResult, St
         folder: String::new(),
         // 新导入的文档排在手动排序的最后；之后重排会写成 0..N。
         position: now,
+        source_path,
         meta_updated_at: 0,
         annotation_count: 0,
     };
@@ -842,6 +844,10 @@ pub fn scan(app: &AppHandle) -> Result<ScanReport, String> {
                 .map(|row| row.folder.clone())
                 .unwrap_or_default(),
             position: prior.as_ref().map(|row| row.position).unwrap_or(now),
+            source_path: prior
+                .as_ref()
+                .map(|row| row.source_path.clone())
+                .unwrap_or_default(),
             meta_updated_at: prior.as_ref().map(|row| row.meta_updated_at).unwrap_or(0),
             annotation_count: 0,
         };
@@ -2258,6 +2264,7 @@ mod tests {
             bookmarks: Vec::new(),
             folder: String::new(),
             position: 0,
+            source_path: String::new(),
             meta_updated_at: 0,
             annotation_count: 0,
         }

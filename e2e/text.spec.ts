@@ -77,3 +77,25 @@ test('TXT：分页阅读、划词高亮、页内查找与刷新复原', async ({
 
   expect(errors).toEqual([]);
 });
+
+test('TXT：长文档只挂载当前页附近的页面', async ({ page }) => {
+  await page.goto('/');
+  const text = '第一段内容。\n'.repeat(30000);
+  await openText(page, text);
+
+  const pages = await page.locator('.flow-page').count();
+  expect(pages).toBeGreaterThan(20);
+
+  // 只挂载当前页附近几页，其余是占位。
+  const mounted = await page.locator('.flow-text').count();
+  expect(mounted).toBeLessThan(15);
+
+  const jump = page.locator('.page-jump');
+  await jump.click();
+  await page.locator('.page-jump input').fill(String(pages));
+  await page.locator('.page-jump input').press('Enter');
+  await expect(page.locator('.page-jump')).toHaveText(`${pages} / ${pages}`);
+  await expect(page.locator('.flow-page').last().locator('.flow-text')).toBeVisible({
+    timeout: 20_000,
+  });
+});

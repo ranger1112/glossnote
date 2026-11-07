@@ -3,8 +3,9 @@ import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { pdfjsLib, pdfjsOpenOptions } from './pdfjs';
 import { PdfPage, cachedPageSize } from './PdfPage';
-import { FlowPage, FLOW_PAGE_WIDTH } from './FlowPage';
+import { FlowPage, FLOW_BASE_FONT_SIZE, FLOW_PAGE_WIDTH } from './FlowPage';
 import { textAnchorStrategy, normalizeDocKind, type DocKind } from './document';
+import { resolveRelativePath } from './paths';
 import { buildHtmlDocument, buildTextDocument, type FlowDocument } from './flow';
 import { buildEpubDocument } from './epub';
 import { Library } from './Library';
@@ -309,13 +310,27 @@ function defaultCardTitle(annotation: Annotation): string {
   return chars.length > 60 ? `${chars.slice(0, 60).join('')}…` : line;
 }
 
+/** 流式文档在 scale=1 时的占位高度：按显式换行与自动换行估算行数。 */
+function estimateFlowHeight(text: string): number {
+  const fontSize = FLOW_BASE_FONT_SIZE;
+  // .flow-content 左右各 3.6em padding。
+  const width = Math.max(1, FLOW_PAGE_WIDTH - 2 * 3.6 * fontSize);
+  const charsPerLine = Math.max(8, Math.floor(width / fontSize));
+  let lines = 0;
+  for (const paragraph of text.split('\n')) {
+    lines += Math.max(1, Math.ceil(paragraph.length / charsPerLine));
+  }
+  return Math.max(240, Math.round(lines * fontSize * 1.85 + 6.4 * fontSize));
+}
+
 /**
  * 占位页在挂载时就有固定高度，通常可以立即滚动；
  * 保留重试只是为了兜住首批 DOM 尚未提交的极短窗口。
  */
 function scrollToPage(page: number, attempt = 0) {
   const target = document.querySelector<HTMLElement>(`[data-page-index="${page}"]`);
-  if (target && target.style.height) {
+  // 占位页与已挂载页都可能有高度；不能用 inline style 判断（流式页面高度是自适应的）。
+  if (target && target.getBoundingClientRect().height > 0) {
     const viewer = document.querySelector<HTMLElement>('.viewer');
     if (viewer) {
       // 页顶留一点灰边，不要直接贴住顶栏。
@@ -325,6 +340,8 @@ function scrollToPage(page: number, attempt = 0) {
     } else {
       target.scrollIntoView({ behavior: 'instant', block: 'start' });
     }
+    // 流式文档的占位高度会在挂载后换成真实高度，下一帧再对齐一次。
+    if (attempt < 2) requestAnimationFrame(() => scrollToPage(page, attempt + 1));
     return;
   }
   if (attempt < 60) window.setTimeout(() => scrollToPage(page, attempt + 1), 80);
@@ -534,6 +551,8 @@ export default function App() {
   const progressTimer = useRef<number | null>(null);
   const scrollFrame = useRef<number | null>(null);
   const pinnedPage = useRef<number | null>(null);
+  // 跳转后的一小段时间内忽略滚动位置推算的页码：目标页可能短到无法滚到视口顶部。
+  const jumpGuardRef = useRef(0);
   const openingRef = useRef(false);
   const closingRef = useRef(false);
   annotationsRef.current = annotations;
@@ -968,6 +987,12 @@ export default function App() {
   // 只挂载当前页附近的 PdfPage；其余页用等尺寸占位 div 撑住滚动高度，
   // 500 页的书 DOM 从 500 个组件降到十几个。
   const pageMountWindow = activeRadius + 4;
+  // 流式文档同理：只挂载当前页附近几页，其余用实测/估算高度占位。
+  const flowMountWindow = 4;
+  const flowHeightsRef = useRef(new Map<number, number>());
+  const measureFlowPage = useCallback((index: number, baseHeight: number) => {
+    flowHeightsRef.current.set(index, baseHeight);
+  }, []);
   // 提前取出，避免在 JSX 回调里丢失非空收窄。
   const activePdf = doc?.pdf ?? null;
 
@@ -1236,6 +1261,7 @@ export default function App() {
       setOutlineLoading(false);
     }
 
+    if (startPage > 0) jumpGuardRef.current = Date.now() + 500;
     requestAnimationFrame(() => {
       if (startPage > 0) scrollToPage(startPage);
       else viewerRef.current?.scrollTo({ top: 0 });
@@ -1364,8 +1390,14 @@ export default function App() {
         const kind = normalizeDocKind(result.document.kind);
         if (kind === 'txt' || kind === 'html') {
           const text = await readDocumentText(result.document.id);
+          // HTML 的相对图片按导入时的源目录解析；文件被移动后自然失效。
+          const resolveImage = result.document.sourcePath
+            ? (src: string) => assetUrl(resolveRelativePath(result.document.sourcePath, src))
+            : undefined;
           const flow =
-            kind === 'html' ? await buildHtmlDocument(text) : buildTextDocument(text);
+            kind === 'html'
+              ? await buildHtmlDocument(text, resolveImage)
+              : buildTextDocument(text);
           await activate({
             id: result.document.id,
             name: result.document.name,
@@ -1594,10 +1626,10 @@ export default function App() {
       setHover(null);
       setHoverConfirmDelete(false);
 
-      // 标注跳转后的第一次滚动来自代码本身，不要把页码改回页边界所在的上一页。
+      // 标注/页码跳转后的滚动来自代码本身，不要把页码改回页边界所在的上一页。
       if (pinnedPage.current !== null) {
         pinnedPage.current = null;
-      } else {
+      } else if (Date.now() >= jumpGuardRef.current) {
         const visible = visiblePage(viewer);
         if (visible && visible.index !== currentPageRef.current) {
           currentPageRef.current = visible.index;
@@ -1765,6 +1797,7 @@ export default function App() {
 
   const goToPage = useCallback((page: number) => {
     // 先移动当前页，让目标页立刻进入渲染窗口，再滚过去。
+    jumpGuardRef.current = Date.now() + 500;
     currentPageRef.current = page;
     setCurrentPage(page);
     scrollToPage(page);
@@ -1776,6 +1809,7 @@ export default function App() {
       const rect = annotation.anchor.rects[0];
       currentPageRef.current = annotation.page;
       pinnedPage.current = annotation.page;
+      jumpGuardRef.current = Date.now() + 500;
       setCurrentPage(annotation.page);
 
       if (viewer && rect) {
@@ -1821,6 +1855,7 @@ export default function App() {
     setFilterSource('all');
     setPageHintDismissed(new Set());
     textCacheLoadedRef.current = false;
+    flowHeightsRef.current.clear();
     // 流式文档的分页文字本来就在内存里，直接灌进查找缓存，不必再读 SQLite。
     const flow = docRef.current?.flow;
     if (flow) {
@@ -2780,30 +2815,51 @@ export default function App() {
             data-pan-x={panXAllowed ? 'true' : 'false'}
           >
             {doc.flow &&
-              doc.flow.units.map((unit, index) => (
-                <FlowPage
-                  key={`${doc.id}-${index}`}
-                  unit={unit}
-                  pageIndex={index}
-                  scale={scale}
-                  anchorStrategy={textAnchorStrategy}
-                  annotations={byPage.get(index) ?? EMPTY}
-                  focusId={focusId}
-                  onSelect={handleSelect}
-                  onHover={handleHover}
-                  hoverId={hover?.annotation.id ?? null}
-                  onHoverKeepAlive={keepHoverAlive}
-                  searchMatch={
-                    searchTarget?.page === index
-                      ? {
-                          start: searchTarget.start,
-                          end: searchTarget.end,
-                          token: searchTarget.token,
-                        }
-                      : undefined
-                  }
-                />
-              ))}
+              doc.flow.units.map((unit, index) => {
+                if (Math.abs(index - currentPage) > flowMountWindow) {
+                  const baseHeight =
+                    flowHeightsRef.current.get(index) ?? estimateFlowHeight(unit.text);
+                  return (
+                    <div
+                      key={`${doc.id}-${index}`}
+                      className="flow-page"
+                      data-page-index={index}
+                      style={{
+                        width: Math.round(FLOW_PAGE_WIDTH * scale),
+                        height: Math.round(baseHeight * scale),
+                      }}
+                    >
+                      <span className="page-number">{index + 1}</span>
+                    </div>
+                  );
+                }
+                return (
+                  <FlowPage
+                    key={`${doc.id}-${index}`}
+                    unit={unit}
+                    pageIndex={index}
+                    scale={scale}
+                    kind={doc.kind}
+                    anchorStrategy={textAnchorStrategy}
+                    annotations={byPage.get(index) ?? EMPTY}
+                    focusId={focusId}
+                    onSelect={handleSelect}
+                    onHover={handleHover}
+                    hoverId={hover?.annotation.id ?? null}
+                    onHoverKeepAlive={keepHoverAlive}
+                    onMeasure={measureFlowPage}
+                    searchMatch={
+                      searchTarget?.page === index
+                        ? {
+                            start: searchTarget.start,
+                            end: searchTarget.end,
+                            token: searchTarget.token,
+                          }
+                        : undefined
+                    }
+                  />
+                );
+              })}
             {activePdf &&
               baseSize &&
               Array.from({ length: doc.pageCount }, (_, index) => {

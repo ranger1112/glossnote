@@ -116,6 +116,23 @@ test('EPUB：spine 分章、图片内联、目录与划词高亮', async ({ page
   await page.locator('.selection-toolbar .swatch.green').click();
   await expect(page.locator('.highlight').first()).toBeVisible();
 
+  // EPUB 标注应额外写入章节内定位符。
+  await expect
+    .poll(async () =>
+      page.evaluate(() => {
+        const key = Object.keys(localStorage).find((item) =>
+          item.startsWith('glossnote:doc:'),
+        );
+        if (!key) return false;
+        const record = JSON.parse(localStorage.getItem(key) ?? 'null') as {
+          annotations?: Array<{ anchor?: { locator?: { kind?: string; path?: number[] } } }>;
+        };
+        const locator = record?.annotations?.[0]?.anchor?.locator;
+        return Boolean(locator?.kind === 'epub' && (locator.path?.length ?? 0) > 0);
+      }),
+    )
+    .toBe(true);
+
   // 刷新后重新打开同一份 EPUB，标注仍在。
   await page.reload();
   await openEpub(page, bytes);

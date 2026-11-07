@@ -104,6 +104,58 @@ async function inspectPdf(doc: DocumentMeta): Promise<Inspection> {
   }
 }
 
+/** 流式文档没有可渲染的首页，用标题/作者画一张 320×440 的封面。 */
+async function makeTextCover(doc: DocumentMeta): Promise<Uint8Array | null> {
+  const canvas = document.createElement('canvas');
+  canvas.width = 320;
+  canvas.height = 440;
+  const context = canvas.getContext('2d');
+  if (!context) return null;
+
+  const gradient = context.createLinearGradient(0, 0, 320, 440);
+  gradient.addColorStop(0, '#263238');
+  gradient.addColorStop(1, '#4b5563');
+  context.fillStyle = gradient;
+  context.fillRect(0, 0, 320, 440);
+
+  context.fillStyle = 'rgba(255,255,255,0.7)';
+  context.font = '600 13px sans-serif';
+  context.fillText((doc.kind ?? 'pdf').toUpperCase(), 28, 48);
+
+  const title = (doc.title || doc.name.replace(/\.[^.]+$/, '') || '未命名').trim();
+  context.fillStyle = '#ffffff';
+  context.font = '700 28px sans-serif';
+  const maxWidth = 264;
+  let line = '';
+  let y = 130;
+  for (const char of Array.from(title)) {
+    const next = line + char;
+    if (context.measureText(next).width > maxWidth && line) {
+      context.fillText(line, 28, y);
+      line = char;
+      y += 38;
+      if (y > 300) {
+        line += '…';
+        break;
+      }
+    } else {
+      line = next;
+    }
+  }
+  if (line) context.fillText(line, 28, y);
+
+  if (doc.author) {
+    context.fillStyle = 'rgba(255,255,255,0.72)';
+    context.font = '15px sans-serif';
+    context.fillText(doc.author, 28, 380);
+  }
+
+  const blob = await new Promise<Blob | null>((resolve) => {
+    canvas.toBlob(resolve, 'image/jpeg', 0.85);
+  });
+  return blob ? new Uint8Array(await blob.arrayBuffer()) : null;
+}
+
 export function Library({ onOpen, onMessage }: LibraryProps) {
   const [docs, setDocs] = useState<DocumentMeta[]>([]);
   const [loading, setLoading] = useState(true);
@@ -136,7 +188,8 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
   const ensureCovers = useCallback(async (list: DocumentMeta[]) => {
     const run = ++coverRun.current;
     const queue = list.filter(
-      (doc) => (doc.kind ?? 'pdf') === 'pdf' && (!doc.cover || doc.pageCount === 0),
+      (doc) =>
+        !doc.cover || ((doc.kind ?? 'pdf') === 'pdf' && doc.pageCount === 0),
     );
     // 每个任务都要把整份 PDF 交给 pdf.js；并发 2 个足够，再多容易顶不住大文件。
     const CONCURRENCY = 2;
@@ -147,6 +200,20 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
         if (!doc) return;
 
         try {
+          // 流式文档直接画一张文字封面，不必解析文件。
+          if ((doc.kind ?? 'pdf') !== 'pdf') {
+            const bytes = await makeTextCover(doc);
+            if (coverRun.current !== run || !bytes) return;
+            const updated = await saveCover(doc.id, bytes);
+            if (coverRun.current !== run) return;
+            setDocs((current) =>
+              current.map((item) =>
+                item.id === doc.id ? { ...item, cover: updated.cover } : item,
+              ),
+            );
+            continue;
+          }
+
           const inspection = await inspectPdf(doc);
           if (coverRun.current !== run) return;
 

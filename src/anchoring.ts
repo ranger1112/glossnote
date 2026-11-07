@@ -16,6 +16,18 @@ export interface NormRect {
   h: number;
 }
 
+/**
+ * 章节内定位符：EPUB 文件按内容哈希识别、内容不会变，用 DOM 路径 + 字符偏移
+ * 作为文本偏移之外的精确回退。它不是完整的 EPUB CFI，但语义等价，且只服务本阅读器。
+ */
+export interface AnchorLocator {
+  kind: 'epub';
+  /** 从内容根到起始文本节点的子节点索引路径。 */
+  path: number[];
+  /** 文本节点内的字符偏移。 */
+  offset: number;
+}
+
 export interface Anchor {
   /** 0 起始的页码 */
   page: number;
@@ -31,6 +43,8 @@ export interface Anchor {
   suffix: string;
   /** 建锚时的矩形，作为渲染与兜底依据 */
   rects: NormRect[];
+  /** EPUB 章节内定位符；其他格式没有。 */
+  locator?: AnchorLocator;
 }
 
 export type ResolutionKind = 'exact' | 'relocated' | 'estimated';
@@ -59,6 +73,7 @@ export function buildAnchor(
   start: number,
   end: number,
   rects: NormRect[],
+  locator?: AnchorLocator,
 ): Anchor | null {
   if (start < 0 || end <= start || end > pageText.length) return null;
 
@@ -75,6 +90,7 @@ export function buildAnchor(
     prefix: pageText.slice(Math.max(0, start - CONTEXT), start),
     suffix: pageText.slice(end, Math.min(pageText.length, end + CONTEXT)),
     rects,
+    ...(locator ? { locator } : {}),
   };
 }
 
