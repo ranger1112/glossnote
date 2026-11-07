@@ -642,6 +642,12 @@ pub fn import_document(app: &AppHandle, source: &str) -> Result<ImportResult, St
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         db::touch_document(&conn, &id, now)?;
         let mut document = db::find_by_id(&conn, &id)?.ok_or_else(|| "文档不存在".to_string())?;
+        // 同一份内容换了目录再导入时，旧 source_path 可能已经失效；
+        // 旧路径还在就保留，避免用户从临时位置重复导入时把可用的图片根目录改坏。
+        if document.source_path != source_path && !Path::new(&document.source_path).is_file() {
+            document.source_path = source_path.clone();
+            db::upsert_document(&conn, &document)?;
+        }
         let annotations = merge_document(&conn, &root, &mut document, files, ignored)?;
         let document = db::find_by_id(&conn, &id)?.unwrap_or(document);
         return Ok(ImportResult {
@@ -1034,6 +1040,32 @@ pub fn save_page_texts(
         return Err("文档不存在".to_string());
     }
     db::save_page_texts(&conn, doc_id, &pages)
+}
+
+/// 页面文字缓存是否已经覆盖当前分页；打开流式文档时据此跳过重复索引。
+pub fn page_texts_ready(app: &AppHandle, doc_id: &str, page_count: u32) -> Result<bool, String> {
+    let state = app.state::<AppState>();
+    let conn = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if db::find_by_id(&conn, doc_id)?.is_none() {
+        return Err("文档不存在".to_string());
+    }
+    db::page_texts_ready(&conn, doc_id, page_count)
+}
+
+/// 清理超出当前分页数量的旧缓存；分页规则变化后避免陈旧行留在搜索索引里。
+pub fn prune_page_texts(app: &AppHandle, doc_id: &str, page_count: u32) -> Result<usize, String> {
+    let state = app.state::<AppState>();
+    let conn = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if db::find_by_id(&conn, doc_id)?.is_none() {
+        return Err("文档不存在".to_string());
+    }
+    db::prune_page_texts(&conn, doc_id, page_count)
 }
 
 pub fn search(app: &AppHandle, query: String) -> Result<Vec<SearchHit>, String> {

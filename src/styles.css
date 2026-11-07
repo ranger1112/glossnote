@@ -1591,6 +1591,12 @@ select {
   overflow-wrap: anywhere;
 }
 
+/* 选区由 App 的 .selection-layer 统一绘制；原生选区只保留复制/聚焦行为。 */
+.flow-content ::selection {
+  background: transparent;
+  color: #1c1c1e;
+}
+
 .flow-text {
   white-space: pre-wrap;
 }

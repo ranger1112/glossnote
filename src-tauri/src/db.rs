@@ -785,6 +785,31 @@ pub fn load_page_texts(conn: &Connection, doc_id: &str) -> Result<Vec<PageTextIn
         .map_err(|error| format!("读取页面文字失败：{error}"))
 }
 
+/// 页面文字缓存是否覆盖 [0, page_count) 的每一页；用于避免重复建立索引。
+pub fn page_texts_ready(conn: &Connection, doc_id: &str, page_count: u32) -> Result<bool, String> {
+    if page_count == 0 {
+        return Ok(true);
+    }
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(DISTINCT page) FROM page_texts
+             WHERE doc_id = ?1 AND page >= 0 AND page < ?2",
+            params![doc_id, page_count as i64],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("统计页面文字失败：{error}"))?;
+    Ok(count >= page_count as i64)
+}
+
+/// 删除超出当前分页数量的旧缓存；分页规则变化后避免搜索命中不存在的页。
+pub fn prune_page_texts(conn: &Connection, doc_id: &str, page_count: u32) -> Result<usize, String> {
+    conn.execute(
+        "DELETE FROM page_texts WHERE doc_id = ?1 AND page >= ?2",
+        params![doc_id, page_count as i64],
+    )
+    .map_err(|error| format!("清理页面文字失败：{error}"))
+}
+
 pub fn save_page_texts(
     conn: &Connection,
     doc_id: &str,
@@ -1195,6 +1220,45 @@ mod tests {
         };
         upsert_annotation(&conn, "d1", &annotation).unwrap();
         conn
+    }
+
+    #[test]
+    fn page_text_readiness_and_prune() {
+        let conn = seeded();
+        assert!(!page_texts_ready(&conn, "d1", 2).unwrap());
+
+        save_page_texts(
+            &conn,
+            "d1",
+            &[
+                PageTextInput {
+                    page: 0,
+                    text: "a".to_string(),
+                },
+                PageTextInput {
+                    page: 2,
+                    text: "c".to_string(),
+                },
+            ],
+        )
+        .unwrap();
+        // 中间缺页时不能算完整。
+        assert!(!page_texts_ready(&conn, "d1", 3).unwrap());
+
+        save_page_texts(
+            &conn,
+            "d1",
+            &[PageTextInput {
+                page: 1,
+                text: "b".to_string(),
+            }],
+        )
+        .unwrap();
+        assert!(page_texts_ready(&conn, "d1", 3).unwrap());
+
+        assert_eq!(prune_page_texts(&conn, "d1", 2).unwrap(), 1);
+        assert!(page_texts_ready(&conn, "d1", 2).unwrap());
+        assert_eq!(load_page_texts(&conn, "d1").unwrap().len(), 2);
     }
 
     #[test]

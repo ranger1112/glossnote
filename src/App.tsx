@@ -8,6 +8,7 @@ import { textAnchorStrategy, normalizeDocKind, type DocKind } from './document';
 import { resolveRelativePath } from './paths';
 import { buildHtmlDocument, buildTextDocument, type FlowDocument } from './flow';
 import { buildEpubDocument } from './epub';
+import { makeTextCover } from './covers';
 import { Library } from './Library';
 import { Review } from './Review';
 import { CardEditor, type CardDraft } from './CardEditor';
@@ -68,6 +69,7 @@ import {
   assetUrl,
   createCard,
   deleteAnnotation,
+  documentIndexStatus,
   exportAnnotatedPdf,
   exportMarkdown,
   indexDocumentText,
@@ -75,8 +77,11 @@ import {
   listCards,
   loadPageTexts,
   openDocument,
+  pageTextsReady,
+  prunePageTexts,
   readDocumentText,
   saveBookmarks,
+  saveCover,
   savePageTexts,
   saveProgress,
   scanLibrary,
@@ -1268,6 +1273,7 @@ export default function App() {
     });
 
     if (input.desktopMeta) {
+      const meta = input.desktopMeta;
       void refreshCards();
       if (pdf) {
         try {
@@ -1283,20 +1289,51 @@ export default function App() {
         }
       } else if (flow) {
         // 流式文档的页数由前端分页得出；顺便把正文写进索引，书库搜索立刻可用。
-        void updateDocumentMeta(input.id, {
-          pageCount: input.pageCount,
-          // 只在书库还没有标题/作者时采用 HTML 提取结果，不覆盖用户改过的元数据。
-          title: input.desktopMeta.title ? undefined : flow.title,
-          author: input.desktopMeta.author ? undefined : flow.author,
-        }).catch(() => undefined);
+        void (async () => {
+          try {
+            await updateDocumentMeta(input.id, {
+              pageCount: input.pageCount,
+              // 只在书库还没有标题/作者时采用解析结果，不覆盖用户改过的元数据。
+              title: meta.title ? undefined : flow.title,
+              author: meta.author ? undefined : flow.author,
+            });
+            // 标题/作者刚解析出来时重画文字封面，避免书库一直显示文件名。
+            if (
+              isTauri() &&
+              ((!meta.title && flow.title) || (!meta.author && flow.author))
+            ) {
+              const bytes = await makeTextCover({
+                kind: input.kind,
+                name: input.name,
+                title: meta.title || flow.title || '',
+                author: meta.author || flow.author || '',
+              });
+              if (bytes) await saveCover(input.id, bytes);
+            }
+          } catch {
+            // 元数据与封面是锦上添花，失败不影响阅读。
+          }
+        })();
+
         if (isTauri()) {
           const pages = flow.units.map((unit, index) => ({ page: index, text: unit.text }));
+          const unitCountChanged = meta.pageCount !== input.pageCount;
           void (async () => {
-            for (let start = 0; start < pages.length; start += 50) {
-              await savePageTexts(input.id, pages.slice(start, start + 50)).catch(() => undefined);
+            const ready = await pageTextsReady(input.id, pages.length).catch(() => false);
+            if (!ready || unitCountChanged) {
+              for (let start = 0; start < pages.length; start += 50) {
+                await savePageTexts(input.id, pages.slice(start, start + 50)).catch(
+                  () => undefined,
+                );
+              }
             }
-            // 同时建立 AI 检索用的分段索引；失败不影响阅读。
-            await indexDocumentText(input.id, pages).catch(() => undefined);
+            // 即使缓存已就绪也清一次尾部：分页数量变小时不能留下陈旧页。
+            await prunePageTexts(input.id, pages.length).catch(() => undefined);
+            const indexed = await documentIndexStatus(input.id).catch(() => false);
+            if (!indexed || !ready || unitCountChanged) {
+              // 同时建立 AI 检索用的分段索引；失败不影响阅读。
+              await indexDocumentText(input.id, pages).catch(() => undefined);
+            }
           })();
         }
       }
@@ -2126,7 +2163,9 @@ export default function App() {
     if (!viewer.contains(range.commonAncestorContainer)) return;
 
     const view = viewer.getBoundingClientRect();
-    const pages = Array.from(viewer.querySelectorAll<HTMLElement>('.pdf-page'));
+    const pages = Array.from(
+      viewer.querySelectorAll<HTMLElement>('.pdf-page, .flow-page'),
+    );
     const pageRects = new Map(pages.map((page) => [page, page.getBoundingClientRect()]));
     const groups = new Map<HTMLElement, SelectionBox[]>();
 
@@ -2705,7 +2744,7 @@ export default function App() {
               disabled={busy}
               onClick={() => fileRef.current?.click()}
             >
-              打开 PDF
+              打开文档
             </button>
           )
         )}

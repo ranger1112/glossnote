@@ -5,7 +5,8 @@
 export function resolveRelativePath(baseFile: string, src: string): string {
   const separator = baseFile.includes('\\') ? '\\' : '/';
   const dir = baseFile.slice(0, baseFile.lastIndexOf(separator) + 1);
-  let decoded = src.split('#')[0];
+  // 先按原始 URL 去掉查询串和片段，再解码；这样文件名里的 %3F 不会被误删。
+  let decoded = src.split('#')[0].split('?')[0];
   try {
     decoded = decodeURIComponent(decoded);
   } catch {

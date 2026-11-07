@@ -530,6 +530,7 @@ export const FlowPage = memo(function FlowPage({
         )}
       </div>
       <div ref={highlightRef} className="highlight-layer" />
+      <div className="selection-layer" />
       <span className="page-number">{pageIndex + 1}</span>
     </div>
   );

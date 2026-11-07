@@ -59,6 +59,7 @@ test('TXT：分页阅读、划词高亮、页内查找与刷新复原', async ({
 
   await selectText(page, 0, 12);
   await expect(page.locator('.selection-toolbar')).toBeVisible();
+  await expect(page.locator('.selection-rect').first()).toBeVisible();
   await page.locator('.selection-toolbar .swatch.yellow').click();
   await expect(page.locator('.highlight').first()).toBeVisible();
   await expect(page.locator('.annotation-card')).toHaveCount(1);

@@ -41,7 +41,7 @@ async function makeEpub(): Promise<number[]> {
        <h2>第一章 起点</h2>
        <p>EPUB 的第一段正文，用来验证划词高亮与刷新后的重放。</p>
        <script>window.__pwned = true;</script>
-       <p><img src="pic.png" alt="图片" />图片也应该从 zip 内联出来。</p>
+       <p><img src="pic.png?v=2" alt="图片" />图片也应该从 zip 内联出来。</p>
      </body></html>`,
   );
   zip.file(

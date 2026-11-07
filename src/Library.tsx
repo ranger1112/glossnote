@@ -7,10 +7,11 @@ import {
   listDocuments,
   listFolders,
   listSmartCollections,
-  loadPageTexts,
   organizeDocument,
   organizeDocuments,
   pageIndexStatus,
+  pageTextsReady,
+  prunePageTexts,
   readDocumentText,
   reorderDocuments as persistOrder,
   saveCover,
@@ -25,6 +26,7 @@ import {
 import { extractDocumentText } from './pdfText';
 import { buildHtmlDocument, buildTextDocument, type FlowDocument } from './flow';
 import { buildEpubDocument } from './epub';
+import { makeTextCover } from './covers';
 import { pickDocumentPath } from './platform';
 import { IconSearch, IconStar, IconTrash, IconUpload } from './icons';
 import type {
@@ -102,58 +104,6 @@ async function inspectPdf(doc: DocumentMeta): Promise<Inspection> {
   } finally {
     await task.destroy().catch(() => undefined);
   }
-}
-
-/** 流式文档没有可渲染的首页，用标题/作者画一张 320×440 的封面。 */
-async function makeTextCover(doc: DocumentMeta): Promise<Uint8Array | null> {
-  const canvas = document.createElement('canvas');
-  canvas.width = 320;
-  canvas.height = 440;
-  const context = canvas.getContext('2d');
-  if (!context) return null;
-
-  const gradient = context.createLinearGradient(0, 0, 320, 440);
-  gradient.addColorStop(0, '#263238');
-  gradient.addColorStop(1, '#4b5563');
-  context.fillStyle = gradient;
-  context.fillRect(0, 0, 320, 440);
-
-  context.fillStyle = 'rgba(255,255,255,0.7)';
-  context.font = '600 13px sans-serif';
-  context.fillText((doc.kind ?? 'pdf').toUpperCase(), 28, 48);
-
-  const title = (doc.title || doc.name.replace(/\.[^.]+$/, '') || '未命名').trim();
-  context.fillStyle = '#ffffff';
-  context.font = '700 28px sans-serif';
-  const maxWidth = 264;
-  let line = '';
-  let y = 130;
-  for (const char of Array.from(title)) {
-    const next = line + char;
-    if (context.measureText(next).width > maxWidth && line) {
-      context.fillText(line, 28, y);
-      line = char;
-      y += 38;
-      if (y > 300) {
-        line += '…';
-        break;
-      }
-    } else {
-      line = next;
-    }
-  }
-  if (line) context.fillText(line, 28, y);
-
-  if (doc.author) {
-    context.fillStyle = 'rgba(255,255,255,0.72)';
-    context.font = '15px sans-serif';
-    context.fillText(doc.author, 28, 380);
-  }
-
-  const blob = await new Promise<Blob | null>((resolve) => {
-    canvas.toBlob(resolve, 'image/jpeg', 0.85);
-  });
-  return blob ? new Uint8Array(await blob.arrayBuffer()) : null;
 }
 
 export function Library({ onOpen, onMessage }: LibraryProps) {
@@ -311,8 +261,10 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
 
         // 流式文档不需要 pdf.js：直接解析文本/HTML/EPUB 后落库。
         if (kind !== 'pdf') {
-          const cached = await loadPageTexts(doc.id);
-          if (doc.pageCount > 0 && cached.length >= doc.pageCount) continue;
+          const ready =
+            doc.pageCount > 0 &&
+            (await pageTextsReady(doc.id, doc.pageCount).catch(() => false));
+          if (ready) continue;
 
           const label = doc.title || doc.name;
           setIndexProgress(`正在索引「${label}」（${index + 1}/${list.length}）…`);
@@ -323,7 +275,28 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
               if (indexCancel.current) break;
               await savePageTexts(doc.id, pages.slice(start, start + 50));
             }
-            await updateDocumentMeta(doc.id, { pageCount: flow.units.length });
+            // 中途取消时不要按部分结果裁剪，避免把已有的后续页缓存删掉。
+            if (!indexCancel.current) await prunePageTexts(doc.id, pages.length);
+
+            const patch: { pageCount: number; title?: string; author?: string } = {
+              pageCount: flow.units.length,
+            };
+            if (!doc.title && flow.title) patch.title = flow.title;
+            if (!doc.author && flow.author) patch.author = flow.author;
+            const updatedDoc = await updateDocumentMeta(doc.id, patch);
+
+            // 标题/作者刚解析出来时重画文字封面，避免书库一直显示文件名。
+            if (patch.title || patch.author) {
+              const bytes = await makeTextCover(updatedDoc).catch(() => null);
+              if (bytes) {
+                const covered = await saveCover(doc.id, bytes).catch(() => null);
+                if (covered) {
+                  setDocs((current) =>
+                    current.map((item) => (item.id === doc.id ? covered : item)),
+                  );
+                }
+              }
+            }
             updated += 1;
           } catch (error) {
             failed += 1;
@@ -333,8 +306,8 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
         }
 
         if (doc.pageCount <= 0) continue;
-        const cached = await loadPageTexts(doc.id);
-        if (cached.length >= doc.pageCount) continue;
+        const ready = await pageTextsReady(doc.id, doc.pageCount).catch(() => false);
+        if (ready) continue;
 
         const label = doc.title || doc.name;
         setIndexProgress(`正在索引「${label}」（${index + 1}/${list.length}）…`);
@@ -350,6 +323,7 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
             if (indexCancel.current) break;
             await savePageTexts(doc.id, pages.slice(start, start + 50));
           }
+          if (!indexCancel.current) await prunePageTexts(doc.id, pages.length);
           updated += 1;
         } catch (error) {
           failed += 1;

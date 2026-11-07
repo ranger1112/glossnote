@@ -81,3 +81,39 @@ test('HTML：正文提取、清理脚本、目录与划词高亮', async ({ page
   await expect(page.locator('.highlight').first()).toBeVisible();
   expect(errors).toEqual([]);
 });
+
+test('HTML：资源解析与 sanitizer 的边界情况', async ({ page }) => {
+  await page.goto('/');
+
+  const result = await page.evaluate(async () => {
+    // 直接加载模块，覆盖不依赖某条 UI 渲染路径的边界情况。
+    const mod = (await new Function('return import("/src/flow.ts")')()) as typeof import(
+      '../src/flow'
+    );
+    const html = (input: string) =>
+      mod.buildFlowFromHtml(input, 'html').units.map((unit) => unit.html ?? '').join('');
+
+    const assetFlow = await mod.buildHtmlDocument(
+      '<html><body><article><h2>t</h2><p>正文正文正文正文正文正文</p><img src="pic.png"></article></body></html>',
+      () => 'asset://localhost/%2Ftmp%2Fpic.png',
+    );
+
+    return {
+      asset: assetFlow.units.map((unit) => unit.html ?? '').join(''),
+      tab: html('<a href="java\tscript:alert(1)">x</a>'),
+      background: html(
+        '<table background="https://evil.example/x.png"><tr><td>x</td></tr></table>',
+      ),
+      svg: html(
+        '<svg xmlns="http://www.w3.org/2000/svg"><image href="https://evil.example/x.png"></image></svg>',
+      ),
+    };
+  });
+
+  // 已经解析成 asset:// 的图片不能被再次当作相对路径拼接。
+  expect(result.asset).toContain('asset://localhost/%2Ftmp%2Fpic.png');
+  // 控制字符不能绕过 scheme 检查；background/SVG 资源也要按远程资源处理。
+  expect(result.tab).not.toContain('java');
+  expect(result.background).not.toContain('background=');
+  expect(result.svg).not.toContain('https://evil.example');
+});

@@ -339,6 +339,16 @@ fn save_page_texts(
 }
 
 #[tauri::command(async)]
+fn page_texts_ready(app: AppHandle, doc_id: String, page_count: u32) -> Result<bool, String> {
+    library::page_texts_ready(&app, &doc_id, page_count)
+}
+
+#[tauri::command(async)]
+fn prune_page_texts(app: AppHandle, doc_id: String, page_count: u32) -> Result<usize, String> {
+    library::prune_page_texts(&app, &doc_id, page_count)
+}
+
+#[tauri::command(async)]
 fn organize_document(
     app: AppHandle,
     doc_id: String,
@@ -579,6 +589,8 @@ fn main() {
             library_root,
             load_page_texts,
             save_page_texts,
+            page_texts_ready,
+            prune_page_texts,
             organize_document,
             organize_documents,
             delete_documents,

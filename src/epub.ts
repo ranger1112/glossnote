@@ -11,6 +11,11 @@ const DC_NS = 'http://purl.org/dc/elements/1.1/';
 /** 单张图片与整本书的内联预算：EPUB 图片转成 data URL 后会占内存。 */
 const MAX_SINGLE_IMAGE_BYTES = 4 * 1024 * 1024;
 const MAX_INLINE_IMAGE_BYTES = 20 * 1024 * 1024;
+/** 解压后文本预算：防止 zip bomb 把内存打满。 */
+const MAX_CHAPTER_BYTES = 16 * 1024 * 1024;
+const MAX_TOTAL_TEXT_BYTES = 32 * 1024 * 1024;
+const MAX_CONTAINER_BYTES = 1024 * 1024;
+const MAX_OPF_BYTES = 4 * 1024 * 1024;
 
 function parseXml(text: string, type: DOMParserSupportedType): Document {
   return new DOMParser().parseFromString(text, type);
@@ -23,7 +28,8 @@ function dirOf(path: string): string {
 
 /** 把 EPUB 内部的相对 href 解析成 zip 里的完整路径。 */
 function resolvePath(baseDir: string, href: string): string {
-  const clean = href.split('#')[0];
+  // EPUB 的 href 偶尔也带查询串；先按原始 URL 去掉，再解码文件名。
+  const clean = href.split('#')[0].split('?')[0];
   let decoded = clean;
   try {
     decoded = decodeURIComponent(clean);
@@ -56,6 +62,27 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+/** JSZip 在中央目录里记录了未压缩大小；类型定义没公开，只能读私有字段。 */
+function declaredBytes(file: JSZip.JSZipObject): number | null {
+  const data = (file as unknown as { _data?: { uncompressedSize?: number } })._data;
+  return typeof data?.uncompressedSize === 'number' ? data.uncompressedSize : null;
+}
+
+/** 解压前先按中央目录大小拦一道，解压后再兜底；避免 zip bomb 撑爆内存。 */
+async function readZipText(
+  file: JSZip.JSZipObject,
+  maxBytes: number,
+  label: string,
+): Promise<string> {
+  const declared = declaredBytes(file);
+  if (declared !== null && declared > maxBytes) {
+    throw new Error(`${label}解压后过大`);
+  }
+  const text = await file.async('string');
+  if (text.length > maxBytes) throw new Error(`${label}解压后过大`);
+  return text;
+}
+
 /**
  * EPUB 的图片在 zip 内部，直接渲染会 404；转成 data URL 内联。
  * 超出单张或整本预算的图片去掉 src，保留 alt 文本。
@@ -78,15 +105,28 @@ async function inlineImages(
       continue;
     }
 
-    const bytes = await file.async('uint8array');
-    if (bytes.byteLength > MAX_SINGLE_IMAGE_BYTES || bytes.byteLength > budget.bytes) {
+    const limit = Math.min(MAX_SINGLE_IMAGE_BYTES, budget.bytes);
+    const declared = declaredBytes(file);
+    if (declared !== null && declared > limit) {
       image.removeAttribute('src');
       continue;
     }
-    budget.bytes -= bytes.byteLength;
 
-    const mediaType = mediaByPath.get(path) ?? 'image/jpeg';
-    image.setAttribute('src', `data:${mediaType};base64,${bytesToBase64(bytes)}`);
+    try {
+      const bytes = await file.async('uint8array');
+      if (bytes.byteLength > limit) {
+        image.removeAttribute('src');
+        continue;
+      }
+      budget.bytes -= bytes.byteLength;
+
+      const mediaType = mediaByPath.get(path) ?? 'image/jpeg';
+      image.setAttribute('src', `data:${mediaType};base64,${bytesToBase64(bytes)}`);
+    } catch (error) {
+      // 单张图片损坏不应该让整本书打不开。
+      console.warn('跳过无法读取的 EPUB 图片', src, error);
+      image.removeAttribute('src');
+    }
   }
 }
 
@@ -103,13 +143,16 @@ export async function buildEpubDocument(
 
   const containerFile = zip.file('META-INF/container.xml');
   if (!containerFile) throw new Error('不是有效的 EPUB：缺少 META-INF/container.xml');
-  const container = parseXml(await containerFile.async('string'), 'application/xml');
+  const container = parseXml(
+    await readZipText(containerFile, MAX_CONTAINER_BYTES, 'container.xml '),
+    'application/xml',
+  );
   const rootfile = container.querySelector('rootfile')?.getAttribute('full-path');
   if (!rootfile) throw new Error('不是有效的 EPUB：找不到 OPF 文件');
 
   const opfFile = zip.file(rootfile);
   if (!opfFile) throw new Error('不是有效的 EPUB：OPF 文件缺失');
-  const opf = parseXml(await opfFile.async('string'), 'application/xml');
+  const opf = parseXml(await readZipText(opfFile, MAX_OPF_BYTES, 'OPF '), 'application/xml');
   const opfDir = dirOf(rootfile);
 
   const manifest = new Map<string, ManifestItem>();
@@ -141,14 +184,28 @@ export async function buildEpubDocument(
   const units: FlowUnit[] = [];
   const outline: OutlineEntry[] = [];
   const budget = { bytes: MAX_INLINE_IMAGE_BYTES };
+  let totalText = 0;
 
   for (const item of spine) {
     const path = resolvePath(opfDir, item.href);
     const file = zip.file(path);
     if (!file) continue;
 
+    let source: string;
+    try {
+      source = await readZipText(file, MAX_CHAPTER_BYTES, `章节 ${item.href} `);
+    } catch (error) {
+      // 单章损坏或过大时跳过，避免整本书打不开。
+      console.warn('跳过无法读取的 EPUB 章节', item.href, error);
+      continue;
+    }
+    totalText += source.length;
+    if (totalText > MAX_TOTAL_TEXT_BYTES) {
+      throw new Error('EPUB 解压后文本过大，已停止打开');
+    }
+
     // XHTML 也按 text/html 解析：比 XML 模式更能容忍现实里的不规范文件。
-    const document = parseXml(await file.async('string'), 'text/html');
+    const document = parseXml(source, 'text/html');
     const body = document.body;
     if (!body) continue;
 

@@ -240,6 +240,16 @@ export function savePageTexts(docId: string, pages: PageTextInput[]): Promise<nu
   return invoke('save_page_texts', { docId, pages });
 }
 
+/** 页面文字缓存是否覆盖当前分页；打开文档时据此跳过重复索引。 */
+export function pageTextsReady(docId: string, pageCount: number): Promise<boolean> {
+  return invoke('page_texts_ready', { docId, pageCount });
+}
+
+/** 删除超出当前分页数量的旧缓存。 */
+export function prunePageTexts(docId: string, pageCount: number): Promise<number> {
+  return invoke('prune_page_texts', { docId, pageCount });
+}
+
 export function aiExplain(
   docId: string,
   page: number,

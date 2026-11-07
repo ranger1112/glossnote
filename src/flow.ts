@@ -89,24 +89,34 @@ function sanitizeFragment(root: Element): void {
         element.removeAttribute(attribute.name);
         continue;
       }
-      if (name === 'style' || name === 'srcset') {
+      if (name === 'style' || name === 'srcset' || name === 'background') {
         element.removeAttribute(attribute.name);
         continue;
       }
+      // 浏览器解析 URL 时会忽略 tab/换行/控制字符；做 scheme 判断前先归一化，
+      // 避免 java\tscript: 这类写法绕过检查。
+      const normalized = value.replace(/[\s\u0000-\u001f]+/g, '');
       if (
         (name === 'href' || name === 'src' || name === 'xlink:href') &&
-        /^(javascript|vbscript|data:text\/html)/i.test(value)
+        /^(javascript|vbscript|data:text\/html)/i.test(normalized)
       ) {
         element.removeAttribute(attribute.name);
         continue;
       }
       // 本地优先：不主动加载远程图片，避免打开文档时联网。
       // asset.localhost 是 Tauri 本地文件协议，属于允许的本地资源。
-      if (
-        (name === 'src' || name === 'poster') &&
-        /^(https?:)?\/\//i.test(value) &&
-        !/^https?:\/\/asset\.localhost\//i.test(value)
-      ) {
+      const remote = /^(https?:)?\/\//i.test(normalized);
+      const localAsset = /^https?:\/\/asset\.localhost\//i.test(normalized);
+      if ((name === 'src' || name === 'poster') && remote && !localAsset) {
+        element.removeAttribute(attribute.name);
+        continue;
+      }
+      // SVG 的 <image>/<use> 用 href 加载资源，不能只检查 src。
+      const svgResource =
+        element.namespaceURI === 'http://www.w3.org/2000/svg' &&
+        (name === 'href' || name === 'xlink:href') &&
+        element.tagName.toLowerCase() !== 'a';
+      if (svgResource && remote && !localAsset) {
         element.removeAttribute(attribute.name);
       }
     }
@@ -124,7 +134,17 @@ function rewriteImages(
 ): void {
   for (const image of Array.from(root.querySelectorAll('img[src]'))) {
     const src = image.getAttribute('src')?.trim();
-    if (!src || /^(data:|https?:|\/\/)/i.test(src)) continue;
+    if (!src) continue;
+    if (src.startsWith('#')) {
+      image.removeAttribute('src');
+      continue;
+    }
+    // 绝对地址不再交给解析器：asset: / http: / data: 等都不是源目录相对路径。
+    // 尤其 asset://localhost/... 在 macOS/Linux 上已经解析过，不能二次拼接。
+    if (/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(src)) {
+      if (/^(?:file:|javascript:|vbscript:)/i.test(src)) image.removeAttribute('src');
+      continue;
+    }
     const resolved = resolveImage?.(src) ?? null;
     if (resolved) image.setAttribute('src', resolved);
     else image.removeAttribute('src');
