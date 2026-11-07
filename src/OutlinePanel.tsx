@@ -147,8 +147,7 @@ export function OutlinePanel({
           <p className="sidebar-hint">正在读取目录…</p>
         ) : outline.length === 0 ? (
           <p className="sidebar-hint">
-            这份 PDF 没有内置目录。可以用侧栏顶部的页码跳到指定页，
-            或切到「页面」视图按缩略图跳转。
+            这份文档没有内置目录。可以用侧栏顶部的页码跳到指定页。
           </p>
         ) : (
           <div className="outline-list">

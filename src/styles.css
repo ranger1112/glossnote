@@ -1573,6 +1573,28 @@ select {
   height: 100%;
 }
 
+/* 流式文档（TXT / HTML / EPUB）：版心固定，高度随内容增长。 */
+.flow-page {
+  position: relative;
+  isolation: isolate;
+  min-height: 240px;
+  margin: 0 auto 30px;
+  border-radius: 2px;
+  background: #ffffff;
+  box-shadow: var(--shadow-page);
+}
+
+.flow-content {
+  padding: 3.2em 3.6em;
+  color: #1c1c1e;
+  line-height: 1.85;
+  overflow-wrap: anywhere;
+}
+
+.flow-text {
+  white-space: pre-wrap;
+}
+
 /* 书库封面先垫在首屏下面：打开文档时立刻有内容，真实画布画完后再替换。 */
 .page-preview {
   position: absolute;

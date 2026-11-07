@@ -50,10 +50,17 @@ async fn set_library_root(app: AppHandle, path: String) -> Result<ScanReport, St
 }
 
 #[tauri::command]
-async fn import_pdf(app: AppHandle, path: String) -> Result<ImportResult, String> {
-    tauri::async_runtime::spawn_blocking(move || library::import_pdf(&app, &path))
+async fn import_document(app: AppHandle, path: String) -> Result<ImportResult, String> {
+    tauri::async_runtime::spawn_blocking(move || library::import_document(&app, &path))
         .await
         .map_err(|error| format!("导入任务失败：{error}"))?
+}
+
+#[tauri::command]
+async fn read_document_text(app: AppHandle, doc_id: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || library::read_document_text(&app, &doc_id))
+        .await
+        .map_err(|error| format!("读取文档失败：{error}"))?
 }
 
 #[tauri::command]
@@ -538,7 +545,8 @@ fn main() {
             startup_notice,
             scan_library,
             set_library_root,
-            import_pdf,
+            import_document,
+            read_document_text,
             open_document,
             save_cover,
             save_progress,

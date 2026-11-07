@@ -21,7 +21,10 @@ use std::{
 };
 use tauri::{AppHandle, Manager};
 
-const MAX_PDF_BYTES: u64 = 200 * 1024 * 1024;
+const MAX_DOCUMENT_BYTES: u64 = 200 * 1024 * 1024;
+/// 文本会整份读进前端内存，限制比 PDF 更保守。
+const MAX_TEXT_BYTES: u64 = 20 * 1024 * 1024;
+const SUPPORTED_EXTENSIONS: [&str; 5] = ["pdf", "txt", "html", "htm", "epub"];
 const SIDECAR_VERSION: u32 = 1;
 
 pub fn resolve_root(app: &AppHandle) -> Result<PathBuf, String> {
@@ -121,11 +124,23 @@ fn mtime_ms(metadata: &fs::Metadata) -> i64 {
         .unwrap_or(0)
 }
 
-fn is_pdf(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| extension.eq_ignore_ascii_case("pdf"))
-        .unwrap_or(false)
+/// 支持的文档格式；返回 None 表示不认识的扩展名。
+fn document_kind(path: &Path) -> Option<&'static str> {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some(extension) if extension.eq_ignore_ascii_case("pdf") => Some("pdf"),
+        Some(extension) if extension.eq_ignore_ascii_case("txt") => Some("txt"),
+        Some(extension)
+            if extension.eq_ignore_ascii_case("html") || extension.eq_ignore_ascii_case("htm") =>
+        {
+            Some("html")
+        }
+        Some(extension) if extension.eq_ignore_ascii_case("epub") => Some("epub"),
+        _ => None,
+    }
+}
+
+fn is_supported_document(path: &Path) -> bool {
+    document_kind(path).is_some()
 }
 
 fn safe_name(original: &str) -> String {
@@ -147,7 +162,12 @@ fn safe_name(original: &str) -> String {
     if name.is_empty() {
         name = "document.pdf".to_string();
     }
-    if !name.to_lowercase().ends_with(".pdf") {
+    // 保留支持的扩展名；没写扩展名时沿用旧行为补 .pdf。
+    let lower = name.to_lowercase();
+    let supported = SUPPORTED_EXTENSIONS
+        .iter()
+        .any(|extension| lower.ends_with(&format!(".{extension}")));
+    if !supported {
         name.push_str(".pdf");
     }
     name
@@ -159,15 +179,23 @@ fn unique_dest(books: &Path, name: &str, hash: &str) -> PathBuf {
         return candidate;
     }
 
-    let stem = name.trim_end_matches(".pdf");
+    let path = Path::new(name);
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("document");
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("pdf");
     for index in 2..1000 {
-        let candidate = books.join(format!("{stem} ({index}).pdf"));
+        let candidate = books.join(format!("{stem} ({index}).{extension}"));
         if !candidate.exists() || hash_file(&candidate).ok().as_deref() == Some(hash) {
             return candidate;
         }
     }
 
-    books.join(format!("{}-{}.pdf", stem, hash))
+    books.join(format!("{stem}-{hash}.{extension}"))
 }
 
 fn copy_atomic(source: &Path, destination: &Path) -> Result<(), String> {
@@ -562,18 +590,30 @@ pub fn write_sidecar(conn: &rusqlite::Connection, root: &Path, doc_id: &str) -> 
     write_sidecar_bytes(root, &sidecar_path(root, doc_id), &bytes)
 }
 
-pub fn import_pdf(app: &AppHandle, source: &str) -> Result<ImportResult, String> {
+pub fn import_document(app: &AppHandle, source: &str) -> Result<ImportResult, String> {
     let state = app.state::<AppState>();
     let root = state.root();
     ensure_dirs(&root)?;
 
     let source = PathBuf::from(source);
+    let kind = document_kind(&source)
+        .ok_or_else(|| "只支持 PDF、TXT、HTML 与 EPUB 文件".to_string())?
+        .to_string();
     let metadata = fs::metadata(&source).map_err(|error| format!("读取文件信息失败：{error}"))?;
     if !metadata.is_file() {
         return Err("所选路径不是文件".to_string());
     }
-    if metadata.len() > MAX_PDF_BYTES {
-        return Err("文件超过 200 MB，请先压缩或拆分后再导入".to_string());
+    let limit = if kind == "pdf" {
+        MAX_DOCUMENT_BYTES
+    } else {
+        MAX_TEXT_BYTES
+    };
+    if metadata.len() > limit {
+        return Err(if kind == "pdf" {
+            "文件超过 200 MB，请先压缩或拆分后再导入".to_string()
+        } else {
+            "文本文件超过 20 MB，请先拆分后再导入".to_string()
+        });
     }
 
     let id = hash_file(&source)?;
@@ -612,7 +652,7 @@ pub fn import_pdf(app: &AppHandle, source: &str) -> Result<ImportResult, String>
     let original_name = source
         .file_name()
         .and_then(|value| value.to_str())
-        .unwrap_or("document.pdf");
+        .unwrap_or("document");
     let name = safe_name(original_name);
     let books = root.join("books");
     let destination = unique_dest(&books, &name, &id);
@@ -630,13 +670,13 @@ pub fn import_pdf(app: &AppHandle, source: &str) -> Result<ImportResult, String>
     let document_name = destination
         .file_name()
         .and_then(|value| value.to_str())
-        .unwrap_or("document.pdf")
+        .unwrap_or("document")
         .to_string();
 
     let mut row = DocumentRow {
         id: id.clone(),
         name: document_name,
-        kind: "pdf".to_string(),
+        kind,
         title: String::new(),
         author: String::new(),
         page_count: 0,
@@ -689,7 +729,7 @@ pub fn scan(app: &AppHandle) -> Result<ScanReport, String> {
     for entry in fs::read_dir(&books).map_err(|error| format!("读取书库失败：{error}"))? {
         let entry = entry.map_err(|error| format!("读取书库条目失败：{error}"))?;
         let path = entry.path();
-        if !path.is_file() || !is_pdf(&path) {
+        if !path.is_file() || !is_supported_document(&path) {
             continue;
         }
         let metadata = fs::metadata(&path).map_err(|error| format!("读取书库文件失败：{error}"))?;
@@ -770,6 +810,7 @@ pub fn scan(app: &AppHandle) -> Result<ScanReport, String> {
             kind: prior
                 .as_ref()
                 .map(|row| row.kind.clone())
+                .or_else(|| document_kind(&path).map(str::to_string))
                 .unwrap_or_else(|| "pdf".to_string()),
             title: prior
                 .as_ref()
@@ -884,6 +925,38 @@ pub fn open_document(app: &AppHandle, doc_id: &str) -> Result<ImportResult, Stri
         document: document.to_document(&root),
         annotations,
     })
+}
+
+/// 读取 TXT / HTML 的原始文本；PDF 与 EPUB 走各自的解析路径。
+pub fn read_document_text(app: &AppHandle, doc_id: &str) -> Result<String, String> {
+    let state = app.state::<AppState>();
+    let root = state.root();
+    let row = {
+        let conn = state
+            .db
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        db::find_by_id(&conn, doc_id)?.ok_or_else(|| "文档不存在".to_string())?
+    };
+    if row.kind != "txt" && row.kind != "html" {
+        return Err("该格式不支持文本读取".to_string());
+    }
+
+    let path = root.join(row.rel_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let bytes = fs::read(&path).map_err(|error| format!("读取文档失败：{error}"))?;
+    decode_text(&bytes)
+}
+
+/// UTF-8 优先；中文 TXT 常见 GBK/GB18030，UTF-8 解不开时按超集解码。
+fn decode_text(bytes: &[u8]) -> Result<String, String> {
+    let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+    match std::str::from_utf8(bytes) {
+        Ok(text) => Ok(text.to_string()),
+        Err(_) => {
+            let (text, _, _) = encoding_rs::GB18030.decode(bytes);
+            Ok(text.into_owned())
+        }
+    }
 }
 
 pub fn save_cover(app: &AppHandle, doc_id: &str, bytes: Vec<u8>) -> Result<Document, String> {
@@ -2653,10 +2726,9 @@ mod tests {
 
     #[test]
     fn sidecar_without_kind_defaults_to_pdf() {
-        let sidecar: Sidecar = serde_json::from_str(
-            r#"{"schemaVersion":1,"docId":"d1","name":"doc.pdf","size":10}"#,
-        )
-        .unwrap();
+        let sidecar: Sidecar =
+            serde_json::from_str(r#"{"schemaVersion":1,"docId":"d1","name":"doc.pdf","size":10}"#)
+                .unwrap();
         assert_eq!(sidecar.kind, "pdf");
     }
 
@@ -2924,9 +2996,27 @@ mod tests {
     }
 
     #[test]
-    fn safe_name_cleans_and_forces_pdf() {
+    fn safe_name_cleans_and_keeps_supported_extensions() {
         assert_eq!(safe_name("a:b?.pdf"), "a_b_.pdf");
+        assert_eq!(safe_name("notes.txt"), "notes.txt");
+        assert_eq!(safe_name("page.htm"), "page.htm");
         assert_eq!(safe_name("report"), "report.pdf");
         assert_eq!(safe_name("   "), "document.pdf");
+    }
+
+    #[test]
+    fn detects_document_kind_from_extension() {
+        assert_eq!(document_kind(Path::new("a.pdf")), Some("pdf"));
+        assert_eq!(document_kind(Path::new("a.TXT")), Some("txt"));
+        assert_eq!(document_kind(Path::new("a.htm")), Some("html"));
+        assert_eq!(document_kind(Path::new("a.epub")), Some("epub"));
+        assert_eq!(document_kind(Path::new("a.docx")), None);
+    }
+
+    #[test]
+    fn decodes_utf8_bom_and_gb18030_text() {
+        assert_eq!(decode_text(b"\xEF\xBB\xBFhello").unwrap(), "hello");
+        // GB18030 的「中文」：D6 D0 CE C4
+        assert_eq!(decode_text(&[0xD6, 0xD0, 0xCE, 0xC4]).unwrap(), "中文");
     }
 }

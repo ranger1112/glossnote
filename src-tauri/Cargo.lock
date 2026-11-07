@@ -1572,6 +1572,7 @@ name = "glossnote"
 version = "0.3.3"
 dependencies = [
  "chrono",
+ "encoding_rs",
  "lopdf",
  "reqwest 0.12.28",
  "rusqlite",

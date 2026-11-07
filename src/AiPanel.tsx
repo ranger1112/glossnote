@@ -24,7 +24,8 @@ interface ExplainInput {
 interface AiPanelProps {
   docId: string;
   docName: string;
-  pdf: PDFDocumentProxy;
+  /** PDF 代理；流式文档打开时已自动索引，不需要在这里提取。 */
+  pdf: PDFDocumentProxy | null;
   mode: PanelMode;
   explain?: ExplainInput;
   ready: boolean;
@@ -121,6 +122,10 @@ export function AiPanel({
   }, [turns.length, busy, streaming]);
 
   const handleIndex = useCallback(async () => {
+    if (!pdf) {
+      onMessage('这份文档的正文已随打开自动索引，可以直接提问。');
+      return;
+    }
     setIndexing(true);
     setProgress('正在提取文字…');
     try {

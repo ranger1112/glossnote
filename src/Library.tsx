@@ -3,7 +3,7 @@ import { pdfjsLib, pdfjsOpenOptions } from './pdfjs';
 import {
   assetUrl,
   deleteDocuments,
-  importPdf,
+  importDocument,
   listDocuments,
   listFolders,
   listSmartCollections,
@@ -22,7 +22,7 @@ import {
   updateDocumentMeta,
 } from './desktop';
 import { extractDocumentText } from './pdfText';
-import { pickPdfPath } from './platform';
+import { pickDocumentPath } from './platform';
 import { IconSearch, IconStar, IconTrash, IconUpload } from './icons';
 import type {
   DocumentMeta,
@@ -118,7 +118,9 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
 
   const ensureCovers = useCallback(async (list: DocumentMeta[]) => {
     const run = ++coverRun.current;
-    const queue = list.filter((doc) => !doc.cover || doc.pageCount === 0);
+    const queue = list.filter(
+      (doc) => (doc.kind ?? 'pdf') === 'pdf' && (!doc.cover || doc.pageCount === 0),
+    );
     // 每个任务都要把整份 PDF 交给 pdf.js；并发 2 个足够，再多容易顶不住大文件。
     const CONCURRENCY = 2;
 
@@ -221,7 +223,8 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
       for (let index = 0; index < list.length; index += 1) {
         if (indexCancel.current) break;
         const doc = list[index];
-        if (doc.pageCount <= 0) continue;
+        // 流式文档在打开时自动索引；这里只处理需要 pdf.js 提取文字的 PDF。
+        if ((doc.kind ?? 'pdf') !== 'pdf' || doc.pageCount <= 0) continue;
 
         const cached = await loadPageTexts(doc.id);
         if (cached.length >= doc.pageCount) continue;
@@ -323,15 +326,15 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
 
   const handleImport = useCallback(async () => {
     setImporting(true);
-    onMessage('正在导入 PDF…');
+    onMessage('正在导入文档…');
     try {
-      const path = await pickPdfPath();
+      const path = await pickDocumentPath();
       if (!path) {
         onMessage('');
         return;
       }
 
-      const result = await importPdf(path);
+      const result = await importDocument(path);
       let document = result.document;
       // 当前停在某个文件夹里时，新导入的文档直接归进去。
       if (folderFilter) {
@@ -544,7 +547,7 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
             `已移除 ${report.removed} 份；${report.failed.length} 份无法移入回收站：${report.failed.join('；')}`,
           );
         } else {
-          onMessage(`已移除 ${report.removed} 份文档，PDF 与标注在系统回收站。`);
+          onMessage(`已移除 ${report.removed} 份文档，文档与标注在系统回收站。`);
         }
         setConfirm(null);
       } catch (error) {
@@ -667,7 +670,7 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
   const syncExtra = sync
     ? [
         sync.archived > 0 ? `归档 ${sync.archived} 个冲突副本` : '',
-        sync.duplicatePdfs > 0 ? `${sync.duplicatePdfs} 份重复 PDF` : '',
+        sync.duplicatePdfs > 0 ? `${sync.duplicatePdfs} 份重复文件` : '',
         sync.missingDocuments > 0 ? `${sync.missingDocuments} 份文档文件缺失` : '',
         sync.ignoredSidecars > 0 ? `${sync.ignoredSidecars} 个无效 sidecar` : '',
       ]
@@ -688,7 +691,7 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
           <p>
             {docs.length > 0
               ? `${docs.length} 份文档 · 标注同时写入 SQLite 与 sidecar`
-              : '导入的 PDF 会复制进书库，标注随文件夹一起同步'}
+              : '导入的文档会复制进书库，标注随文件夹一起同步'}
           </p>
           {sync && (
             <p className="library-path" title={sync.root}>
@@ -721,7 +724,7 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
             onClick={() => void handleImport()}
           >
             <IconUpload size={15} />
-            {importing ? '导入中…' : '导入 PDF'}
+            {importing ? '导入中…' : '导入文档'}
           </button>
         </div>
       </div>
@@ -819,7 +822,7 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
                   <button
                     type="button"
                     className="ghost"
-                    title="在本机提取 PDF 文字层，供全库正文搜索使用"
+                    title="在本机提取文档文字，供全库正文搜索使用"
                     onClick={() => void indexLibrary()}
                   >
                     {indexing ? '停止索引' : '索引正文'}
@@ -935,7 +938,7 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
             <div className="library-empty-card">
               <div className="welcome-mark">G</div>
               <h2>书库还是空的</h2>
-              <p>导入第一份 PDF，选中文字就能高亮和批注。</p>
+              <p>导入第一份文档，选中文字就能高亮和批注。</p>
               <button
                 type="button"
                 className="primary large"
@@ -943,13 +946,13 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
                 onClick={() => void handleImport()}
               >
                 <IconUpload size={16} />
-                导入 PDF
+                导入文档
               </button>
             </div>
           ) : visibleDocs.length === 0 ? (
             <div className="library-empty-card">
               <h2>没有符合条件的文档</h2>
-              <p>换个筛选条件，或者导入新的 PDF。</p>
+              <p>换个筛选条件，或者导入新的文档。</p>
               <button
                 type="button"
                 className="ghost"
@@ -1041,7 +1044,9 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
                         {doc.cover ? (
                           <img src={assetUrl(doc.cover)} alt="" loading="lazy" />
                         ) : (
-                          <div className="cover-fallback">PDF</div>
+                          <div className="cover-fallback">
+                            {(doc.kind ?? 'pdf').toUpperCase()}
+                          </div>
                         )}
                         {doc.annotationCount > 0 && (
                           <span className="cover-badge">{doc.annotationCount}</span>
@@ -1205,12 +1210,12 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
           body={
             confirm.kind === 'delete-docs' ? (
               <p>
-                PDF 与对应标注文件会移到 Windows 回收站，书库索引立即移除。之后可以从系统回收站恢复。
+                文档与对应标注文件会移到 Windows 回收站，书库索引立即移除。之后可以从系统回收站恢复。
               </p>
             ) : (
               <p>
                 {folderDeleteCount > 0
-                  ? `文件夹里的 ${folderDeleteCount} 份文档会移到「未分类」，PDF 和标注不受影响。`
+                  ? `文件夹里的 ${folderDeleteCount} 份文档会移到「未分类」，文档和标注不受影响。`
                   : '这是一个空文件夹，删除后不会影响任何文档。'}
               </p>
             )

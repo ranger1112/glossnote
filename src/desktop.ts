@@ -42,8 +42,13 @@ export function setLibraryRoot(path: string): Promise<ScanReport> {
   return invoke('set_library_root', { path });
 }
 
-export function importPdf(path: string): Promise<ImportResult> {
-  return invoke('import_pdf', { path });
+export function importDocument(path: string): Promise<ImportResult> {
+  return invoke('import_document', { path });
+}
+
+/** 读取 TXT / HTML 的原始文本；PDF 与 EPUB 走各自的解析路径。 */
+export function readDocumentText(docId: string): Promise<string> {
+  return invoke('read_document_text', { docId });
 }
 
 export function openDocument(docId: string): Promise<ImportResult> {

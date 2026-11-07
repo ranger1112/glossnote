@@ -3,7 +3,9 @@ import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { pdfjsLib, pdfjsOpenOptions } from './pdfjs';
 import { PdfPage, cachedPageSize } from './PdfPage';
-import { textAnchorStrategy } from './document';
+import { FlowPage, FLOW_PAGE_WIDTH } from './FlowPage';
+import { textAnchorStrategy, normalizeDocKind, type DocKind } from './document';
+import { buildTextDocument, type FlowDocument } from './flow';
 import { Library } from './Library';
 import { Review } from './Review';
 import { CardEditor, type CardDraft } from './CardEditor';
@@ -66,10 +68,12 @@ import {
   deleteAnnotation,
   exportAnnotatedPdf,
   exportMarkdown,
+  indexDocumentText,
   libraryRoot,
   listCards,
   loadPageTexts,
   openDocument,
+  readDocumentText,
   saveBookmarks,
   savePageTexts,
   saveProgress,
@@ -86,8 +90,12 @@ import { applyTheme, initialTheme, type Theme } from './theme';
 interface OpenedDoc {
   id: string;
   name: string;
+  kind: DocKind;
   pageCount: number;
-  pdf: PDFDocumentProxy;
+  /** PDF 的 pdf.js 代理；TXT / HTML / EPUB 为 null。 */
+  pdf: PDFDocumentProxy | null;
+  /** 流式文档的分页内容；PDF 为 null。 */
+  flow: FlowDocument | null;
   bookmarks: Bookmark[];
   /** 书库封面（首页缩略图）；打开文档时先垫在首屏下面，避免长时间白屏。 */
   cover?: string;
@@ -204,9 +212,13 @@ interface Activation {
   id: string;
   name: string;
   size: number;
+  kind: DocKind;
   pageCount: number;
-  pdf: PDFDocumentProxy;
-  task: ReturnType<typeof pdfjsLib.getDocument>;
+  /** PDF 文档；与 flow 二选一。 */
+  pdf?: PDFDocumentProxy;
+  task?: ReturnType<typeof pdfjsLib.getDocument>;
+  /** TXT / HTML / EPUB 的分页内容。 */
+  flow?: FlowDocument;
   annotations: Annotation[];
   bookmarks?: Bookmark[];
   desktopMeta?: DocumentMeta;
@@ -955,6 +967,8 @@ export default function App() {
   // 只挂载当前页附近的 PdfPage；其余页用等尺寸占位 div 撑住滚动高度，
   // 500 页的书 DOM 从 500 个组件降到十几个。
   const pageMountWindow = activeRadius + 4;
+  // 提前取出，避免在 JSX 回调里丢失非空收窄。
+  const activePdf = doc?.pdf ?? null;
 
   const syncHistory = useCallback(() => {
     setHistoryDepth({ undo: undoRef.current.length, redo: redoRef.current.length });
@@ -1152,28 +1166,36 @@ export default function App() {
     pinnedPage.current = null;
     docRef.current?.dispose();
 
+    const pdf = input.pdf ?? null;
+    const flow = input.flow ?? null;
     const opened: OpenedDoc = {
       id: input.id,
       name: input.name,
+      kind: input.kind,
       pageCount: input.pageCount,
-      pdf: input.pdf,
+      pdf,
+      flow,
       bookmarks: input.bookmarks ?? [],
       cover: input.desktopMeta?.cover ? assetUrl(input.desktopMeta.cover) : undefined,
       dispose: () => {
-        void input.task.destroy().catch(() => undefined);
+        void input.task?.destroy().catch(() => undefined);
       },
     };
     docRef.current = opened;
     if (input.desktopMeta) recordRef.current = null;
 
-    // 用第一页的原始尺寸作为占位与自适应缩放的基准；拿不到时退回 A4。
-    let pageSize = { width: 595, height: 842 };
-    try {
-      const first = await input.pdf.getPage(1);
-      const viewport = first.getViewport({ scale: 1 });
-      pageSize = { width: viewport.width, height: viewport.height };
-    } catch {
-      // 尺寸只影响缩放基准，失败不阻止打开。
+    // PDF 用第一页的原始尺寸作为占位与自适应缩放的基准；流式文档用固定版心。
+    let pageSize = flow
+      ? { width: FLOW_PAGE_WIDTH, height: 1000 }
+      : { width: 595, height: 842 };
+    if (pdf) {
+      try {
+        const first = await pdf.getPage(1);
+        const viewport = first.getViewport({ scale: 1 });
+        pageSize = { width: viewport.width, height: viewport.height };
+      } catch {
+        // 尺寸只影响缩放基准，失败不阻止打开。
+      }
     }
     setBaseSize(pageSize);
     setZoomMode('fit-width');
@@ -1197,15 +1219,19 @@ export default function App() {
     setMessage('');
     setSideTab('annotations');
     setOutline([]);
-    setOutlineLoading(true);
-    void loadOutline(input.pdf)
-      .then((entries) => {
-        if (docRef.current?.id === input.id) setOutline(entries);
-      })
-      .catch(() => undefined)
-      .finally(() => {
-        if (docRef.current?.id === input.id) setOutlineLoading(false);
-      });
+    if (pdf) {
+      setOutlineLoading(true);
+      void loadOutline(pdf)
+        .then((entries) => {
+          if (docRef.current?.id === input.id) setOutline(entries);
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          if (docRef.current?.id === input.id) setOutlineLoading(false);
+        });
+    } else {
+      setOutlineLoading(false);
+    }
 
     requestAnimationFrame(() => {
       if (startPage > 0) scrollToPage(startPage);
@@ -1214,16 +1240,31 @@ export default function App() {
 
     if (input.desktopMeta) {
       void refreshCards();
-      try {
-        const metadata = await input.pdf.getMetadata();
-        const info = (metadata.info ?? {}) as { Title?: string; Author?: string };
-        await updateDocumentMeta(input.id, {
-          pageCount: input.pdf.numPages,
-          title: info.Title,
-          author: info.Author,
-        });
-      } catch {
-        // 元数据是锦上添花，失败不影响阅读与标注。
+      if (pdf) {
+        try {
+          const metadata = await pdf.getMetadata();
+          const info = (metadata.info ?? {}) as { Title?: string; Author?: string };
+          await updateDocumentMeta(input.id, {
+            pageCount: pdf.numPages,
+            title: info.Title,
+            author: info.Author,
+          });
+        } catch {
+          // 元数据是锦上添花，失败不影响阅读与标注。
+        }
+      } else if (flow) {
+        // 流式文档的页数由前端分页得出；顺便把正文写进索引，书库搜索立刻可用。
+        void updateDocumentMeta(input.id, { pageCount: input.pageCount }).catch(() => undefined);
+        if (isTauri()) {
+          const pages = flow.units.map((unit, index) => ({ page: index, text: unit.text }));
+          void (async () => {
+            for (let start = 0; start < pages.length; start += 50) {
+              await savePageTexts(input.id, pages.slice(start, start + 50)).catch(() => undefined);
+            }
+            // 同时建立 AI 检索用的分段索引；失败不影响阅读。
+            await indexDocumentText(input.id, pages).catch(() => undefined);
+          })();
+        }
       }
     }
   }, [refreshCards, resetHistory, resetSaveState]);
@@ -1231,7 +1272,7 @@ export default function App() {
   const openFile = useCallback(
     async (file: File) => {
       setBusy(true);
-      setMessage('正在读取 PDF…');
+      setMessage('正在读取文档…');
       try {
         const bytes = await file.arrayBuffer();
         const docId = await sha256Hex(bytes);
@@ -1248,12 +1289,28 @@ export default function App() {
         saveDoc(record);
         recordRef.current = record;
 
+        if (/\.txt$/i.test(file.name) || file.type.startsWith('text/')) {
+          const flow = buildTextDocument(new TextDecoder().decode(bytes));
+          await activate({
+            id: docId,
+            name: file.name,
+            size: file.size,
+            kind: 'txt',
+            pageCount: flow.units.length,
+            flow,
+            annotations: record.annotations,
+            bookmarks: [],
+          });
+          return;
+        }
+
         const task = pdfjsLib.getDocument({ data: bytes.slice(0), ...pdfjsOpenOptions });
         const pdf = await task.promise;
         await activate({
           id: docId,
           name: file.name,
           size: file.size,
+          kind: 'pdf',
           pageCount: pdf.numPages,
           pdf,
           task,
@@ -1277,23 +1334,44 @@ export default function App() {
       setMessage('正在打开文档…');
       try {
         const result = await openDocument(docId);
-        const task = pdfjsLib.getDocument({
-          url: assetUrl(result.document.path),
-          ...pdfjsOpenOptions,
-        });
-        const pdf = await task.promise;
-        await activate({
-          id: result.document.id,
-          name: result.document.name,
-          size: result.document.size,
-          pageCount: pdf.numPages,
-          pdf,
-          task,
-          annotations: result.annotations,
-          bookmarks: result.document.bookmarks,
-          desktopMeta: result.document,
-          initialPage: page ?? result.document.lastPage,
-        });
+        const kind = normalizeDocKind(result.document.kind);
+        if (kind === 'txt') {
+          const text = await readDocumentText(result.document.id);
+          const flow = buildTextDocument(text);
+          await activate({
+            id: result.document.id,
+            name: result.document.name,
+            size: result.document.size,
+            kind,
+            pageCount: flow.units.length,
+            flow,
+            annotations: result.annotations,
+            bookmarks: result.document.bookmarks,
+            desktopMeta: result.document,
+            initialPage: page ?? result.document.lastPage,
+          });
+        } else if (kind !== 'pdf') {
+          setMessage('HTML / EPUB 阅读器正在开发中，目前可以打开 PDF 与 TXT。');
+        } else {
+          const task = pdfjsLib.getDocument({
+            url: assetUrl(result.document.path),
+            ...pdfjsOpenOptions,
+          });
+          const pdf = await task.promise;
+          await activate({
+            id: result.document.id,
+            name: result.document.name,
+            size: result.document.size,
+            kind,
+            pageCount: pdf.numPages,
+            pdf,
+            task,
+            annotations: result.annotations,
+            bookmarks: result.document.bookmarks,
+            desktopMeta: result.document,
+            initialPage: page ?? result.document.lastPage,
+          });
+        }
       } catch (error) {
         setMessage(`打开失败：${errorText(error)}`);
       } finally {
@@ -1701,6 +1779,12 @@ export default function App() {
     setFilterSource('all');
     setPageHintDismissed(new Set());
     textCacheLoadedRef.current = false;
+    // 流式文档的分页文字本来就在内存里，直接灌进查找缓存，不必再读 SQLite。
+    const flow = docRef.current?.flow;
+    if (flow) {
+      flow.units.forEach((unit, index) => pageTextsRef.current.set(index, unit.text));
+      textCacheLoadedRef.current = true;
+    }
   }, [doc?.id]);
 
   // 换书或改筛选后从第一批重新渲染；若刚才是为了显示某张卡片清掉筛选，再补足到它。
@@ -1723,7 +1807,7 @@ export default function App() {
   // 只查当前页的内嵌标注，给“本页有 N 条可导入”提示用；不扫整本。
   useEffect(() => {
     setPageNativeCount(0);
-    if (!doc) return;
+    if (!doc?.pdf) return;
 
     let cancelled = false;
     void scanNativePage(doc.pdf, currentPage)
@@ -1793,7 +1877,7 @@ export default function App() {
           }
 
           let text = pageTextsRef.current.get(pageIndex);
-          if (text === undefined) {
+          if (text === undefined && doc.pdf) {
             try {
               const page = await doc.pdf.getPage(pageIndex + 1);
               const content = await page.getTextContent();
@@ -1808,6 +1892,7 @@ export default function App() {
               text = '';
             }
           }
+          if (text === undefined) text = '';
 
           const haystack = text.toLowerCase();
           let from = 0;
@@ -2104,7 +2189,7 @@ export default function App() {
   }, []);
 
   const startPdfImport = useCallback(async () => {
-    if (!doc || pdfImportBusy) return;
+    if (!doc?.pdf || pdfImportBusy) return;
 
     setPdfImportBusy(true);
     setPdfImport(null);
@@ -2141,7 +2226,8 @@ export default function App() {
   const persistNativePages = useCallback(
     async (pages: NativePage[]) => {
       const active = doc;
-      if (!active || pages.length === 0) return;
+      const pdf = active?.pdf;
+      if (!active || !pdf || pages.length === 0) return;
 
       setPdfImportBusy(true);
       setPdfImportProgress('正在读取页面文字…');
@@ -2152,7 +2238,7 @@ export default function App() {
           ),
         );
         const { drafts, skipped } = await buildImportedAnnotations(
-          active.pdf,
+          pdf,
           pages,
           existing,
           (done, total) => setPdfImportProgress(`正在整理 ${done}/${total} 页…`),
@@ -2220,13 +2306,14 @@ export default function App() {
   /** 当前页提示条只读这一页；点“导入本页”直接落库，不先扫整本。 */
   const importCurrentPageNative = useCallback(async () => {
     const active = doc;
-    if (!active || pdfImportBusy) return;
+    const pdf = active?.pdf;
+    if (!active || !pdf || pdfImportBusy) return;
 
     const pageIndex = currentPageRef.current;
     setPdfImportBusy(true);
     setPdfImportProgress('正在检查本页 PDF 自带标注…');
     try {
-      const page = await scanNativePage(active.pdf, pageIndex);
+      const page = await scanNativePage(pdf, pageIndex);
       if (docRef.current?.id !== active.id) return;
       if (page.marks.length === 0) {
         setMessage('这一页没有 PDF 自带标注。');
@@ -2505,7 +2592,7 @@ export default function App() {
           </div>
         )}
 
-        {doc && desktop && (
+        {doc?.pdf && desktop && (
           <button
             type="button"
             className="theme-toggle"
@@ -2549,7 +2636,7 @@ export default function App() {
         <input
           ref={fileRef}
           type="file"
-          accept="application/pdf"
+          accept="application/pdf,.txt,text/plain"
           hidden
           onChange={(event) => {
             const file = event.target.files?.[0];
@@ -2650,10 +2737,36 @@ export default function App() {
             onScroll={handleViewerScroll}
             data-pan-x={panXAllowed ? 'true' : 'false'}
           >
-            {baseSize &&
+            {doc.flow &&
+              doc.flow.units.map((unit, index) => (
+                <FlowPage
+                  key={`${doc.id}-${index}`}
+                  unit={unit}
+                  pageIndex={index}
+                  scale={scale}
+                  anchorStrategy={textAnchorStrategy}
+                  annotations={byPage.get(index) ?? EMPTY}
+                  focusId={focusId}
+                  onSelect={handleSelect}
+                  onHover={handleHover}
+                  hoverId={hover?.annotation.id ?? null}
+                  onHoverKeepAlive={keepHoverAlive}
+                  searchMatch={
+                    searchTarget?.page === index
+                      ? {
+                          start: searchTarget.start,
+                          end: searchTarget.end,
+                          token: searchTarget.token,
+                        }
+                      : undefined
+                  }
+                />
+              ))}
+            {activePdf &&
+              baseSize &&
               Array.from({ length: doc.pageCount }, (_, index) => {
                 if (Math.abs(index - currentPage) > pageMountWindow) {
-                  const size = cachedPageSize(doc.pdf, index) ?? baseSize;
+                  const size = cachedPageSize(activePdf, index) ?? baseSize;
                   return (
                     <div
                       key={`${doc.id}-${index}`}
@@ -2671,7 +2784,7 @@ export default function App() {
                 return (
                   <PdfPage
                     key={`${doc.id}-${index}`}
-                    pdf={doc.pdf}
+                    pdf={activePdf}
                     pageIndex={index}
                     scale={scale}
                     baseSize={baseSize}
@@ -2742,16 +2855,18 @@ export default function App() {
                 pageCount={doc.pageCount}
                 onJump={goToPage}
               />
-              <button
-                type="button"
-                className="ai-head-button import-head-button"
-                title="导入 PDF 内置的高亮、下划线与删除线"
-                disabled={pdfImportBusy}
-                onClick={() => void startPdfImport()}
-              >
-                <IconDownload size={12} />
-                导入 PDF
-              </button>
+              {doc.pdf && (
+                <button
+                  type="button"
+                  className="ai-head-button import-head-button"
+                  title="导入 PDF 内置的高亮、下划线与删除线"
+                  disabled={pdfImportBusy}
+                  onClick={() => void startPdfImport()}
+                >
+                  <IconDownload size={12} />
+                  导入 PDF
+                </button>
+              )}
               {desktop && (
                 <button
                   type="button"
@@ -2786,16 +2901,18 @@ export default function App() {
                 <IconList size={13} />
                 目录
               </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={sideTab === 'pages'}
-                className={sideTab === 'pages' ? 'active' : ''}
-                onClick={() => setSideTab('pages')}
-              >
-                <IconPages size={13} />
-                页面
-              </button>
+              {doc.pdf && (
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={sideTab === 'pages'}
+                  className={sideTab === 'pages' ? 'active' : ''}
+                  onClick={() => setSideTab('pages')}
+                >
+                  <IconPages size={13} />
+                  页面
+                </button>
+              )}
             </div>
 
             {/* 导入入口在侧栏头部，横幅必须对所有标签页可见，否则在目录/页面页触发后看不到进度与确认。 */}
@@ -2944,7 +3061,7 @@ export default function App() {
             {visible.length === 0 ? (
               <p className="sidebar-hint">
                 选中正文即可高亮；点浮动栏里的「批注」写下你的想法。
-                PDF 文件自带的高亮可用右上角「导入 PDF」收进来；
+                {doc.pdf && 'PDF 文件自带的高亮可用右上角「导入 PDF」收进来；'}
                 所有标注会在刷新、缩放后回到原来的位置。
               </p>
             ) : filtered.length === 0 ? (
@@ -3015,16 +3132,16 @@ export default function App() {
                 onRemoveBookmark={removeBookmark}
                 onRenameBookmark={renameBookmark}
               />
-            ) : (
+            ) : activePdf ? (
               <PageThumbnails
                 key={doc.id}
-                pdf={doc.pdf}
+                pdf={activePdf}
                 pageCount={doc.pageCount}
                 currentPage={currentPage}
                 bookmarks={doc.bookmarks}
                 onJump={goToPage}
               />
-            )}
+            ) : null}
 
             <div className="sidebar-foot">
               {desktop
@@ -3218,7 +3335,7 @@ export default function App() {
           key={`${doc.id}:${aiPanel.mode}:${aiPanel.mode === 'explain' ? aiPanel.page : ''}`}
           docId={doc.id}
           docName={doc.name}
-          pdf={doc.pdf}
+          pdf={activePdf}
           mode={aiPanel.mode}
           explain={
             aiPanel.mode === 'explain'
