@@ -101,7 +101,12 @@ function sanitizeFragment(root: Element): void {
         continue;
       }
       // 本地优先：不主动加载远程图片，避免打开文档时联网。
-      if ((name === 'src' || name === 'poster') && /^(https?:)?\/\//i.test(value)) {
+      // asset.localhost 是 Tauri 本地文件协议，属于允许的本地资源。
+      if (
+        (name === 'src' || name === 'poster') &&
+        /^(https?:)?\/\//i.test(value) &&
+        !/^https?:\/\/asset\.localhost\//i.test(value)
+      ) {
         element.removeAttribute(attribute.name);
       }
     }
@@ -200,6 +205,9 @@ export async function buildHtmlDocument(
   // 按需加载 Readability，避免把提取库打进首屏包。
   const { Readability } = await import('@mozilla/readability');
   const parsed = new DOMParser().parseFromString(source, 'text/html');
+  // Readability 会按文档 baseURI 把相对图片转成绝对地址；DOMParser 的 baseURI 是应用页面，
+  // 转完就再也映射不回源文件目录。所以先在原始文档上解析图片，再交给 Readability。
+  rewriteImages(parsed.body, resolveImage);
 
   let article: ReturnType<ReadabilityType['parse']> = null;
   try {
