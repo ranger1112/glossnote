@@ -52,11 +52,11 @@ npm run build           # 类型检查 + 前端生产构建
 
 | 内容 | 位置 |
 | --- | --- |
-| 书库（PDF + 标注 sidecar + 封面） | `文档\GlossNote\`（可切换） |
+| 书库（文档 + 标注 sidecar + 封面） | `文档\GlossNote\`（可切换） |
 | SQLite 索引（可重建） | `%APPDATA%\com.phoebe.glossnote\library.db` |
 | 设置与 AI 配置 | `%APPDATA%\com.phoebe.glossnote\settings.json` |
 
-标注同时写入 SQLite 与 `.glossnote/annotations/<sha256>.json`。SQLite 只是索引：删掉它后重启，会从书库里的 PDF 与 sidecar 重建。
+标注同时写入 SQLite 与 `.glossnote/annotations/<sha256>.json`。SQLite 只是索引：删掉它后重启，会从书库里的文档与 sidecar 重建。
 
 ## 隐私
 
