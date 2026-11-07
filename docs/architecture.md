@@ -176,7 +176,7 @@ page_search USING fts5(tokens, content='page_texts', content_rowid='rowid');
 
 - 旋转页面按未旋转的原始 viewport 计算坐标。
 - 双栏 PDF 依赖文本层阅读顺序，不按视觉顺序。
-- 扫描件没有文本层：0.1 明确提示，不假装能高亮；OCR 在 1.0 之后。
+- 扫描件没有文本层：0.1 明确提示，不假装能高亮；OCR 在 0.4.0 之后。
 - 页面指纹是页级 FNV-1a，不是文档级；单页改动不会影响其他页。
 
 算法在 `src/anchoring.ts`，纯函数，单测覆盖 exact / relocated / 相似度 / 比例回退。
