@@ -5,7 +5,7 @@ import { pdfjsLib, pdfjsOpenOptions } from './pdfjs';
 import { PdfPage, cachedPageSize } from './PdfPage';
 import { FlowPage, FLOW_PAGE_WIDTH } from './FlowPage';
 import { textAnchorStrategy, normalizeDocKind, type DocKind } from './document';
-import { buildTextDocument, type FlowDocument } from './flow';
+import { buildHtmlDocument, buildTextDocument, type FlowDocument } from './flow';
 import { Library } from './Library';
 import { Review } from './Review';
 import { CardEditor, type CardDraft } from './CardEditor';
@@ -1230,6 +1230,8 @@ export default function App() {
           if (docRef.current?.id === input.id) setOutlineLoading(false);
         });
     } else {
+      // HTML 的标题大纲随解析结果一起返回；TXT 没有目录。
+      setOutline(flow?.outline ?? []);
       setOutlineLoading(false);
     }
 
@@ -1254,7 +1256,12 @@ export default function App() {
         }
       } else if (flow) {
         // 流式文档的页数由前端分页得出；顺便把正文写进索引，书库搜索立刻可用。
-        void updateDocumentMeta(input.id, { pageCount: input.pageCount }).catch(() => undefined);
+        void updateDocumentMeta(input.id, {
+          pageCount: input.pageCount,
+          // 只在书库还没有标题/作者时采用 HTML 提取结果，不覆盖用户改过的元数据。
+          title: input.desktopMeta.title ? undefined : flow.title,
+          author: input.desktopMeta.author ? undefined : flow.author,
+        }).catch(() => undefined);
         if (isTauri()) {
           const pages = flow.units.map((unit, index) => ({ page: index, text: unit.text }));
           void (async () => {
@@ -1289,13 +1296,17 @@ export default function App() {
         saveDoc(record);
         recordRef.current = record;
 
-        if (/\.txt$/i.test(file.name) || file.type.startsWith('text/')) {
-          const flow = buildTextDocument(new TextDecoder().decode(bytes));
+        const text = /\.(txt|html?)$/i.test(file.name) || file.type.startsWith('text/')
+          ? new TextDecoder().decode(bytes)
+          : null;
+        if (text !== null) {
+          const isHtml = /\.html?$/i.test(file.name) || file.type === 'text/html';
+          const flow = isHtml ? buildHtmlDocument(text) : buildTextDocument(text);
           await activate({
             id: docId,
             name: file.name,
             size: file.size,
-            kind: 'txt',
+            kind: isHtml ? 'html' : 'txt',
             pageCount: flow.units.length,
             flow,
             annotations: record.annotations,
@@ -1335,9 +1346,9 @@ export default function App() {
       try {
         const result = await openDocument(docId);
         const kind = normalizeDocKind(result.document.kind);
-        if (kind === 'txt') {
+        if (kind === 'txt' || kind === 'html') {
           const text = await readDocumentText(result.document.id);
-          const flow = buildTextDocument(text);
+          const flow = kind === 'html' ? buildHtmlDocument(text) : buildTextDocument(text);
           await activate({
             id: result.document.id,
             name: result.document.name,
@@ -1351,7 +1362,7 @@ export default function App() {
             initialPage: page ?? result.document.lastPage,
           });
         } else if (kind !== 'pdf') {
-          setMessage('HTML / EPUB 阅读器正在开发中，目前可以打开 PDF 与 TXT。');
+          setMessage('EPUB 阅读器正在开发中，目前可以打开 PDF、TXT 与 HTML。');
         } else {
           const task = pdfjsLib.getDocument({
             url: assetUrl(result.document.path),
@@ -2636,7 +2647,7 @@ export default function App() {
         <input
           ref={fileRef}
           type="file"
-          accept="application/pdf,.txt,text/plain"
+          accept="application/pdf,.txt,text/plain,.html,.htm,text/html"
           hidden
           onChange={(event) => {
             const file = event.target.files?.[0];

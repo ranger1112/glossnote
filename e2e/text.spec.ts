@@ -12,6 +12,7 @@ function longText() {
 
 async function openText(page: Page, text: string) {
   // 在页面里构造 File 并触发 change，避免依赖 Node 的 Buffer 类型。
+  await page.locator('input[type=file]').waitFor({ state: 'attached' });
   await page.evaluate((content) => {
     const input = document.querySelector<HTMLInputElement>('input[type=file]');
     if (!input) throw new Error('没有文件输入框');

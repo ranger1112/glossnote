@@ -418,6 +418,11 @@ export const FlowPage = memo(function FlowPage({
     if (Date.now() - longPressFiredAtRef.current < 1200) event.preventDefault();
   }, []);
 
+  // 阅读区里的链接不能把整个应用导航走；后续可以接系统浏览器打开。
+  const handleContentClick = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    if ((event.target as Element).closest('a')) event.preventDefault();
+  }, []);
+
   return (
     <div
       className="flow-page"
@@ -437,8 +442,13 @@ export const FlowPage = memo(function FlowPage({
         ref={contentRef}
         className="flow-content"
         style={{ fontSize: `${BASE_FONT_SIZE * scale}px` }}
+        onClick={handleContentClick}
       >
-        <div className="flow-text">{unit.text}</div>
+        {unit.html !== undefined ? (
+          <div className="flow-html" dangerouslySetInnerHTML={{ __html: unit.html }} />
+        ) : (
+          <div className="flow-text">{unit.text}</div>
+        )}
       </div>
       <div ref={highlightRef} className="highlight-layer" />
       <span className="page-number">{pageIndex + 1}</span>

@@ -1595,6 +1595,62 @@ select {
   white-space: pre-wrap;
 }
 
+/* 提取后的正文没有原站 CSS，这里给一套克制的阅读排版。 */
+.flow-html > :first-child {
+  margin-top: 0;
+}
+
+.flow-html h1,
+.flow-html h2,
+.flow-html h3,
+.flow-html h4,
+.flow-html h5,
+.flow-html h6 {
+  margin: 1.4em 0 0.55em;
+  line-height: 1.35;
+}
+
+.flow-html p,
+.flow-html ul,
+.flow-html ol,
+.flow-html blockquote,
+.flow-html pre,
+.flow-html table {
+  margin: 0 0 1em;
+}
+
+.flow-html ul,
+.flow-html ol {
+  padding-left: 1.6em;
+}
+
+.flow-html img {
+  max-width: 100%;
+  height: auto;
+}
+
+.flow-html blockquote {
+  padding-left: 1em;
+  border-left: 3px solid var(--line-strong);
+  color: #4a4a4f;
+}
+
+.flow-html pre {
+  padding: 0.8em 1em;
+  overflow-x: auto;
+  border-radius: 4px;
+  background: #f4f4f5;
+}
+
+.flow-html code {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.9em;
+}
+
+.flow-html a {
+  color: #3b5bdb;
+}
+
 /* 书库封面先垫在首屏下面：打开文档时立刻有内容，真实画布画完后再替换。 */
 .page-preview {
   position: absolute;

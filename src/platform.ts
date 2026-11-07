@@ -11,8 +11,8 @@ export async function pickDocumentPath(): Promise<string | null> {
     multiple: false,
     directory: false,
     title: '打开文档',
-    // HTML / EPUB 阅读器落地后再把扩展名加进来。
-    filters: [{ name: '文档', extensions: ['pdf', 'txt'] }],
+    // EPUB 阅读器落地后再把扩展名加进来。
+    filters: [{ name: '文档', extensions: ['pdf', 'txt', 'html', 'htm'] }],
   });
 
   return typeof selected === 'string' ? selected : null;
