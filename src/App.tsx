@@ -106,6 +106,8 @@ interface OpenedDoc {
   bookmarks: Bookmark[];
   /** 书库封面（首页缩略图）；打开文档时先垫在首屏下面，避免长时间白屏。 */
   cover?: string;
+  /** 网页剪藏的来源 URL，仅桌面端索引里有。 */
+  sourceUrl?: string;
   dispose: () => void;
 }
 
@@ -188,6 +190,14 @@ function persistScanEnhanceDocs(docs: Record<string, boolean>): void {
     localStorage.setItem(SCAN_ENHANCE_DOCS_KEY, JSON.stringify(docs));
   } catch {
     // 隐私模式或存储被禁用时只影响下次启动，不阻止当前切换。
+  }
+}
+
+function sourceHost(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return url;
   }
 }
 
@@ -1208,6 +1218,7 @@ export default function App() {
       flow,
       bookmarks: input.bookmarks ?? [],
       cover: input.desktopMeta?.cover ? assetUrl(input.desktopMeta.cover) : undefined,
+      sourceUrl: input.desktopMeta?.sourceUrl || undefined,
       dispose: () => {
         void input.task?.destroy().catch(() => undefined);
       },
@@ -1298,8 +1309,10 @@ export default function App() {
               author: meta.author ? undefined : flow.author,
             });
             // 标题/作者刚解析出来时重画文字封面，避免书库一直显示文件名。
+            // EPUB 的封面由书库优先提取原生封面，不能在这里用文字封面覆盖。
             if (
               isTauri() &&
+              input.kind !== 'epub' &&
               ((!meta.title && flow.title) || (!meta.author && flow.author))
             ) {
               const bytes = await makeTextCover({
@@ -2603,6 +2616,11 @@ export default function App() {
             <span className="doc-id">
               第 {currentPage + 1} / {doc.pageCount} 页
             </span>
+            {doc.sourceUrl && (
+              <span className="doc-id doc-source" title={doc.sourceUrl}>
+                来源 {sourceHost(doc.sourceUrl)}
+              </span>
+            )}
           </div>
         )}
 

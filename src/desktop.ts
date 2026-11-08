@@ -62,6 +62,8 @@ export interface HtmlSnapshotInput {
   html: string;
   title: string;
   author: string;
+  /** 网页剪藏的最终 URL；本地 HTML 快照传空字符串。 */
+  sourceUrl: string;
 }
 
 /** 抓取公开网页；网络与大小限制在 Rust 侧执行。 */

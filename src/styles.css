@@ -540,6 +540,12 @@ select {
   white-space: nowrap;
 }
 
+.doc-source {
+  max-width: 170px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .save-state {
   display: inline-flex;
   align-items: center;
@@ -3118,6 +3124,48 @@ button.color-dot:hover {
   margin-top: 8px !important;
   color: var(--muted) !important;
   font-size: 12px;
+}
+
+.html-import-file {
+  overflow: hidden;
+  margin-bottom: 12px !important;
+  color: var(--ink);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.html-import-option {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  padding: 10px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.html-import-option input {
+  margin-top: 3px;
+  accent-color: var(--accent);
+}
+
+.html-import-option span {
+  display: grid;
+  gap: 3px;
+}
+
+.html-import-option strong {
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.html-import-option small {
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.6;
 }
 
 .confirm-actions .ghost,

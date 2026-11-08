@@ -5,6 +5,7 @@ import type { OutlineEntry } from './outline';
 interface ManifestItem {
   href: string;
   mediaType: string;
+  properties: string;
 }
 
 const DC_NS = 'http://purl.org/dc/elements/1.1/';
@@ -16,6 +17,8 @@ const MAX_CHAPTER_BYTES = 16 * 1024 * 1024;
 const MAX_TOTAL_TEXT_BYTES = 32 * 1024 * 1024;
 const MAX_CONTAINER_BYTES = 1024 * 1024;
 const MAX_OPF_BYTES = 4 * 1024 * 1024;
+/** 书库封面会重新编码成 JPEG；源封面先限制在 2 MB。 */
+const MAX_COVER_BYTES = 2 * 1024 * 1024;
 
 function parseXml(text: string, type: DOMParserSupportedType): Document {
   return new DOMParser().parseFromString(text, type);
@@ -130,6 +133,109 @@ async function inlineImages(
   }
 }
 
+export interface EpubCover {
+  bytes: Uint8Array;
+  mediaType: string;
+}
+
+function imageMimeFromHref(href: string): string | null {
+  const extension = href.split('#')[0].split('?')[0].split('.').pop()?.toLowerCase();
+  switch (extension) {
+    case 'png':
+      return 'image/png';
+    case 'jpg':
+    case 'jpeg':
+      return 'image/jpeg';
+    case 'gif':
+      return 'image/gif';
+    case 'webp':
+      return 'image/webp';
+    case 'avif':
+      return 'image/avif';
+    case 'bmp':
+      return 'image/bmp';
+    default:
+      return null;
+  }
+}
+
+function imageMime(item: ManifestItem): string | null {
+  if (/^image\/svg\+xml/i.test(item.mediaType)) return null;
+  if (/^image\//i.test(item.mediaType)) return item.mediaType;
+  return imageMimeFromHref(item.href);
+}
+
+/**
+ * 只读 OPF 与封面文件，按 EPUB3 cover-image → EPUB2 meta[name=cover] →
+ * 文件名兜底寻找原生封面；找不到或超过 2 MB 时返回 null。
+ */
+export async function extractEpubCover(
+  data: ArrayBuffer | Uint8Array,
+): Promise<EpubCover | null> {
+  const { default: JSZip } = await import('jszip');
+  const zip = await JSZip.loadAsync(data);
+
+  const containerFile = zip.file('META-INF/container.xml');
+  if (!containerFile) return null;
+  const container = parseXml(
+    await readZipText(containerFile, MAX_CONTAINER_BYTES, 'container.xml '),
+    'application/xml',
+  );
+  const rootfile = container.querySelector('rootfile')?.getAttribute('full-path');
+  if (!rootfile) return null;
+
+  const opfFile = zip.file(rootfile);
+  if (!opfFile) return null;
+  const opf = parseXml(await readZipText(opfFile, MAX_OPF_BYTES, 'OPF '), 'application/xml');
+  const opfDir = dirOf(rootfile);
+
+  const items = Array.from(opf.getElementsByTagName('item'))
+    .map((item) => {
+      const id = item.getAttribute('id') ?? '';
+      return {
+        id,
+        href: item.getAttribute('href') ?? '',
+        mediaType: item.getAttribute('media-type') ?? '',
+        properties: item.getAttribute('properties') ?? '',
+      };
+    })
+    .filter((item) => item.id && item.href);
+  const byId = new Map(items.map((item) => [item.id, item]));
+
+  const isImage = (item: ManifestItem): boolean => Boolean(imageMime(item));
+  let cover = items.find(
+    (item) => isImage(item) && item.properties.split(/\s+/).includes('cover-image'),
+  );
+
+  if (!cover) {
+    const coverId = Array.from(opf.getElementsByTagName('meta'))
+      .find((meta) => (meta.getAttribute('name') ?? '').toLowerCase() === 'cover')
+      ?.getAttribute('content');
+    const candidate = coverId ? byId.get(coverId) : undefined;
+    if (candidate && isImage(candidate)) cover = candidate;
+  }
+
+  cover ??= items.find(
+    (item) => isImage(item) && /cover/i.test(`${item.id} ${item.href}`),
+  );
+  if (!cover) return null;
+
+  const path = resolvePath(opfDir, cover.href);
+  const file = zip.file(path);
+  if (!file) return null;
+  const declared = declaredBytes(file);
+  if (declared !== null && declared > MAX_COVER_BYTES) return null;
+
+  try {
+    const bytes = await file.async('uint8array');
+    if (bytes.byteLength === 0 || bytes.byteLength > MAX_COVER_BYTES) return null;
+    const mediaType = imageMime(cover);
+    return mediaType ? { bytes, mediaType } : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * 解析 EPUB：container.xml → OPF → spine 顺序读取章节。
  * 每个 spine 项按 HTML 分页模型拆成若干 unit，标题继续生成目录。
@@ -163,6 +269,7 @@ export async function buildEpubDocument(
     manifest.set(id, {
       href,
       mediaType: item.getAttribute('media-type') ?? '',
+      properties: item.getAttribute('properties') ?? '',
     });
   }
 

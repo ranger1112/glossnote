@@ -57,6 +57,8 @@ export interface DocumentMeta {
   position: number;
   /** 导入时的原始路径，仅本机使用；HTML 的相对图片按它解析。 */
   sourcePath: string;
+  /** 网页剪藏的来源 URL，仅本机使用。 */
+  sourceUrl: string;
   annotationCount: number;
 }
 

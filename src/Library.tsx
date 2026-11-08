@@ -28,9 +28,9 @@ import {
 } from './desktop';
 import { extractDocumentText } from './pdfText';
 import { buildHtmlDocument, buildTextDocument, type FlowDocument } from './flow';
-import { buildEpubDocument } from './epub';
-import { makeTextCover } from './covers';
-import { buildWebSnapshot } from './webclip';
+import { buildEpubDocument, extractEpubCover } from './epub';
+import { makeImageCover, makeTextCover } from './covers';
+import { buildLocalHtmlSnapshot, buildWebSnapshot, readLocalHtml } from './webclip';
 import { isTauri, pickDocumentPath } from './platform';
 import { IconSearch, IconStar, IconTrash, IconUpload } from './icons';
 import type {
@@ -46,6 +46,7 @@ import { errorText } from './errors';
 import { folderNames, matchesFilters, reorderDocuments, sortDocuments } from './libraryView';
 import { LibrarySidebar } from './LibrarySidebar';
 import { ConfirmDialog } from './ConfirmDialog';
+import { LocalHtmlImportDialog } from './LocalHtmlImportDialog';
 import { UrlImportDialog } from './UrlImportDialog';
 
 interface LibraryProps {
@@ -121,6 +122,11 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
   const [urlBusy, setUrlBusy] = useState(false);
   const [urlProgress, setUrlProgress] = useState('');
   const [urlError, setUrlError] = useState('');
+  const [pendingHtml, setPendingHtml] = useState<{
+    path: string;
+    name: string;
+    freeze: boolean;
+  } | null>(null);
   const [query, setQuery] = useState('');
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [pageHits, setPageHits] = useState<PageHit[]>([]);
@@ -161,11 +167,31 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
         if (!doc) return;
 
         try {
-          // 流式文档直接画一张文字封面，不必解析文件。
+          // 流式文档优先用原生 EPUB 封面，其余情况画一张文字封面。
           if ((doc.kind ?? 'pdf') !== 'pdf') {
-            const bytes = await makeTextCover(doc);
-            if (coverRun.current !== run || !bytes) return;
-            const updated = await saveCover(doc.id, bytes);
+            let updated: DocumentMeta | null = null;
+            if ((doc.kind ?? 'pdf') === 'epub') {
+              try {
+                const response = await fetch(assetUrl(doc.path));
+                if (response.ok) {
+                  const native = await extractEpubCover(await response.arrayBuffer());
+                  if (native) {
+                    const bytes = await makeImageCover(native.bytes, native.mediaType);
+                    if (bytes) updated = await saveCover(doc.id, bytes);
+                  }
+                }
+              } catch (error) {
+                // 封面损坏或压缩包异常时退回文字封面，不阻塞书库。
+                console.warn('提取 EPUB 封面失败', doc.name, error);
+              }
+            }
+
+            if (coverRun.current !== run) return;
+            if (!updated) {
+              const bytes = await makeTextCover(doc);
+              if (coverRun.current !== run || !bytes) return;
+              updated = await saveCover(doc.id, bytes);
+            }
             if (coverRun.current !== run) return;
             setDocs((current) =>
               current.map((item) =>
@@ -416,31 +442,86 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
     };
   }, [query, onMessage, searchRevision]);
 
+  const importPicked = useCallback(
+    async (path: string, freeze: boolean) => {
+      setImporting(true);
+      onMessage(freeze ? '正在冻结本地 HTML…' : '正在导入文档…');
+      try {
+        let result;
+        let failed = 0;
+
+        if (freeze) {
+          // 本地 HTML 不走 import_document：正文与图片生成单文件快照，原文件不复制。
+          const source = await readLocalHtml(path, assetUrl);
+          const snapshot = await buildLocalHtmlSnapshot(source, path, {
+            toAssetUrl: assetUrl,
+          });
+          if (!snapshot.html.trim()) throw new Error('没有提取到可读正文');
+          const name = path.split(/[\\/]/).pop()?.replace(/\.html?$/i, '') || 'document';
+          result = await importHtmlSnapshot({
+            name,
+            html: snapshot.html,
+            title: snapshot.title ?? '',
+            author: snapshot.author ?? '',
+            sourceUrl: '',
+          });
+          failed = snapshot.failed;
+        } else {
+          result = await importDocument(path);
+        }
+
+        let document = result.document;
+        // 当前停在某个文件夹里时，新导入的文档直接归进去。
+        if (folderFilter) {
+          document = await organizeDocument(document.id, { folder: folderFilter });
+        }
+        setDocs((current) => [document, ...current.filter((item) => item.id !== document.id)]);
+        onMessage(
+          failed > 0
+            ? `已导入「${document.title || document.name}」，${failed} 张图片未能保存。`
+            : '',
+        );
+        onOpen(document.id);
+      } catch (error) {
+        onMessage(`导入失败：${errorText(error)}`);
+      } finally {
+        setImporting(false);
+      }
+    },
+    [folderFilter, onMessage, onOpen],
+  );
+
   const handleImport = useCallback(async () => {
     setImporting(true);
-    onMessage('正在导入文档…');
     try {
       const path = await pickDocumentPath();
       if (!path) {
         onMessage('');
         return;
       }
-
-      const result = await importDocument(path);
-      let document = result.document;
-      // 当前停在某个文件夹里时，新导入的文档直接归进去。
-      if (folderFilter) {
-        document = await organizeDocument(document.id, { folder: folderFilter });
+      if (/\.html?$/i.test(path)) {
+        setPendingHtml({
+          path,
+          name: path.split(/[\\/]/).pop() ?? 'document.html',
+          freeze: true,
+        });
+        return;
       }
-      setDocs((current) => [document, ...current.filter((item) => item.id !== document.id)]);
-      onMessage('');
-      onOpen(document.id);
+      setImporting(false);
+      await importPicked(path, false);
     } catch (error) {
       onMessage(`导入失败：${errorText(error)}`);
     } finally {
       setImporting(false);
     }
-  }, [folderFilter, onMessage, onOpen]);
+  }, [importPicked, onMessage]);
+
+  const confirmLocalHtml = useCallback(() => {
+    const pending = pendingHtml;
+    if (!pending) return;
+    setPendingHtml(null);
+    void importPicked(pending.path, pending.freeze);
+  }, [importPicked, pendingHtml]);
 
   const handleImportUrl = useCallback(async () => {
     const raw = urlValue.trim();
@@ -487,6 +568,7 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
         html: snapshot.html,
         title: snapshot.title ?? '',
         author: snapshot.author ?? '',
+        sourceUrl: page.finalUrl,
       });
 
       let document = result.document;
@@ -1418,6 +1500,18 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
             setUrlImportOpen(false);
             setUrlError('');
           }}
+        />
+      )}
+
+      {pendingHtml && (
+        <LocalHtmlImportDialog
+          fileName={pendingHtml.name}
+          freeze={pendingHtml.freeze}
+          onFreezeChange={(freeze) =>
+            setPendingHtml((current) => (current ? { ...current, freeze } : current))
+          }
+          onConfirm={confirmLocalHtml}
+          onCancel={() => setPendingHtml(null)}
         />
       )}
     </main>

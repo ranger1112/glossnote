@@ -743,6 +743,7 @@ pub fn import_document(app: &AppHandle, source: &str) -> Result<ImportResult, St
         // 新导入的文档排在手动排序的最后；之后重排会写成 0..N。
         position: now,
         source_path,
+        source_url: String::new(),
         meta_updated_at: 0,
         annotation_count: 0,
     };
@@ -771,6 +772,9 @@ pub struct HtmlSnapshotInput {
     pub title: String,
     #[serde(default)]
     pub author: String,
+    /// 网页剪藏的最终 URL；本地 HTML 快照为空，只存本机索引。
+    #[serde(default)]
+    pub source_url: String,
 }
 
 /// 把前端生成的单文件 HTML 快照写进书库；图片已经内联成 data URL。
@@ -811,6 +815,12 @@ fn import_html_snapshot_into(
         let (files, ignored) = load_sidecars_for(root, &id)?;
         db::touch_document(conn, &id, now_ms())?;
         let mut document = db::find_by_id(conn, &id)?.ok_or_else(|| "文档不存在".to_string())?;
+        // 同一篇正文可能先以本地快照导入；再次从网址导入时补上来源，不覆盖已有值。
+        let source_url = input.source_url.trim();
+        if document.source_url.is_empty() && !source_url.is_empty() {
+            document.source_url = source_url.to_string();
+            db::upsert_document(conn, &document)?;
+        }
         let annotations = merge_document(conn, root, &mut document, files, ignored)?;
         let document = db::find_by_id(conn, &id)?.unwrap_or(document);
         return Ok(ImportResult {
@@ -860,6 +870,7 @@ fn import_html_snapshot_into(
         folder: String::new(),
         position: now,
         source_path: String::new(),
+        source_url: input.source_url.trim().to_string(),
         meta_updated_at: 0,
         annotation_count: 0,
     };
@@ -1007,6 +1018,10 @@ pub fn scan(app: &AppHandle) -> Result<ScanReport, String> {
             source_path: prior
                 .as_ref()
                 .map(|row| row.source_path.clone())
+                .unwrap_or_default(),
+            source_url: prior
+                .as_ref()
+                .map(|row| row.source_url.clone())
                 .unwrap_or_default(),
             meta_updated_at: prior.as_ref().map(|row| row.meta_updated_at).unwrap_or(0),
             annotation_count: 0,
@@ -2451,6 +2466,7 @@ mod tests {
             folder: String::new(),
             position: 0,
             source_path: String::new(),
+            source_url: String::new(),
             meta_updated_at: 0,
             annotation_count: 0,
         }
@@ -3216,12 +3232,14 @@ mod tests {
             html: "<html><body><p>hello</p></body></html>".to_string(),
             title: "标题".to_string(),
             author: "作者".to_string(),
+            source_url: "https://example.com/posts/1".to_string(),
         };
 
         let first = import_html_snapshot_into(&conn, &root, make_input()).unwrap();
         assert_eq!(first.document.kind, "html");
         assert_eq!(first.document.title, "标题");
         assert_eq!(first.document.source_path, "");
+        assert_eq!(first.document.source_url, "https://example.com/posts/1");
         assert!(Path::new(&first.document.path).is_file());
 
         let again = import_html_snapshot_into(&conn, &root, make_input()).unwrap();
@@ -3237,6 +3255,7 @@ mod tests {
                 html: "<html><body><p>different</p></body></html>".to_string(),
                 title: "标题".to_string(),
                 author: String::new(),
+                source_url: String::new(),
             },
         )
         .unwrap();
@@ -3250,8 +3269,50 @@ mod tests {
             html: "x".repeat(MAX_SNAPSHOT_BYTES + 1),
             title: String::new(),
             author: String::new(),
+            source_url: String::new(),
         };
         assert!(import_html_snapshot_into(&conn, &root, oversized).is_err());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fills_source_url_when_duplicate_snapshot_is_imported() {
+        let dir = temp_dir("html-source-url");
+        let root = dir.join("library");
+        ensure_dirs(&root).unwrap();
+        let conn = db::open(&dir.join("test.db")).unwrap();
+        let html = "<html><body><p>same body</p></body></html>".to_string();
+
+        let local = import_html_snapshot_into(
+            &conn,
+            &root,
+            HtmlSnapshotInput {
+                name: "本地快照".to_string(),
+                html: html.clone(),
+                title: String::new(),
+                author: String::new(),
+                source_url: String::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(local.document.source_url, "");
+
+        let from_web = import_html_snapshot_into(
+            &conn,
+            &root,
+            HtmlSnapshotInput {
+                name: "网页快照".to_string(),
+                html,
+                title: String::new(),
+                author: String::new(),
+                source_url: "https://example.com/article".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(from_web.document.id, local.document.id);
+        assert_eq!(from_web.document.source_url, "https://example.com/article");
+        assert_eq!(fs::read_dir(root.join("books")).unwrap().count(), 1);
 
         let _ = fs::remove_dir_all(&dir);
     }

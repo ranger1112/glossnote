@@ -7,6 +7,48 @@ export interface TextCoverSource {
   author?: string;
 }
 
+/** 把 EPUB 原生封面缩放并转成 JPEG，统一书库封面的存储格式。 */
+export async function makeImageCover(
+  bytes: Uint8Array,
+  mime: string,
+): Promise<Uint8Array | null> {
+  if (!mime.startsWith('image/') || mime === 'image/svg+xml') return null;
+
+  // 复制到独立的 ArrayBuffer，避免 SharedArrayBuffer 形态不符合 BlobPart。
+  const copy = bytes.slice();
+  const url = URL.createObjectURL(new Blob([copy.buffer], { type: mime }));
+  try {
+    const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const element = new Image();
+      element.onload = () => resolve(element);
+      element.onerror = () => reject(new Error('封面图片无法解码'));
+      element.src = url;
+    });
+    if (!image.naturalWidth || !image.naturalHeight) return null;
+
+    // 限制最大边，避免超大插图在书库封面里浪费内存。
+    const scale = Math.min(480 / image.naturalWidth, 640 / image.naturalHeight, 1);
+    const width = Math.max(1, Math.round(image.naturalWidth * scale));
+    const height = Math.max(1, Math.round(image.naturalHeight * scale));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext('2d');
+    if (!context) return null;
+    context.drawImage(image, 0, 0, width, height);
+
+    const blob = await new Promise<Blob | null>((resolve) => {
+      canvas.toBlob(resolve, 'image/jpeg', 0.86);
+    });
+    return blob ? new Uint8Array(await blob.arrayBuffer()) : null;
+  } catch {
+    return null;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 /** 流式文档没有可渲染的首页，用标题/作者画一张 320×440 的封面。 */
 export async function makeTextCover(doc: TextCoverSource): Promise<Uint8Array | null> {
   const canvas = document.createElement('canvas');

@@ -57,6 +57,54 @@ async function makeEpub(): Promise<number[]> {
   return Array.from(bytes);
 }
 
+async function makeEpubWithCover(version: '3' | '2' | 'none'): Promise<number[]> {
+  const zip = new JSZip();
+  zip.file('mimetype', 'application/epub+zip');
+  zip.file(
+    'META-INF/container.xml',
+    `<?xml version="1.0"?>
+     <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+       <rootfiles>
+         <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+       </rootfiles>
+     </container>`,
+  );
+  const metadata =
+    version === '2' ? '<meta name="cover" content="cover-img"/>' : '';
+  const coverItem =
+    version === '3'
+      ? '<item id="cover" href="images/cover.png" media-type="image/png" properties="cover-image"/>'
+      : version === '2'
+        ? '<item id="cover-img" href="images/cover.png" media-type="image/png"/>'
+        : '';
+  zip.file(
+    'OEBPS/content.opf',
+    `<?xml version="1.0"?>
+     <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id">
+       <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+         <dc:title>封面测试</dc:title>
+         ${metadata}
+       </metadata>
+       <manifest>
+         <item id="c1" href="chapter.xhtml" media-type="application/xhtml+xml"/>
+         <item id="pic" href="images/pic.png" media-type="image/png"/>
+         ${coverItem}
+       </manifest>
+       <spine><itemref idref="c1"/></spine>
+     </package>`,
+  );
+  zip.file(
+    'OEBPS/chapter.xhtml',
+    '<html xmlns="http://www.w3.org/1999/xhtml"><body><p>正文</p></body></html>',
+  );
+  const png = Uint8Array.from(atob(PNG_BASE64), (char) => char.charCodeAt(0));
+  zip.file('OEBPS/images/pic.png', png);
+  if (version !== 'none') zip.file('OEBPS/images/cover.png', png);
+
+  const bytes = await zip.generateAsync({ type: 'uint8array' });
+  return Array.from(bytes);
+}
+
 async function openEpub(page: Page, bytes: number[]) {
   await page.locator('input[type=file]').waitFor({ state: 'attached' });
   await page.evaluate((data) => {
@@ -138,4 +186,45 @@ test('EPUB：spine 分章、图片内联、目录与划词高亮', async ({ page
   await openEpub(page, bytes);
   await expect(page.locator('.highlight').first()).toBeVisible();
   expect(errors).toEqual([]);
+});
+
+test('EPUB 原生封面：EPUB3 属性与 EPUB2 meta 都能提取并转成 JPEG', async ({ page }) => {
+  await page.goto('/');
+  const [epub3, epub2, none] = await Promise.all([
+    makeEpubWithCover('3'),
+    makeEpubWithCover('2'),
+    makeEpubWithCover('none'),
+  ]);
+
+  const result = await page.evaluate(
+    async ({ epub3, epub2, none }) => {
+      const epub = (await new Function('return import("/src/epub.ts")')()) as typeof import(
+        '../src/epub'
+      );
+      const covers = (await new Function('return import("/src/covers.ts")')()) as typeof import(
+        '../src/covers'
+      );
+
+      const read = async (data: number[]) => {
+        const cover = await epub.extractEpubCover(new Uint8Array(data));
+        return cover ? { mediaType: cover.mediaType, length: cover.bytes.length } : null;
+      };
+      const first = await epub.extractEpubCover(new Uint8Array(epub3));
+      const jpeg = first ? await covers.makeImageCover(first.bytes, first.mediaType) : null;
+
+      return {
+        epub3: await read(epub3),
+        epub2: await read(epub2),
+        none: await read(none),
+        jpeg: jpeg ? Array.from(jpeg.slice(0, 2)) : null,
+      };
+    },
+    { epub3, epub2, none },
+  );
+
+  expect(result.epub3?.mediaType).toBe('image/png');
+  expect(result.epub3?.length).toBeGreaterThan(0);
+  expect(result.epub2?.mediaType).toBe('image/png');
+  expect(result.none).toBeNull();
+  expect(result.jpeg).toEqual([0xff, 0xd8]);
 });

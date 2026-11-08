@@ -136,9 +136,13 @@ export interface HtmlArticle {
 export async function extractHtmlArticle(
   source: string,
   baseUrl?: string,
+  prepare?: (document: Document) => void,
 ): Promise<HtmlArticle> {
   const { Readability } = await import('@mozilla/readability');
   const parsed = new DOMParser().parseFromString(source, 'text/html');
+  // 本地 HTML 先把相对图片换成 asset 地址；必须赶在 Readability 之前，
+  // 否则它会按应用 origin 解析，源文件旁边的图片就找不回来了。
+  prepare?.(parsed);
   // Readability 会按 document.baseURI 把相对图片转成绝对地址；网页剪藏必须
   // 以最终页面 URL 为基准，否则会落到应用自己的 origin（localhost:1420）。
   if (baseUrl) {

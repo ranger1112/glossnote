@@ -28,6 +28,7 @@ function doc(id: string, patch: Partial<DocumentMeta> = {}): DocumentMeta {
     folder: '',
     position: 0,
     sourcePath: '',
+    sourceUrl: '',
     annotationCount: 0,
     ...patch,
   };

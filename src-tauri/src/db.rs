@@ -7,7 +7,7 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-const DOCUMENT_SELECT: &str = "SELECT d.id, d.name, d.title, d.author, d.page_count, d.rel_path, d.size, d.mtime, d.added_at, d.last_opened_at, d.cover, d.last_page, d.favorite, d.tags, d.bookmarks, d.folder, d.position, d.meta_updated_at, (SELECT COUNT(*) FROM annotations a WHERE a.doc_id = d.id AND a.deleted = 0), d.kind, d.source_path FROM documents d";
+const DOCUMENT_SELECT: &str = "SELECT d.id, d.name, d.title, d.author, d.page_count, d.rel_path, d.size, d.mtime, d.added_at, d.last_opened_at, d.cover, d.last_page, d.favorite, d.tags, d.bookmarks, d.folder, d.position, d.meta_updated_at, (SELECT COUNT(*) FROM annotations a WHERE a.doc_id = d.id AND a.deleted = 0), d.kind, d.source_path, d.source_url FROM documents d";
 
 pub fn open(path: &Path) -> Result<Connection, String> {
     let conn = Connection::open(path).map_err(|error| format!("打开数据库失败：{error}"))?;
@@ -103,6 +103,7 @@ fn migrate(conn: &Connection) -> Result<(), String> {
           folder TEXT NOT NULL DEFAULT '',
           position INTEGER NOT NULL DEFAULT 0,
           source_path TEXT NOT NULL DEFAULT '',
+          source_url TEXT NOT NULL DEFAULT '',
           meta_updated_at INTEGER NOT NULL DEFAULT 0,
           text_indexed_at INTEGER NOT NULL DEFAULT 0
         );
@@ -180,6 +181,7 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     ensure_column(conn, "documents", "folder", "TEXT NOT NULL DEFAULT ''")?;
     ensure_column(conn, "documents", "position", "INTEGER NOT NULL DEFAULT 0")?;
     ensure_column(conn, "documents", "source_path", "TEXT NOT NULL DEFAULT ''")?;
+    ensure_column(conn, "documents", "source_url", "TEXT NOT NULL DEFAULT ''")?;
     ensure_column(
         conn,
         "documents",
@@ -341,6 +343,7 @@ fn row_to_document(row: &Row<'_>) -> rusqlite::Result<DocumentRow> {
         annotation_count: row.get::<_, i64>(18)? as usize,
         kind: row.get(19)?,
         source_path: row.get(20)?,
+        source_url: row.get(21)?,
     })
 }
 
@@ -376,8 +379,8 @@ pub fn upsert_document(conn: &Connection, document: &DocumentRow) -> Result<(), 
         .map_err(|error| format!("序列化书签失败：{error}"))?;
     conn.execute(
         "INSERT INTO documents
-           (id, name, title, author, page_count, rel_path, size, mtime, added_at, last_opened_at, cover, last_page, favorite, tags, bookmarks, folder, position, meta_updated_at, kind, source_path)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+           (id, name, title, author, page_count, rel_path, size, mtime, added_at, last_opened_at, cover, last_page, favorite, tags, bookmarks, folder, position, meta_updated_at, kind, source_path, source_url)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
          ON CONFLICT(id) DO UPDATE SET
            name = excluded.name,
            kind = excluded.kind,
@@ -395,6 +398,7 @@ pub fn upsert_document(conn: &Connection, document: &DocumentRow) -> Result<(), 
            folder = excluded.folder,
            position = excluded.position,
            source_path = excluded.source_path,
+           source_url = excluded.source_url,
            meta_updated_at = excluded.meta_updated_at",
         params![
             document.id,
@@ -417,6 +421,7 @@ pub fn upsert_document(conn: &Connection, document: &DocumentRow) -> Result<(), 
             document.meta_updated_at,
             document.kind,
             document.source_path,
+            document.source_url,
         ],
     )
     .map_err(|error| format!("写入文档失败：{error}"))?;

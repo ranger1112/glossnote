@@ -28,6 +28,8 @@ pub struct DocumentRow {
     pub position: i64,
     /// 导入时的原始路径，仅本机使用：HTML 的相对图片按它解析；不写 sidecar。
     pub source_path: String,
+    /// 网页剪藏的来源 URL，仅本机使用，不写 sidecar。
+    pub source_url: String,
     /// 收藏、文档标签与文件夹的 LWW 时间戳，随 sidecar 同步。
     pub meta_updated_at: i64,
     pub annotation_count: usize,
@@ -63,6 +65,7 @@ impl DocumentRow {
             folder: self.folder.clone(),
             position: self.position,
             source_path: self.source_path.clone(),
+            source_url: self.source_url.clone(),
             annotation_count: self.annotation_count,
         }
     }
@@ -91,6 +94,8 @@ pub struct Document {
     pub position: i64,
     /// 导入时的原始路径，仅本机使用。
     pub source_path: String,
+    /// 网页剪藏的来源 URL，仅本机使用。
+    pub source_url: String,
     pub annotation_count: usize,
 }
 
