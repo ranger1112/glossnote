@@ -3091,6 +3091,35 @@ button.color-dot:hover {
   margin-top: 18px;
 }
 
+.url-import-input {
+  width: 100%;
+  margin-top: 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+
+.url-import-input:focus {
+  outline: 2px solid var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.url-import-error {
+  margin-top: 8px !important;
+  color: #c0392b !important;
+  font-size: 12px;
+}
+
+.url-import-progress {
+  margin-top: 8px !important;
+  color: var(--muted) !important;
+  font-size: 12px;
+}
+
 .confirm-actions .ghost,
 .confirm-actions .primary {
   height: 30px;

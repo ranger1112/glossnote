@@ -123,6 +123,65 @@ function sanitizeFragment(root: Element): void {
   }
 }
 
+export interface HtmlArticle {
+  html: string;
+  title?: string;
+  author?: string;
+}
+
+/**
+ * Readability 提取正文，但不做清理与图片改写。
+ * 网页快照需要先按原始 URL 收集并内联图片，最后再统一 sanitize。
+ */
+export async function extractHtmlArticle(
+  source: string,
+  baseUrl?: string,
+): Promise<HtmlArticle> {
+  const { Readability } = await import('@mozilla/readability');
+  const parsed = new DOMParser().parseFromString(source, 'text/html');
+  // Readability 会按 document.baseURI 把相对图片转成绝对地址；网页剪藏必须
+  // 以最终页面 URL 为基准，否则会落到应用自己的 origin（localhost:1420）。
+  if (baseUrl) {
+    try {
+      const base = parsed.createElement('base');
+      base.setAttribute('href', new URL(baseUrl).href);
+      parsed.head.append(base);
+    } catch {
+      // baseUrl 不合法时保持原样，让调用方按原始 src 处理。
+    }
+  }
+
+  let article: ReturnType<ReadabilityType['parse']> = null;
+  try {
+    article = new Readability(parsed).parse();
+  } catch {
+    article = null;
+  }
+
+  if (article?.content) {
+    return {
+      html: article.content,
+      title: article.title?.trim() || undefined,
+      author: article.byline?.trim() || undefined,
+    };
+  }
+
+  // Readability 会改写传入的 document，兜底路径重新解析一次。
+  const fallback = new DOMParser().parseFromString(source, 'text/html');
+  return {
+    html: fallback.body.innerHTML,
+    title: fallback.title?.trim() || undefined,
+  };
+}
+
+/** 对一段 HTML 片段执行与阅读区相同的清理。 */
+export function sanitizeHtml(html: string): string {
+  const container = document.createElement('div');
+  container.innerHTML = html;
+  sanitizeFragment(container);
+  return container.innerHTML;
+}
+
 /**
  * 把 HTML 正文拆成阅读页：通用容器按累计文本量下钻，再按目标字数分组。
  * 标题同时写入大纲，目录面板可以直接跳转。

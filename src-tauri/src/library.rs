@@ -25,6 +25,7 @@ const MAX_DOCUMENT_BYTES: u64 = 200 * 1024 * 1024;
 /// 文本会整份读进前端内存，限制比 PDF 更保守。
 const MAX_TEXT_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_EPUB_BYTES: u64 = 50 * 1024 * 1024;
+const MAX_SNAPSHOT_BYTES: usize = 24 * 1024 * 1024;
 const SUPPORTED_EXTENSIONS: [&str; 5] = ["pdf", "txt", "html", "htm", "epub"];
 const SIDECAR_VERSION: u32 = 1;
 
@@ -109,6 +110,16 @@ pub fn hash_file(path: &Path) -> Result<String, String> {
         .collect())
 }
 
+fn hash_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -144,8 +155,8 @@ fn is_supported_document(path: &Path) -> bool {
     document_kind(path).is_some()
 }
 
-fn safe_name(original: &str) -> String {
-    let mut name: String = original
+fn sanitize_file_name(original: &str) -> String {
+    original
         .chars()
         .map(|character| {
             if matches!(
@@ -157,9 +168,14 @@ fn safe_name(original: &str) -> String {
                 character
             }
         })
-        .collect();
+        .collect::<String>()
+        .trim()
+        .trim_end_matches('.')
+        .to_string()
+}
 
-    name = name.trim().trim_end_matches('.').to_string();
+fn safe_name(original: &str) -> String {
+    let mut name = sanitize_file_name(original);
     if name.is_empty() {
         name = "document.pdf".to_string();
     }
@@ -170,6 +186,19 @@ fn safe_name(original: &str) -> String {
         .any(|extension| lower.ends_with(&format!(".{extension}")));
     if !supported {
         name.push_str(".pdf");
+    }
+    name
+}
+
+/// 网页快照一律保存为 .html；文件名已经带 .html/.htm 时保留。
+fn safe_html_name(original: &str) -> String {
+    let mut name = sanitize_file_name(original);
+    if name.is_empty() {
+        name = "document".to_string();
+    }
+    let lower = name.to_lowercase();
+    if !(lower.ends_with(".html") || lower.ends_with(".htm")) {
+        name.push_str(".html");
     }
     name
 }
@@ -208,6 +237,19 @@ fn copy_atomic(source: &Path, destination: &Path) -> Result<(), String> {
     if let Err(error) = fs::rename(&temp, destination) {
         let _ = fs::remove_file(destination);
         fs::rename(&temp, destination).map_err(|_| format!("保存 PDF 失败：{error}"))?;
+    }
+    Ok(())
+}
+
+fn write_atomic(destination: &Path, bytes: &[u8]) -> Result<(), String> {
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).map_err(|error| format!("创建目录失败：{error}"))?;
+    }
+    let temp = destination.with_extension(format!("tmp-{}", process::id()));
+    fs::write(&temp, bytes).map_err(|error| format!("写入快照失败：{error}"))?;
+    if let Err(error) = fs::rename(&temp, destination) {
+        let _ = fs::remove_file(&temp);
+        return Err(format!("保存快照失败：{error}"));
     }
     Ok(())
 }
@@ -720,6 +762,118 @@ pub fn import_document(app: &AppHandle, source: &str) -> Result<ImportResult, St
     })
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HtmlSnapshotInput {
+    pub name: String,
+    pub html: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub author: String,
+}
+
+/// 把前端生成的单文件 HTML 快照写进书库；图片已经内联成 data URL。
+pub fn import_html_snapshot(
+    app: &AppHandle,
+    input: HtmlSnapshotInput,
+) -> Result<ImportResult, String> {
+    let state = app.state::<AppState>();
+    let root = state.root();
+    let conn = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    import_html_snapshot_into(&conn, &root, input)
+}
+
+fn import_html_snapshot_into(
+    conn: &rusqlite::Connection,
+    root: &Path,
+    input: HtmlSnapshotInput,
+) -> Result<ImportResult, String> {
+    if input.html.trim().is_empty() {
+        return Err("网页正文为空，无法保存".to_string());
+    }
+    let bytes = input.html.as_bytes();
+    if bytes.len() > MAX_SNAPSHOT_BYTES {
+        return Err("网页内容超过 24 MB，无法保存为快照".to_string());
+    }
+
+    ensure_dirs(root)?;
+    let id = hash_bytes(bytes);
+
+    if let Some(existing) = db::find_by_id(conn, &id)? {
+        let destination = root.join(&existing.rel_path);
+        if !destination.exists() {
+            write_atomic(&destination, bytes)?;
+        }
+        let (files, ignored) = load_sidecars_for(root, &id)?;
+        db::touch_document(conn, &id, now_ms())?;
+        let mut document = db::find_by_id(conn, &id)?.ok_or_else(|| "文档不存在".to_string())?;
+        let annotations = merge_document(conn, root, &mut document, files, ignored)?;
+        let document = db::find_by_id(conn, &id)?.unwrap_or(document);
+        return Ok(ImportResult {
+            document: document.to_document(root),
+            annotations,
+        });
+    }
+
+    let now = now_ms();
+    let name = safe_html_name(&input.name);
+    let books = root.join("books");
+    let destination = unique_dest(&books, &name, &id);
+    if !destination.exists() {
+        write_atomic(&destination, bytes)?;
+    }
+
+    let relative = destination
+        .strip_prefix(root)
+        .map_err(|_| "无法计算书库相对路径".to_string())?
+        .to_string_lossy()
+        .replace('\\', "/");
+    let metadata =
+        fs::metadata(&destination).map_err(|error| format!("读取快照文件失败：{error}"))?;
+    let document_name = destination
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("document.html")
+        .to_string();
+
+    let mut row = DocumentRow {
+        id: id.clone(),
+        name: document_name,
+        kind: "html".to_string(),
+        title: input.title.trim().to_string(),
+        author: input.author.trim().to_string(),
+        page_count: 0,
+        rel_path: relative,
+        size: metadata.len(),
+        mtime: mtime_ms(&metadata),
+        added_at: now,
+        last_opened_at: now,
+        cover: String::new(),
+        last_page: 0,
+        favorite: false,
+        tags: Vec::new(),
+        bookmarks: Vec::new(),
+        folder: String::new(),
+        position: now,
+        source_path: String::new(),
+        meta_updated_at: 0,
+        annotation_count: 0,
+    };
+
+    let (files, ignored) = load_sidecars_for(root, &id)?;
+    db::upsert_document(conn, &row)?;
+    let annotations = merge_document(conn, root, &mut row, files, ignored)?;
+    let document = db::find_by_id(conn, &id)?.unwrap_or(row);
+    Ok(ImportResult {
+        document: document.to_document(root),
+        annotations,
+    })
+}
+
 pub fn scan(app: &AppHandle) -> Result<ScanReport, String> {
     let state = app.state::<AppState>();
     let root = state.root();
@@ -960,7 +1114,7 @@ pub fn read_document_text(app: &AppHandle, doc_id: &str) -> Result<String, Strin
 }
 
 /// UTF-8 优先；中文 TXT 常见 GBK/GB18030，UTF-8 解不开时按超集解码。
-fn decode_text(bytes: &[u8]) -> Result<String, String> {
+pub(crate) fn decode_text(bytes: &[u8]) -> Result<String, String> {
     let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
     match std::str::from_utf8(bytes) {
         Ok(text) => Ok(text.to_string()),
@@ -3041,6 +3195,65 @@ mod tests {
         assert_eq!(safe_name("page.htm"), "page.htm");
         assert_eq!(safe_name("report"), "report.pdf");
         assert_eq!(safe_name("   "), "document.pdf");
+    }
+
+    #[test]
+    fn safe_html_name_appends_html_extension() {
+        assert_eq!(safe_html_name("我的文章"), "我的文章.html");
+        assert_eq!(safe_html_name("page.htm"), "page.htm");
+        assert_eq!(safe_html_name("a:b?/c"), "a_b__c.html");
+        assert_eq!(safe_html_name("   "), "document.html");
+    }
+
+    #[test]
+    fn imports_html_snapshot_and_reuses_duplicate() {
+        let dir = temp_dir("html-snapshot");
+        let root = dir.join("library");
+        ensure_dirs(&root).unwrap();
+        let conn = db::open(&dir.join("test.db")).unwrap();
+        let make_input = || HtmlSnapshotInput {
+            name: "我的文章".to_string(),
+            html: "<html><body><p>hello</p></body></html>".to_string(),
+            title: "标题".to_string(),
+            author: "作者".to_string(),
+        };
+
+        let first = import_html_snapshot_into(&conn, &root, make_input()).unwrap();
+        assert_eq!(first.document.kind, "html");
+        assert_eq!(first.document.title, "标题");
+        assert_eq!(first.document.source_path, "");
+        assert!(Path::new(&first.document.path).is_file());
+
+        let again = import_html_snapshot_into(&conn, &root, make_input()).unwrap();
+        assert_eq!(again.document.id, first.document.id);
+        assert_eq!(fs::read_dir(root.join("books")).unwrap().count(), 1);
+
+        // 同名但内容不同：保留两份，文件名自动加序号。
+        let other = import_html_snapshot_into(
+            &conn,
+            &root,
+            HtmlSnapshotInput {
+                name: "我的文章".to_string(),
+                html: "<html><body><p>different</p></body></html>".to_string(),
+                title: "标题".to_string(),
+                author: String::new(),
+            },
+        )
+        .unwrap();
+        assert_ne!(other.document.id, first.document.id);
+        assert_ne!(other.document.name, first.document.name);
+        assert_eq!(fs::read_dir(root.join("books")).unwrap().count(), 2);
+
+        // 超过 24 MB 直接拒绝。
+        let oversized = HtmlSnapshotInput {
+            name: "too-big".to_string(),
+            html: "x".repeat(MAX_SNAPSHOT_BYTES + 1),
+            title: String::new(),
+            author: String::new(),
+        };
+        assert!(import_html_snapshot_into(&conn, &root, oversized).is_err());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

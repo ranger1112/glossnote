@@ -2,6 +2,12 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 新增
+
+- 书库支持从网址导入：用 Readability 提取正文，图片内联为单文件 HTML 快照；断网或源站改版后仍可阅读。
+
 ## [0.4.0] - 2026-11-07
 
 ### 新增

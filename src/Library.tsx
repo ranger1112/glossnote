@@ -3,7 +3,10 @@ import { pdfjsLib, pdfjsOpenOptions } from './pdfjs';
 import {
   assetUrl,
   deleteDocuments,
+  downloadWebAssets,
+  fetchWebPage,
   importDocument,
+  importHtmlSnapshot,
   listDocuments,
   listFolders,
   listSmartCollections,
@@ -27,7 +30,8 @@ import { extractDocumentText } from './pdfText';
 import { buildHtmlDocument, buildTextDocument, type FlowDocument } from './flow';
 import { buildEpubDocument } from './epub';
 import { makeTextCover } from './covers';
-import { pickDocumentPath } from './platform';
+import { buildWebSnapshot } from './webclip';
+import { isTauri, pickDocumentPath } from './platform';
 import { IconSearch, IconStar, IconTrash, IconUpload } from './icons';
 import type {
   DocumentMeta,
@@ -42,6 +46,7 @@ import { errorText } from './errors';
 import { folderNames, matchesFilters, reorderDocuments, sortDocuments } from './libraryView';
 import { LibrarySidebar } from './LibrarySidebar';
 import { ConfirmDialog } from './ConfirmDialog';
+import { UrlImportDialog } from './UrlImportDialog';
 
 interface LibraryProps {
   onOpen: (docId: string, page?: number) => void;
@@ -107,9 +112,15 @@ async function inspectPdf(doc: DocumentMeta): Promise<Inspection> {
 }
 
 export function Library({ onOpen, onMessage }: LibraryProps) {
+  const desktop = isTauri();
   const [docs, setDocs] = useState<DocumentMeta[]>([]);
   const [loading, setLoading] = useState(true);
   const [importing, setImporting] = useState(false);
+  const [urlImportOpen, setUrlImportOpen] = useState(false);
+  const [urlValue, setUrlValue] = useState('');
+  const [urlBusy, setUrlBusy] = useState(false);
+  const [urlProgress, setUrlProgress] = useState('');
+  const [urlError, setUrlError] = useState('');
   const [query, setQuery] = useState('');
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [pageHits, setPageHits] = useState<PageHit[]>([]);
@@ -430,6 +441,78 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
       setImporting(false);
     }
   }, [folderFilter, onMessage, onOpen]);
+
+  const handleImportUrl = useCallback(async () => {
+    const raw = urlValue.trim();
+    if (!raw) {
+      setUrlError('请输入网址');
+      return;
+    }
+    let parsed: URL;
+    try {
+      parsed = new URL(raw);
+    } catch {
+      setUrlError('网址格式不正确');
+      return;
+    }
+    if (!/^https?:$/.test(parsed.protocol)) {
+      setUrlError('只支持 http/https 网址');
+      return;
+    }
+
+    setUrlBusy(true);
+    setUrlError('');
+    setUrlProgress('正在抓取页面…');
+    try {
+      const page = await fetchWebPage(parsed.href);
+      setUrlProgress('正在提取正文…');
+      const snapshot = await buildWebSnapshot(page.html, page.finalUrl, async (urls) => {
+        setUrlProgress(`正在下载图片（${urls.length} 张）…`);
+        const assets = await downloadWebAssets(urls);
+        return new Map(
+          assets
+            .filter((asset) => asset.dataUrl)
+            .map((asset) => [asset.url, asset.dataUrl as string]),
+        );
+      });
+      if (!snapshot.html.trim()) throw new Error('没有提取到可读正文');
+
+      setUrlProgress('正在写入书库…');
+      const finalUrl = new URL(page.finalUrl);
+      const fallbackName =
+        finalUrl.pathname.split('/').filter(Boolean).pop() || finalUrl.hostname;
+      const name = (snapshot.title || fallbackName).slice(0, 80);
+      const result = await importHtmlSnapshot({
+        name,
+        html: snapshot.html,
+        title: snapshot.title ?? '',
+        author: snapshot.author ?? '',
+      });
+
+      let document = result.document;
+      // 当前停在某个文件夹里时，新导入的文档直接归进去。
+      if (folderFilter) {
+        document = await organizeDocument(document.id, { folder: folderFilter });
+      }
+      setDocs((current) => [
+        document,
+        ...current.filter((item) => item.id !== document.id),
+      ]);
+      setUrlImportOpen(false);
+      setUrlValue('');
+      onMessage(
+        snapshot.failed > 0
+          ? `已导入「${document.title || document.name}」，${snapshot.failed} 张图片未能保存。`
+          : `已导入「${document.title || document.name}」`,
+      );
+      onOpen(document.id);
+    } catch (error) {
+      setUrlError(errorText(error));
+    } finally {
+      setUrlBusy(false);
+      setUrlProgress('');
+    }
+  }, [folderFilter, onMessage, onOpen, urlValue]);
 
   // 文档里一直写着 Ctrl+O 能导入，这里把它补上。
   useEffect(() => {
@@ -798,6 +881,19 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
               onChange={(event) => setQuery(event.target.value)}
             />
           </div>
+          {desktop && (
+            <button
+              type="button"
+              className="ghost"
+              disabled={importing || urlBusy}
+              onClick={() => {
+                setUrlError('');
+                setUrlImportOpen(true);
+              }}
+            >
+              从网址导入
+            </button>
+          )}
           <button
             type="button"
             className="primary"
@@ -1306,6 +1402,22 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
           busy={deleteBusy}
           onConfirm={() => void confirmAction()}
           onCancel={() => setConfirm(null)}
+        />
+      )}
+
+      {urlImportOpen && (
+        <UrlImportDialog
+          value={urlValue}
+          busy={urlBusy}
+          progress={urlProgress}
+          error={urlError}
+          onChange={setUrlValue}
+          onConfirm={() => void handleImportUrl()}
+          onCancel={() => {
+            if (urlBusy) return;
+            setUrlImportOpen(false);
+            setUrlError('');
+          }}
         />
       )}
     </main>

@@ -9,6 +9,7 @@ mod pdf_export;
 mod search;
 mod settings;
 mod state;
+mod webclip;
 
 use crate::{
     models::{
@@ -61,6 +62,26 @@ async fn read_document_text(app: AppHandle, doc_id: String) -> Result<String, St
     tauri::async_runtime::spawn_blocking(move || library::read_document_text(&app, &doc_id))
         .await
         .map_err(|error| format!("读取文档失败：{error}"))?
+}
+
+#[tauri::command]
+async fn fetch_web_page(url: String) -> Result<webclip::FetchedWebPage, String> {
+    webclip::fetch_web_page(url).await
+}
+
+#[tauri::command]
+async fn download_web_assets(urls: Vec<String>) -> Result<Vec<webclip::DownloadedAsset>, String> {
+    webclip::download_web_assets(urls).await
+}
+
+#[tauri::command]
+async fn import_html_snapshot(
+    app: AppHandle,
+    input: library::HtmlSnapshotInput,
+) -> Result<ImportResult, String> {
+    tauri::async_runtime::spawn_blocking(move || library::import_html_snapshot(&app, input))
+        .await
+        .map_err(|error| format!("保存网页快照失败：{error}"))?
 }
 
 #[tauri::command]
@@ -557,6 +578,9 @@ fn main() {
             set_library_root,
             import_document,
             read_document_text,
+            fetch_web_page,
+            download_web_assets,
+            import_html_snapshot,
             open_document,
             save_cover,
             save_progress,

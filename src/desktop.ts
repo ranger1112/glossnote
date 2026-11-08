@@ -46,6 +46,39 @@ export function importDocument(path: string): Promise<ImportResult> {
   return invoke('import_document', { path });
 }
 
+export interface FetchedWebPage {
+  finalUrl: string;
+  html: string;
+}
+
+export interface DownloadedAsset {
+  url: string;
+  dataUrl?: string;
+  error?: string;
+}
+
+export interface HtmlSnapshotInput {
+  name: string;
+  html: string;
+  title: string;
+  author: string;
+}
+
+/** 抓取公开网页；网络与大小限制在 Rust 侧执行。 */
+export function fetchWebPage(url: string): Promise<FetchedWebPage> {
+  return invoke('fetch_web_page', { url });
+}
+
+/** 把网页图片下载成 data URL；单张失败通过返回项的 error 表示。 */
+export function downloadWebAssets(urls: string[]): Promise<DownloadedAsset[]> {
+  return invoke('download_web_assets', { urls });
+}
+
+/** 把前端生成的单文件 HTML 快照写进书库。 */
+export function importHtmlSnapshot(input: HtmlSnapshotInput): Promise<ImportResult> {
+  return invoke('import_html_snapshot', { input });
+}
+
 /** 读取 TXT / HTML 的原始文本；PDF 与 EPUB 走各自的解析路径。 */
 export function readDocumentText(docId: string): Promise<string> {
   return invoke('read_document_text', { docId });
