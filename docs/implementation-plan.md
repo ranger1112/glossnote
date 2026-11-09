@@ -14,7 +14,7 @@
 - 0.4.0 内容：TXT / HTML / EPUB 阅读、统一文档模型、流式窗口化与文字封面、本地相对图片解析、EPUB DOM 路径定位符
 - 0.5.0 内容：从网址导入单文件 HTML 快照、本地 HTML 图片冻结、EPUB 原生封面、`source_url` 本机溯源
 - 0.6.0 内容：MCP 只读接入、每篇文档的 Markdown 笔记与标注引用
-- 阶段：0.5.0 P0/P1 已完成，待桌面冒烟与发布验收；0.6.0 已实施（MCP 只读 + 文档笔记），T6 真实客户端验收待补；发版顺序 0.5.0 → 0.6.0（见 [0.6.0 技术方案](0.6.0-plan.md) 与 [0.6.0 实施方案](0.6.0-implementation-plan.md)）
+- 阶段：0.5.0 P0/P1 已完成，待桌面冒烟与发布验收；0.6.0 已实施并完成 T6 真实客户端验收（Claude Code 2.1.319，2026-11-09）；发版顺序 0.5.0 → 0.6.0（见 [0.6.0 技术方案](0.6.0-plan.md) 与 [0.6.0 实施方案](0.6.0-implementation-plan.md)）
 
 ## 后续方向（规划中）
 
@@ -24,7 +24,7 @@
 - **打磨（已完成，0.3.x）**：快捷键体系、侧栏分组、保存状态、设置面板、大文档性能（搜索缓存、缩放防抖、渲染优先级、缩略图窗口化、页面列表虚拟化、中文单字检索）均已落地。
 - **多格式（0.4.0，已完成）**：EPUB（CFI 风格定位符）、HTML（Readability + 本地冻存快照）、TXT。
 - **网页剪藏与可移植性（0.5.0，开发中）**：URL 导入、HTML 图片冻结、EPUB 原生封面、来源 URL；P0/P1 已完成，详见 [0.5.0 技术方案](0.5.0-plan.md)。
-- **MCP 与文档笔记（0.6.0，方案）**：外部 Agent 只读访问书库/标注/正文，文档 Markdown 笔记与标注引用；详见 [0.6.0 技术方案](0.6.0-plan.md) 与 [0.6.0 实施方案](0.6.0-implementation-plan.md)。
+- **MCP 与文档笔记（0.6.0，已实施）**：外部 Agent 只读访问书库/标注/正文，文档 Markdown 笔记与标注引用；T6 真实客户端验收已通过，详见 [0.6.0 技术方案](0.6.0-plan.md) 与 [0.6.0 实施方案](0.6.0-implementation-plan.md)。
 - 暂不做：手写/触控笔、录音、移动端；物理文件夹；云同步延后。
 
 ## 里程碑
@@ -40,7 +40,7 @@
 | 0.7 | AI 划词解释、可溯源 RAG | 已完成 |
 | 0.4.0 | EPUB / HTML / TXT | 已完成 |
 | 0.5.0 | 网页剪藏与多格式可移植性 | 开发中（P0/P1 完成） |
-| 0.6.0 | MCP 只读接入与文档笔记 | 已实施（T6 待补；见 [实施方案](0.6.0-implementation-plan.md)） |
+| 0.6.0 | MCP 只读接入与文档笔记 | 已实施并完成 T6 验收（见 [实施方案](0.6.0-implementation-plan.md)） |
 
 > 0.1–0.7 是公开发布前的内部迭代，已合并进 0.1.x；0.1.0 起为公开发布版本号。
 
@@ -343,7 +343,8 @@ TXT、HTML、EPUB 都映射成统一的 unit 分页模型：阅读器、标注�
 - **引用**：`[[annotation:id]]`、`[[doc:id]]`、`[[doc:id#page=N]]`、`[[page:N]]`，1 基页码；跨文档标注经 `resolve_note_links` 解析，未知目标降级为普通文本。
 - **搜索与导出**：书库搜索新增「笔记」结果组；Markdown 导出在标注前插入「笔记」章节；MCP `get_notes` 读同一文件。
 - **测试与冒烟**：Rust 87 项、Vitest 54 项、Playwright 34 项；隔离沙箱真实应用用 `curl` 验证 initialize、8 个工具、2 个资源、正文开关、token 404 / Origin 403 / 超大 body 413、关闭后端口释放。`GLOSSNOTE_APP_DATA_DIR` 是 debug-only 的沙箱重定向，release 不编译。
-- **待补**：Claude Desktop/Cursor 真实客户端连接（T6）；deep link、笔记 FTS5、MCP 写入留到 P2。
+- **真实客户端验收（T6，2026-11-09）**：本机 Claude Code 2.1.319 通过 `--mcp-config` 连接隔离沙箱；8 个工具全部调用成功，关闭 `exposeText` 后 `list_documents` 仍可用、`search_pages` / `read_document_text` 返回可操作错误。客户端仅对 schemars 的 `uint` / `uint32` format 打印忽略警告，不影响调用。
+- **后续**：deep link、笔记 FTS5、MCP 写入留到 P2。
 
 ## 阻塞与风险
 
