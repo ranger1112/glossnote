@@ -8,6 +8,7 @@ import type {
   Bookmark,
   CardView,
   ChatTurn,
+  CoverSource,
   DeleteReport,
   DocumentMeta,
   ImportResult,
@@ -167,9 +168,13 @@ export function saveSmartCollections(collections: SmartCollection[]): Promise<Sm
   return invoke('save_smart_collections', { collections });
 }
 
-/** 前端把首页渲染成 JPEG，Rust 落到书库的 .glossnote/thumbnails 下。 */
-export function saveCover(docId: string, bytes: Uint8Array): Promise<DocumentMeta> {
-  return invoke('save_cover', { docId, bytes: Array.from(bytes) });
+/** 前端把封面渲染成 JPEG，Rust 落到书库的 .glossnote/thumbnails 下。 */
+export function saveCover(
+  docId: string,
+  bytes: Uint8Array,
+  source: Exclude<CoverSource, ''>,
+): Promise<DocumentMeta> {
+  return invoke('save_cover', { docId, bytes: Array.from(bytes), source });
 }
 
 export function saveProgress(docId: string, lastPage: number): Promise<void> {

@@ -735,6 +735,7 @@ pub fn import_document(app: &AppHandle, source: &str) -> Result<ImportResult, St
         added_at: now,
         last_opened_at: now,
         cover: String::new(),
+        cover_source: String::new(),
         last_page: 0,
         favorite: false,
         tags: Vec::new(),
@@ -863,6 +864,7 @@ fn import_html_snapshot_into(
         added_at: now,
         last_opened_at: now,
         cover: String::new(),
+        cover_source: String::new(),
         last_page: 0,
         favorite: false,
         tags: Vec::new(),
@@ -1000,6 +1002,10 @@ pub fn scan(app: &AppHandle) -> Result<ScanReport, String> {
             added_at: prior.as_ref().map(|row| row.added_at).unwrap_or(now),
             last_opened_at: prior.as_ref().map(|row| row.last_opened_at).unwrap_or(0),
             cover,
+            cover_source: prior
+                .as_ref()
+                .map(|row| row.cover_source.clone())
+                .unwrap_or_default(),
             last_page: prior.as_ref().map(|row| row.last_page).unwrap_or(0),
             favorite: prior.as_ref().map(|row| row.favorite).unwrap_or(false),
             tags: prior
@@ -1140,7 +1146,16 @@ pub(crate) fn decode_text(bytes: &[u8]) -> Result<String, String> {
     }
 }
 
-pub fn save_cover(app: &AppHandle, doc_id: &str, bytes: Vec<u8>) -> Result<Document, String> {
+pub fn save_cover(
+    app: &AppHandle,
+    doc_id: &str,
+    bytes: Vec<u8>,
+    source: String,
+) -> Result<Document, String> {
+    let source = match source.as_str() {
+        "pdf" | "text" | "native" => source,
+        _ => return Err("未知的封面来源".to_string()),
+    };
     if bytes.len() > 2 * 1024 * 1024 {
         return Err("封面文件过大".to_string());
     }
@@ -1167,7 +1182,7 @@ pub fn save_cover(app: &AppHandle, doc_id: &str, bytes: Vec<u8>) -> Result<Docum
         fs::rename(&temp, &path).map_err(|_| format!("保存封面失败：{error}"))?;
     }
 
-    db::set_cover(&conn, doc_id, &relative)?;
+    db::set_cover(&conn, doc_id, &relative, &source)?;
     let document = db::find_by_id(&conn, doc_id)?.ok_or_else(|| "文档不存在".to_string())?;
     Ok(document.to_document(&root))
 }
@@ -2459,6 +2474,7 @@ mod tests {
             added_at: 1,
             last_opened_at: 1,
             cover: String::new(),
+            cover_source: String::new(),
             last_page: 0,
             favorite: false,
             tags: Vec::new(),

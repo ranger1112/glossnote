@@ -50,7 +50,7 @@ import { LocalHtmlImportDialog } from './LocalHtmlImportDialog';
 import { UrlImportDialog } from './UrlImportDialog';
 
 interface LibraryProps {
-  onOpen: (docId: string, page?: number) => void;
+  onOpen: (docId: string, page?: number, notice?: string) => void;
   onMessage: (message: string) => void;
 }
 
@@ -58,6 +58,9 @@ interface Inspection {
   pageCount: number;
   cover: Uint8Array | null;
 }
+
+/** 与导入上限一致；超过它的扫描文件不再为封面整本解压。 */
+const MAX_EPUB_COVER_BYTES = 50 * 1024 * 1024;
 
 type ConfirmState =
   | { kind: 'delete-docs'; ids: string[] }
@@ -154,10 +157,13 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
 
   const ensureCovers = useCallback(async (list: DocumentMeta[]) => {
     const run = ++coverRun.current;
-    const queue = list.filter(
-      (doc) =>
-        !doc.cover || ((doc.kind ?? 'pdf') === 'pdf' && doc.pageCount === 0),
-    );
+    const queue = list.filter((doc) => {
+      const kind = doc.kind ?? 'pdf';
+      if (!doc.cover) return true;
+      if (kind === 'pdf') return doc.pageCount === 0;
+      // 旧库封面没有来源：先判定一次；EPUB 优先原生，其余补写文字来源。
+      return !doc.coverSource;
+    });
     // 每个任务都要把整份 PDF 交给 pdf.js；并发 2 个足够，再多容易顶不住大文件。
     const CONCURRENCY = 2;
 
@@ -170,14 +176,17 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
           // 流式文档优先用原生 EPUB 封面，其余情况画一张文字封面。
           if ((doc.kind ?? 'pdf') !== 'pdf') {
             let updated: DocumentMeta | null = null;
-            if ((doc.kind ?? 'pdf') === 'epub') {
+            if (
+              (doc.kind ?? 'pdf') === 'epub' &&
+              (doc.size === 0 || doc.size <= MAX_EPUB_COVER_BYTES)
+            ) {
               try {
                 const response = await fetch(assetUrl(doc.path));
                 if (response.ok) {
                   const native = await extractEpubCover(await response.arrayBuffer());
                   if (native) {
                     const bytes = await makeImageCover(native.bytes, native.mediaType);
-                    if (bytes) updated = await saveCover(doc.id, bytes);
+                    if (bytes) updated = await saveCover(doc.id, bytes, 'native');
                   }
                 }
               } catch (error) {
@@ -190,7 +199,7 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
             if (!updated) {
               const bytes = await makeTextCover(doc);
               if (coverRun.current !== run || !bytes) return;
-              updated = await saveCover(doc.id, bytes);
+              updated = await saveCover(doc.id, bytes, 'text');
             }
             if (coverRun.current !== run) return;
             setDocs((current) =>
@@ -206,7 +215,7 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
 
           let cover = doc.cover;
           if (inspection.cover) {
-            const updated = await saveCover(doc.id, inspection.cover);
+            const updated = await saveCover(doc.id, inspection.cover, 'pdf');
             cover = updated.cover;
           }
           if (doc.pageCount !== inspection.pageCount) {
@@ -323,10 +332,14 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
             const updatedDoc = await updateDocumentMeta(doc.id, patch);
 
             // 标题/作者刚解析出来时重画文字封面，避免书库一直显示文件名。
-            if (patch.title || patch.author) {
+            // EPUB 原生封面优先；只有已经确认是文字封面时才更新。
+            if (
+              (patch.title || patch.author) &&
+              (kind !== 'epub' || doc.coverSource === 'text')
+            ) {
               const bytes = await makeTextCover(updatedDoc).catch(() => null);
               if (bytes) {
-                const covered = await saveCover(doc.id, bytes).catch(() => null);
+                const covered = await saveCover(doc.id, bytes, 'text').catch(() => null);
                 if (covered) {
                   setDocs((current) =>
                     current.map((item) => (item.id === doc.id ? covered : item)),
@@ -476,12 +489,11 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
           document = await organizeDocument(document.id, { folder: folderFilter });
         }
         setDocs((current) => [document, ...current.filter((item) => item.id !== document.id)]);
-        onMessage(
+        const notice =
           failed > 0
             ? `已导入「${document.title || document.name}」，${failed} 张图片未能保存。`
-            : '',
-        );
-        onOpen(document.id);
+            : undefined;
+        onOpen(document.id, undefined, notice);
       } catch (error) {
         onMessage(`导入失败：${errorText(error)}`);
       } finally {
@@ -582,12 +594,11 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
       ]);
       setUrlImportOpen(false);
       setUrlValue('');
-      onMessage(
+      const notice =
         snapshot.failed > 0
           ? `已导入「${document.title || document.name}」，${snapshot.failed} 张图片未能保存。`
-          : `已导入「${document.title || document.name}」`,
-      );
-      onOpen(document.id);
+          : `已导入「${document.title || document.name}」`;
+      onOpen(document.id, undefined, notice);
     } catch (error) {
       setUrlError(errorText(error));
     } finally {

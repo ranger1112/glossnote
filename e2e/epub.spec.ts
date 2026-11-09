@@ -57,7 +57,9 @@ async function makeEpub(): Promise<number[]> {
   return Array.from(bytes);
 }
 
-async function makeEpubWithCover(version: '3' | '2' | 'none'): Promise<number[]> {
+async function makeEpubWithCover(
+  version: '3' | '2' | 'none' | 'misleading',
+): Promise<number[]> {
   const zip = new JSZip();
   zip.file('mimetype', 'application/epub+zip');
   zip.file(
@@ -73,10 +75,12 @@ async function makeEpubWithCover(version: '3' | '2' | 'none'): Promise<number[]>
     version === '2' ? '<meta name="cover" content="cover-img"/>' : '';
   const coverItem =
     version === '3'
-      ? '<item id="cover" href="images/cover.png" media-type="image/png" properties="cover-image"/>'
+      ? '<item id="cover" href="images/cover.png" media-type="IMAGE/PNG" properties="cover-image"/>'
       : version === '2'
         ? '<item id="cover-img" href="images/cover.png" media-type="image/png"/>'
-        : '';
+        : version === 'misleading'
+          ? '<item id="discover" href="images/discover.png" media-type="image/png"/>'
+          : '';
   zip.file(
     'OEBPS/content.opf',
     `<?xml version="1.0"?>
@@ -99,7 +103,8 @@ async function makeEpubWithCover(version: '3' | '2' | 'none'): Promise<number[]>
   );
   const png = Uint8Array.from(atob(PNG_BASE64), (char) => char.charCodeAt(0));
   zip.file('OEBPS/images/pic.png', png);
-  if (version !== 'none') zip.file('OEBPS/images/cover.png', png);
+  if (version === 'misleading') zip.file('OEBPS/images/discover.png', png);
+  else if (version !== 'none') zip.file('OEBPS/images/cover.png', png);
 
   const bytes = await zip.generateAsync({ type: 'uint8array' });
   return Array.from(bytes);
@@ -190,14 +195,15 @@ test('EPUB：spine 分章、图片内联、目录与划词高亮', async ({ page
 
 test('EPUB 原生封面：EPUB3 属性与 EPUB2 meta 都能提取并转成 JPEG', async ({ page }) => {
   await page.goto('/');
-  const [epub3, epub2, none] = await Promise.all([
+  const [epub3, epub2, none, misleading] = await Promise.all([
     makeEpubWithCover('3'),
     makeEpubWithCover('2'),
     makeEpubWithCover('none'),
+    makeEpubWithCover('misleading'),
   ]);
 
   const result = await page.evaluate(
-    async ({ epub3, epub2, none }) => {
+    async ({ epub3, epub2, none, misleading }) => {
       const epub = (await new Function('return import("/src/epub.ts")')()) as typeof import(
         '../src/epub'
       );
@@ -216,15 +222,17 @@ test('EPUB 原生封面：EPUB3 属性与 EPUB2 meta 都能提取并转成 JPEG'
         epub3: await read(epub3),
         epub2: await read(epub2),
         none: await read(none),
+        misleading: await read(misleading),
         jpeg: jpeg ? Array.from(jpeg.slice(0, 2)) : null,
       };
     },
-    { epub3, epub2, none },
+    { epub3, epub2, none, misleading },
   );
 
   expect(result.epub3?.mediaType).toBe('image/png');
   expect(result.epub3?.length).toBeGreaterThan(0);
   expect(result.epub2?.mediaType).toBe('image/png');
   expect(result.none).toBeNull();
+  expect(result.misleading).toBeNull();
   expect(result.jpeg).toEqual([0xff, 0xd8]);
 });

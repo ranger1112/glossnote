@@ -26,4 +26,19 @@ describe('resolveRelativePath', () => {
       '/home/me/pic.png',
     );
   });
+
+  it('keeps UNC roots and resolves root-relative references', () => {
+    expect(resolveRelativePath('\\\\nas\\share\\docs\\post.html', 'images/pic.png')).toBe(
+      '\\\\nas\\share\\docs\\images\\pic.png',
+    );
+    expect(resolveRelativePath('D:\\site\\pages\\post.html', '/assets/hero.jpg')).toBe(
+      'D:\\assets\\hero.jpg',
+    );
+    expect(resolveRelativePath('\\\\nas\\share\\docs\\post.html', '/assets/hero.jpg')).toBe(
+      '\\\\nas\\share\\assets\\hero.jpg',
+    );
+    expect(resolveRelativePath('/home/me/post.html', '/assets/hero.jpg')).toBe(
+      '/assets/hero.jpg',
+    );
+  });
 });

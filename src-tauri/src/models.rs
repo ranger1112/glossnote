@@ -17,6 +17,8 @@ pub struct DocumentRow {
     pub added_at: i64,
     pub last_opened_at: i64,
     pub cover: String,
+    /// pdf / text / native；空字符串表示旧库或尚未判定。
+    pub cover_source: String,
     pub last_page: u32,
     pub favorite: bool,
     pub tags: Vec<String>,
@@ -55,6 +57,7 @@ impl DocumentRow {
             page_count: self.page_count,
             path: root.join(relative).to_string_lossy().into_owned(),
             cover,
+            cover_source: self.cover_source.clone(),
             size: self.size,
             added_at: self.added_at,
             last_opened_at: self.last_opened_at,
@@ -83,6 +86,8 @@ pub struct Document {
     pub page_count: u32,
     pub path: String,
     pub cover: String,
+    /// pdf / text / native；空字符串表示旧库或尚未判定。
+    pub cover_source: String,
     pub size: u64,
     pub added_at: i64,
     pub last_opened_at: i64,

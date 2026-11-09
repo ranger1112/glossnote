@@ -92,8 +92,13 @@ async fn open_document(app: AppHandle, doc_id: String) -> Result<ImportResult, S
 }
 
 #[tauri::command]
-async fn save_cover(app: AppHandle, doc_id: String, bytes: Vec<u8>) -> Result<Document, String> {
-    tauri::async_runtime::spawn_blocking(move || library::save_cover(&app, &doc_id, bytes))
+async fn save_cover(
+    app: AppHandle,
+    doc_id: String,
+    bytes: Vec<u8>,
+    source: String,
+) -> Result<Document, String> {
+    tauri::async_runtime::spawn_blocking(move || library::save_cover(&app, &doc_id, bytes, source))
         .await
         .map_err(|error| format!("封面任务失败：{error}"))?
 }

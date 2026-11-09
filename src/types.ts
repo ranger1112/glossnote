@@ -26,6 +26,9 @@ export interface Annotation {
 
 export type LibrarySort = 'recent' | 'added' | 'title' | 'annotations' | 'manual';
 
+/** 封面来源：PDF 首页、文字生成、EPUB 原生；空字符串表示旧库或尚未判定。 */
+export type CoverSource = 'pdf' | 'text' | 'native' | '';
+
 export interface Bookmark {
   id: string;
   /** 0 基页码。 */
@@ -44,6 +47,7 @@ export interface DocumentMeta {
   pageCount: number;
   path: string;
   cover: string;
+  coverSource: CoverSource;
   size: number;
   addedAt: number;
   lastOpenedAt: number;

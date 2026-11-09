@@ -1,5 +1,96 @@
 import type { DocKind } from './document';
 
+/** 原生封面先做尺寸预检，避免超大图片在 WebView 里按原尺寸解码。 */
+const MAX_COVER_EDGE = 8192;
+const MAX_COVER_PIXELS = 16_000_000;
+
+function readU16LE(bytes: Uint8Array, offset: number): number {
+  return bytes[offset] | (bytes[offset + 1] << 8);
+}
+
+function readU32BE(bytes: Uint8Array, offset: number): number {
+  return (
+    bytes[offset] * 0x1000000 +
+    ((bytes[offset + 1] << 16) | (bytes[offset + 2] << 8) | bytes[offset + 3])
+  );
+}
+
+function readI32LE(bytes: Uint8Array, offset: number): number {
+  return (
+    bytes[offset] |
+    (bytes[offset + 1] << 8) |
+    (bytes[offset + 2] << 16) |
+    (bytes[offset + 3] << 24)
+  );
+}
+
+function jpegSize(bytes: Uint8Array): { width: number; height: number } | null {
+  let offset = 2;
+  while (offset + 9 < bytes.length) {
+    if (bytes[offset] !== 0xff) {
+      offset += 1;
+      continue;
+    }
+    let marker = bytes[offset + 1];
+    while (marker === 0xff) {
+      offset += 1;
+      marker = bytes[offset + 1];
+    }
+    if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+      offset += 2;
+      continue;
+    }
+    const length = (bytes[offset + 2] << 8) | bytes[offset + 3];
+    if (length < 2) return null;
+    const sof =
+      (marker >= 0xc0 && marker <= 0xc3) ||
+      (marker >= 0xc5 && marker <= 0xc7) ||
+      (marker >= 0xc9 && marker <= 0xcb) ||
+      (marker >= 0xcd && marker <= 0xcf);
+    if (sof) {
+      return {
+        height: (bytes[offset + 5] << 8) | bytes[offset + 6],
+        width: (bytes[offset + 7] << 8) | bytes[offset + 8],
+      };
+    }
+    offset += 2 + length;
+  }
+  return null;
+}
+
+/** 只解析常见封面的尺寸头；无法识别的格式返回 null，交给浏览器解码。 */
+export function coverImageSize(
+  bytes: Uint8Array,
+): { width: number; height: number } | null {
+  if (
+    bytes.length >= 24 &&
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47
+  ) {
+    return { width: readU32BE(bytes, 16), height: readU32BE(bytes, 20) };
+  }
+  if (
+    bytes.length >= 10 &&
+    bytes[0] === 0x47 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46
+  ) {
+    return { width: readU16LE(bytes, 6), height: readU16LE(bytes, 8) };
+  }
+  if (bytes.length >= 26 && bytes[0] === 0x42 && bytes[1] === 0x4d) {
+    return {
+      width: Math.abs(readI32LE(bytes, 18)),
+      height: Math.abs(readI32LE(bytes, 22)),
+    };
+  }
+  if (bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8) {
+    return jpegSize(bytes);
+  }
+  return null;
+}
+
 export interface TextCoverSource {
   kind?: DocKind;
   name: string;
@@ -12,11 +103,24 @@ export async function makeImageCover(
   bytes: Uint8Array,
   mime: string,
 ): Promise<Uint8Array | null> {
-  if (!mime.startsWith('image/') || mime === 'image/svg+xml') return null;
+  const type = mime.toLowerCase();
+  if (!type.startsWith('image/') || type === 'image/svg+xml') return null;
+
+  const size = coverImageSize(bytes);
+  if (
+    size &&
+    (size.width <= 0 ||
+      size.height <= 0 ||
+      size.width > MAX_COVER_EDGE ||
+      size.height > MAX_COVER_EDGE ||
+      size.width * size.height > MAX_COVER_PIXELS)
+  ) {
+    return null;
+  }
 
   // 复制到独立的 ArrayBuffer，避免 SharedArrayBuffer 形态不符合 BlobPart。
   const copy = bytes.slice();
-  const url = URL.createObjectURL(new Blob([copy.buffer], { type: mime }));
+  const url = URL.createObjectURL(new Blob([copy.buffer], { type }));
   try {
     const image = await new Promise<HTMLImageElement>((resolve, reject) => {
       const element = new Image();

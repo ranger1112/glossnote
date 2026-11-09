@@ -100,7 +100,11 @@ test('本地 HTML 导入：弹窗勾选冻结后生成自包含快照', async ({
             };
           }
           case 'save_cover':
-            return { ...document, cover: 'D:\\MockLibrary\\thumbnails\\snap-1.jpg' };
+            return {
+              ...document,
+              cover: 'D:\\MockLibrary\\thumbnails\\snap-1.jpg',
+              coverSource: 'text',
+            };
           case 'open_document':
             return { document, annotations: [] };
           case 'read_document_text':
@@ -178,6 +182,8 @@ test('本地 HTML 导入：弹窗勾选冻结后生成自包含快照', async ({
   expect(captured.html).not.toContain('asset.localhost');
   expect(captured.html).not.toContain('https://cdn.example');
   expect(captured.html).not.toContain('missing.png');
+  // 失败提示在文档打开完成后仍然可见，不会被「正在打开文档…」覆盖。
+  await expect(page.locator('.status-bar')).toContainText('1 张图片未能保存');
 
   // 不勾选时保持原有 import_document 路径。
   await page.getByRole('button', { name: '书库' }).click();

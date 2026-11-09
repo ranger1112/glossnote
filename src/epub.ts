@@ -1,5 +1,6 @@
 import type JSZip from 'jszip';
 import { buildFlowFromHtml, type FlowDocument, type FlowUnit } from './flow';
+import { imageMimeFromPath } from './imageMime';
 import type { OutlineEntry } from './outline';
 
 interface ManifestItem {
@@ -71,6 +72,60 @@ function declaredBytes(file: JSZip.JSZipObject): number | null {
   return typeof data?.uncompressedSize === 'number' ? data.uncompressedSize : null;
 }
 
+interface ZipStream {
+  on(event: 'data', listener: (chunk: Uint8Array) => void): ZipStream;
+  on(event: 'error', listener: (error: Error) => void): ZipStream;
+  on(event: 'end', listener: () => void): ZipStream;
+  pause(): void;
+  resume(): void;
+}
+
+/** 逐块解压并在超限时尽快停流，避免中央目录尺寸撒谎时先物化整个条目。 */
+function readZipBytesLimited(
+  file: JSZip.JSZipObject,
+  limit: number,
+): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    const stream = (
+      file as unknown as { internalStream(type: 'uint8array'): ZipStream }
+    ).internalStream('uint8array');
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    let settled = false;
+
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      stream.pause();
+      reject(error);
+    };
+
+    stream
+      .on('data', (chunk) => {
+        if (settled) return;
+        total += chunk.byteLength;
+        if (total > limit) {
+          fail(new Error('封面解压后过大'));
+          return;
+        }
+        chunks.push(chunk);
+      })
+      .on('error', (error) => fail(error))
+      .on('end', () => {
+        if (settled) return;
+        settled = true;
+        const bytes = new Uint8Array(total);
+        let offset = 0;
+        for (const chunk of chunks) {
+          bytes.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
+        resolve(bytes);
+      })
+      .resume();
+  });
+}
+
 /** 解压前先按中央目录大小拦一道，解压后再兜底；避免 zip bomb 撑爆内存。 */
 async function readZipText(
   file: JSZip.JSZipObject,
@@ -138,31 +193,12 @@ export interface EpubCover {
   mediaType: string;
 }
 
-function imageMimeFromHref(href: string): string | null {
-  const extension = href.split('#')[0].split('?')[0].split('.').pop()?.toLowerCase();
-  switch (extension) {
-    case 'png':
-      return 'image/png';
-    case 'jpg':
-    case 'jpeg':
-      return 'image/jpeg';
-    case 'gif':
-      return 'image/gif';
-    case 'webp':
-      return 'image/webp';
-    case 'avif':
-      return 'image/avif';
-    case 'bmp':
-      return 'image/bmp';
-    default:
-      return null;
-  }
-}
-
 function imageMime(item: ManifestItem): string | null {
-  if (/^image\/svg\+xml/i.test(item.mediaType)) return null;
-  if (/^image\//i.test(item.mediaType)) return item.mediaType;
-  return imageMimeFromHref(item.href);
+  const type = item.mediaType.toLowerCase();
+  if (type === 'image/svg+xml') return null;
+  if (type.startsWith('image/')) return type;
+  const guessed = imageMimeFromPath(item.href);
+  return guessed === 'image/svg+xml' ? null : guessed;
 }
 
 /**
@@ -216,7 +252,9 @@ export async function extractEpubCover(
   }
 
   cover ??= items.find(
-    (item) => isImage(item) && /cover/i.test(`${item.id} ${item.href}`),
+    (item) =>
+      isImage(item) &&
+      /(?:^|[/_.\-\s])cover(?:[/_.\-\s]|$)/i.test(`${item.id} ${item.href}`),
   );
   if (!cover) return null;
 
@@ -227,8 +265,8 @@ export async function extractEpubCover(
   if (declared !== null && declared > MAX_COVER_BYTES) return null;
 
   try {
-    const bytes = await file.async('uint8array');
-    if (bytes.byteLength === 0 || bytes.byteLength > MAX_COVER_BYTES) return null;
+    const bytes = await readZipBytesLimited(file, MAX_COVER_BYTES);
+    if (bytes.byteLength === 0) return null;
     const mediaType = imageMime(cover);
     return mediaType ? { bytes, mediaType } : null;
   } catch {

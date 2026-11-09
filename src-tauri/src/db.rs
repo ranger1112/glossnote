@@ -7,7 +7,7 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-const DOCUMENT_SELECT: &str = "SELECT d.id, d.name, d.title, d.author, d.page_count, d.rel_path, d.size, d.mtime, d.added_at, d.last_opened_at, d.cover, d.last_page, d.favorite, d.tags, d.bookmarks, d.folder, d.position, d.meta_updated_at, (SELECT COUNT(*) FROM annotations a WHERE a.doc_id = d.id AND a.deleted = 0), d.kind, d.source_path, d.source_url FROM documents d";
+const DOCUMENT_SELECT: &str = "SELECT d.id, d.name, d.title, d.author, d.page_count, d.rel_path, d.size, d.mtime, d.added_at, d.last_opened_at, d.cover, d.last_page, d.favorite, d.tags, d.bookmarks, d.folder, d.position, d.meta_updated_at, (SELECT COUNT(*) FROM annotations a WHERE a.doc_id = d.id AND a.deleted = 0), d.kind, d.source_path, d.source_url, d.cover_source FROM documents d";
 
 pub fn open(path: &Path) -> Result<Connection, String> {
     let conn = Connection::open(path).map_err(|error| format!("打开数据库失败：{error}"))?;
@@ -96,6 +96,7 @@ fn migrate(conn: &Connection) -> Result<(), String> {
           added_at INTEGER NOT NULL,
           last_opened_at INTEGER NOT NULL DEFAULT 0,
           cover TEXT NOT NULL DEFAULT '',
+          cover_source TEXT NOT NULL DEFAULT '',
           last_page INTEGER NOT NULL DEFAULT 0,
           favorite INTEGER NOT NULL DEFAULT 0,
           tags TEXT NOT NULL DEFAULT '[]',
@@ -174,6 +175,12 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     // 0.3 的库没有 cover / last_page，升级时补列。
     ensure_column(conn, "documents", "kind", "TEXT NOT NULL DEFAULT 'pdf'")?;
     ensure_column(conn, "documents", "cover", "TEXT NOT NULL DEFAULT ''")?;
+    ensure_column(
+        conn,
+        "documents",
+        "cover_source",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
     ensure_column(conn, "documents", "last_page", "INTEGER NOT NULL DEFAULT 0")?;
     ensure_column(conn, "documents", "favorite", "INTEGER NOT NULL DEFAULT 0")?;
     ensure_column(conn, "documents", "tags", "TEXT NOT NULL DEFAULT '[]'")?;
@@ -344,6 +351,7 @@ fn row_to_document(row: &Row<'_>) -> rusqlite::Result<DocumentRow> {
         kind: row.get(19)?,
         source_path: row.get(20)?,
         source_url: row.get(21)?,
+        cover_source: row.get(22)?,
     })
 }
 
@@ -379,8 +387,8 @@ pub fn upsert_document(conn: &Connection, document: &DocumentRow) -> Result<(), 
         .map_err(|error| format!("序列化书签失败：{error}"))?;
     conn.execute(
         "INSERT INTO documents
-           (id, name, title, author, page_count, rel_path, size, mtime, added_at, last_opened_at, cover, last_page, favorite, tags, bookmarks, folder, position, meta_updated_at, kind, source_path, source_url)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
+           (id, name, title, author, page_count, rel_path, size, mtime, added_at, last_opened_at, cover, last_page, favorite, tags, bookmarks, folder, position, meta_updated_at, kind, source_path, source_url, cover_source)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
          ON CONFLICT(id) DO UPDATE SET
            name = excluded.name,
            kind = excluded.kind,
@@ -399,6 +407,7 @@ pub fn upsert_document(conn: &Connection, document: &DocumentRow) -> Result<(), 
            position = excluded.position,
            source_path = excluded.source_path,
            source_url = excluded.source_url,
+           cover_source = excluded.cover_source,
            meta_updated_at = excluded.meta_updated_at",
         params![
             document.id,
@@ -422,6 +431,7 @@ pub fn upsert_document(conn: &Connection, document: &DocumentRow) -> Result<(), 
             document.kind,
             document.source_path,
             document.source_url,
+            document.cover_source,
         ],
     )
     .map_err(|error| format!("写入文档失败：{error}"))?;
@@ -511,10 +521,10 @@ pub fn save_progress(conn: &Connection, id: &str, last_page: u32) -> Result<(), 
     Ok(())
 }
 
-pub fn set_cover(conn: &Connection, id: &str, cover: &str) -> Result<(), String> {
+pub fn set_cover(conn: &Connection, id: &str, cover: &str, source: &str) -> Result<(), String> {
     conn.execute(
-        "UPDATE documents SET cover = ?1 WHERE id = ?2",
-        params![cover, id],
+        "UPDATE documents SET cover = ?1, cover_source = ?2 WHERE id = ?3",
+        params![cover, source, id],
     )
     .map_err(|error| format!("保存封面失败：{error}"))?;
     Ok(())
@@ -1275,6 +1285,17 @@ mod tests {
         row.kind = "epub".to_string();
         upsert_document(&conn, &row).unwrap();
         assert_eq!(find_by_id(&conn, "d1").unwrap().unwrap().kind, "epub");
+    }
+
+    #[test]
+    fn cover_source_round_trips() {
+        let conn = seeded();
+        assert_eq!(find_by_id(&conn, "d1").unwrap().unwrap().cover_source, "");
+
+        set_cover(&conn, "d1", "thumbnails/d1.jpg", "native").unwrap();
+        let row = find_by_id(&conn, "d1").unwrap().unwrap();
+        assert_eq!(row.cover, "thumbnails/d1.jpg");
+        assert_eq!(row.cover_source, "native");
     }
 
     #[test]

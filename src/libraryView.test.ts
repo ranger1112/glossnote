@@ -18,6 +18,7 @@ function doc(id: string, patch: Partial<DocumentMeta> = {}): DocumentMeta {
     pageCount: 1,
     path: `books/${id}.pdf`,
     cover: '',
+    coverSource: '',
     size: 1,
     addedAt: 1,
     lastOpenedAt: 0,

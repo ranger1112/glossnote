@@ -1309,10 +1309,10 @@ export default function App() {
               author: meta.author ? undefined : flow.author,
             });
             // 标题/作者刚解析出来时重画文字封面，避免书库一直显示文件名。
-            // EPUB 的封面由书库优先提取原生封面，不能在这里用文字封面覆盖。
+            // EPUB 原生封面优先；只有已确认是文字封面时才更新。
             if (
               isTauri() &&
-              input.kind !== 'epub' &&
+              (input.kind !== 'epub' || meta.coverSource === 'text') &&
               ((!meta.title && flow.title) || (!meta.author && flow.author))
             ) {
               const bytes = await makeTextCover({
@@ -1321,7 +1321,7 @@ export default function App() {
                 title: meta.title || flow.title || '',
                 author: meta.author || flow.author || '',
               });
-              if (bytes) await saveCover(input.id, bytes);
+              if (bytes) await saveCover(input.id, bytes, 'text');
             }
           } catch {
             // 元数据与封面是锦上添花，失败不影响阅读。
@@ -1430,7 +1430,7 @@ export default function App() {
   );
 
   const openById = useCallback(
-    async (docId: string, page?: number) => {
+    async (docId: string, page?: number, notice?: string) => {
       if (openingRef.current) return;
       openingRef.current = true;
       setBusy(true);
@@ -1496,6 +1496,8 @@ export default function App() {
             initialPage: page ?? result.document.lastPage,
           });
         }
+        // 导入成功后的提示放在打开完成之后，避免被「正在打开文档…」覆盖。
+        setMessage(notice ?? '');
       } catch (error) {
         setMessage(`打开失败：${errorText(error)}`);
       } finally {

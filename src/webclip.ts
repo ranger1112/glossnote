@@ -1,4 +1,5 @@
 import { extractHtmlArticle, sanitizeHtml } from './flow';
+import { imageMimeFromPath } from './imageMime';
 import { resolveRelativePath } from './paths';
 
 /** 与 Rust 侧的图片上限保持一致；前后端都拦一道，避免坏页面把 IPC 撑爆。 */
@@ -9,6 +10,8 @@ const MAX_LOCAL_TOTAL_BYTES = 12 * 1024 * 1024;
 const MAX_LOCAL_HTML_BYTES = 20 * 1024 * 1024;
 /** 与 Rust 侧 MAX_SNAPSHOT_BYTES 保持一致；提前拦截，避免下载完图片才被后端拒绝。 */
 const MAX_SNAPSHOT_BYTES = 24 * 1024 * 1024;
+/** Readability 可能把懒加载属性提升成 src；快照里不应留下这些原始地址。 */
+const LAZY_SRC_ATTRIBUTES = ['data-src', 'data-original', 'data-lazy-src', 'data-url'];
 
 export type AssetFetcher = (urls: string[]) => Promise<Map<string, string>>;
 
@@ -18,8 +21,10 @@ export interface WebSnapshot {
   author?: string;
   /** 成功内联的图片数（含原本就是 data: 的图片）。 */
   images: number;
-  /** 下载失败、超限或被跳过的图片数。 */
+  /** 尝试下载但失败、超限的图片数。 */
   failed: number;
+  /** 按设计未抓取的图片数（远程、协议相对、非 http 地址等）。 */
+  skipped: number;
 }
 
 export interface SnapshotOptions {
@@ -42,8 +47,19 @@ export async function buildWebSnapshot(
   const article = await extractHtmlArticle(source, finalUrl || undefined, options.prepare);
   const container = document.createElement('div');
   container.innerHTML = article.html;
+  // Readability 已经把可识别的懒加载图片写入 src；清掉原始属性，避免快照泄露地址。
+  for (const element of Array.from(
+    container.querySelectorAll(LAZY_SRC_ATTRIBUTES.map((name) => `[${name}]`).join(',')),
+  )) {
+    for (const attribute of LAZY_SRC_ATTRIBUTES) element.removeAttribute(attribute);
+  }
 
-  const plan: Array<{ image: HTMLImageElement; url?: string; inline: boolean }> = [];
+  const plan: Array<{
+    image: HTMLImageElement;
+    url?: string;
+    inline: boolean;
+    attempted: boolean;
+  }> = [];
   const urls = new Set<string>();
 
   for (const image of Array.from(container.querySelectorAll<HTMLImageElement>('img[src]'))) {
@@ -51,13 +67,13 @@ export async function buildWebSnapshot(
     if (!raw) continue;
 
     if (/^data:/i.test(raw)) {
-      plan.push({ image, inline: true });
+      plan.push({ image, inline: true, attempted: false });
       continue;
     }
 
     if (options.resolveImage) {
       const key = options.resolveImage(raw);
-      plan.push({ image, url: key ?? undefined, inline: false });
+      plan.push({ image, url: key ?? undefined, inline: false, attempted: Boolean(key) });
       if (key) urls.add(key);
       continue;
     }
@@ -66,16 +82,16 @@ export async function buildWebSnapshot(
     try {
       absolute = new URL(raw, finalUrl).href;
     } catch {
-      plan.push({ image, inline: false });
+      plan.push({ image, inline: false, attempted: false });
       continue;
     }
     if (!/^https?:/i.test(absolute)) {
-      plan.push({ image, inline: false });
+      plan.push({ image, inline: false, attempted: false });
       continue;
     }
 
     urls.add(absolute);
-    plan.push({ image, url: absolute, inline: false });
+    plan.push({ image, url: absolute, inline: false, attempted: true });
   }
 
   const requested = Array.from(urls).slice(0, MAX_IMAGES);
@@ -83,6 +99,7 @@ export async function buildWebSnapshot(
 
   let images = 0;
   let failed = 0;
+  let skipped = 0;
   for (const entry of plan) {
     if (entry.inline) {
       images += 1;
@@ -96,7 +113,8 @@ export async function buildWebSnapshot(
     } else {
       // 超过数量上限、下载失败或被拒绝的图片直接移除，快照里不留远程地址。
       entry.image.removeAttribute('src');
-      failed += 1;
+      if (entry.attempted) failed += 1;
+      else skipped += 1;
     }
   }
 
@@ -111,6 +129,7 @@ export async function buildWebSnapshot(
     author: article.author,
     images,
     failed,
+    skipped,
   };
 }
 
@@ -119,37 +138,6 @@ export interface LocalSnapshotOptions {
   toAssetUrl: (path: string) => string;
   /** 测试注入；默认用全局 fetch。 */
   fetchAsset?: (url: string) => Promise<Blob | null>;
-}
-
-function imageMimeFromUrl(url: string): string | null {
-  let path = url;
-  try {
-    path = new URL(url).pathname;
-  } catch {
-    // asset: 或已经编码的路径按字符串取扩展名。
-  }
-  const extension = path.split('#')[0].split('?')[0].split('.').pop()?.toLowerCase();
-  switch (extension) {
-    case 'png':
-      return 'image/png';
-    case 'jpg':
-    case 'jpeg':
-      return 'image/jpeg';
-    case 'gif':
-      return 'image/gif';
-    case 'webp':
-      return 'image/webp';
-    case 'avif':
-      return 'image/avif';
-    case 'svg':
-      return 'image/svg+xml';
-    case 'bmp':
-      return 'image/bmp';
-    case 'ico':
-      return 'image/x-icon';
-    default:
-      return null;
-  }
 }
 
 function blobToDataUrl(blob: Blob, mime: string): Promise<string> {
@@ -170,6 +158,7 @@ async function fetchLocalAssets(
   let total = 0;
 
   for (const url of urls) {
+    if (total >= MAX_LOCAL_TOTAL_BYTES) break;
     let blob: Blob | null = null;
     try {
       blob = await fetchAsset(url);
@@ -183,9 +172,9 @@ async function fetchLocalAssets(
       ? declared.startsWith('image/')
         ? declared
         : declared === 'application/octet-stream'
-          ? imageMimeFromUrl(url)
+          ? imageMimeFromPath(url)
           : null
-      : imageMimeFromUrl(url);
+      : imageMimeFromPath(url);
     // SVG 可能引用外部资源；快照只收常见位图。
     if (!mime || mime === 'image/svg+xml') continue;
     if (blob.size <= 0 || blob.size > MAX_LOCAL_IMAGE_BYTES) continue;
@@ -273,11 +262,28 @@ export async function buildLocalHtmlSnapshot(
     (urls) => fetchLocalAssets(urls, fetchAsset),
     {
       prepare: (document) => {
-        for (const image of Array.from(document.querySelectorAll('img[src]'))) {
-          const raw = image.getAttribute('src')?.trim();
-          if (!raw || /^data:/i.test(raw)) continue;
-          const resolved = resolveImage(raw);
-          if (resolved) image.setAttribute('src', resolved);
+        for (const element of Array.from(
+          document.querySelectorAll('img, picture, figure'),
+        )) {
+          let lazyResolved: string | null = null;
+          for (const attribute of LAZY_SRC_ATTRIBUTES) {
+            const raw = element.getAttribute(attribute)?.trim();
+            if (!raw || /^data:/i.test(raw)) continue;
+            const resolved = resolveImage(raw);
+            if (!resolved) continue;
+            element.setAttribute(attribute, resolved);
+            lazyResolved ??= resolved;
+          }
+
+          if (element.tagName !== 'IMG') continue;
+          const raw = element.getAttribute('src')?.trim();
+          if (raw && !/^data:/i.test(raw)) {
+            const resolved = resolveImage(raw);
+            if (resolved) element.setAttribute('src', resolved);
+          } else if (!raw && lazyResolved) {
+            // 有些懒加载图片没有 src；先补上，Readability 不会再按应用 origin 解析。
+            element.setAttribute('src', lazyResolved);
+          }
         }
       },
       resolveImage,
