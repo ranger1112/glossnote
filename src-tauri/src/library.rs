@@ -3,10 +3,10 @@ use crate::{
     fsrs::{self, MemoryState},
     models::{
         Annotation, Bookmark, Card, CardView, DeleteReport, Document, DocumentMetaPatch,
-        DocumentRow, ImportResult, PageHit, PageIndexStatus, PageTextInput, ScanReport, SearchHit,
-        Sidecar, SidecarVersion, SmartCollection,
+        DocumentRow, ImportResult, NoteHit, PageHit, PageIndexStatus, PageTextInput, ScanReport,
+        SearchHit, Sidecar, SidecarVersion, SmartCollection,
     },
-    settings,
+    notes, settings,
     state::AppState,
 };
 use chrono::Local;
@@ -48,6 +48,8 @@ pub fn ensure_dirs(root: &Path) -> Result<(), String> {
     fs::create_dir_all(root.join("books")).map_err(|error| format!("创建书库目录失败：{error}"))?;
     fs::create_dir_all(root.join(".glossnote").join("annotations"))
         .map_err(|error| format!("创建标注目录失败：{error}"))?;
+    fs::create_dir_all(root.join(".glossnote").join("notes"))
+        .map_err(|error| format!("创建笔记目录失败：{error}"))?;
     Ok(())
 }
 
@@ -1270,6 +1272,34 @@ pub fn search_pages(app: &AppHandle, query: String) -> Result<Vec<PageHit>, Stri
     db::search_pages(&conn, &query)
 }
 
+pub fn search_notes(app: &AppHandle, query: String) -> Result<Vec<NoteHit>, String> {
+    let state = app.state::<AppState>();
+    let root = state.root();
+    // 文件扫描不占 DB 锁；只有把 docId 映射成标题时才短暂加锁。
+    let scans = notes::scan_notes(&root, &query, 50)?;
+    if scans.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let conn = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut hits = Vec::new();
+    for scan in scans {
+        if let Some(document) = db::find_by_id(&conn, &scan.doc_id)? {
+            hits.push(NoteHit {
+                doc_id: scan.doc_id,
+                doc_name: document.name,
+                doc_title: document.title,
+                snippet: scan.snippet,
+                position: scan.position,
+            });
+        }
+    }
+    Ok(hits)
+}
+
 pub fn page_index_status(app: &AppHandle) -> Result<PageIndexStatus, String> {
     let state = app.state::<AppState>();
     let root = state.root();
@@ -1336,18 +1366,32 @@ pub fn export_markdown(
     use std::fmt::Write as _;
 
     let state = app.state::<AppState>();
-    let conn = state
-        .db
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root = state.root();
 
-    let documents = match doc_id.as_deref() {
-        Some(id) => vec![db::find_by_id(&conn, id)?.ok_or_else(|| "文档不存在".to_string())?],
-        None => db::list_documents(&conn)?,
+    // 先在锁内取完 DB 数据，释放锁后再读笔记文件与写盘，避免文件 IO 占着索引锁。
+    let (documents, mut annotations_by_doc) = {
+        let conn = state
+            .db
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let documents = match doc_id.as_deref() {
+            Some(id) => {
+                vec![db::find_by_id(&conn, id)?.ok_or_else(|| "文档不存在".to_string())?]
+            }
+            None => db::list_documents(&conn)?,
+        };
+        if documents.is_empty() {
+            return Err("书库里还没有文档".to_string());
+        }
+        let mut map = HashMap::new();
+        for document in &documents {
+            map.insert(
+                document.id.clone(),
+                db::list_annotations(&conn, &document.id)?,
+            );
+        }
+        (documents, map)
     };
-    if documents.is_empty() {
-        return Err("书库里还没有文档".to_string());
-    }
 
     let single = doc_id.is_some();
     let mut out = String::new();
@@ -1374,7 +1418,23 @@ pub fn export_markdown(
         writeln!(out, "- 标注：{}", document.annotation_count).unwrap();
         writeln!(out).unwrap();
 
-        let annotations = db::list_annotations(&conn, &document.id)?;
+        let note = match notes::read_note(&root, &document.id) {
+            Ok(note) if !note.revision.is_empty() => Some(note.text),
+            Ok(_) => None,
+            Err(_) => Some("（笔记无法读取，未导出）".to_string()),
+        };
+        if single || note.is_some() {
+            writeln!(out, "### 笔记").unwrap();
+            writeln!(out).unwrap();
+            if let Some(note) = note {
+                writeln!(out, "{note}").unwrap();
+            } else {
+                writeln!(out, "（暂无笔记）").unwrap();
+            }
+            writeln!(out).unwrap();
+        }
+
+        let annotations = annotations_by_doc.remove(&document.id).unwrap_or_default();
         let visible: Vec<_> = annotations
             .into_iter()
             .filter(|annotation| !annotation.deleted)
@@ -2102,9 +2162,16 @@ fn trash_document_files(
     trash_file: &mut dyn FnMut(&Path) -> Result<(), String>,
 ) -> Result<TrashOutcome, String> {
     let pdf = root.join(row.rel_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let note = notes::note_path(root, &row.id).ok();
     if !pdf.exists() {
+        let mut trashed = 0;
+        if let Some(note) = note.as_ref().filter(|path| path.exists()) {
+            if trash_file(note).is_ok() {
+                trashed += 1;
+            }
+        }
         return Ok(TrashOutcome {
-            trashed: 0,
+            trashed,
             missing: true,
         });
     }
@@ -2118,6 +2185,13 @@ fn trash_document_files(
             Ok(()) => trashed += 1,
             // PDF 已经进回收站了，sidecar 失败也只影响「恢复后是否还有标注」这一步。
             Err(error) => eprintln!("无法把标注文件移入回收站：{error}"),
+        }
+    }
+
+    if let Some(note) = note.as_ref().filter(|path| path.exists()) {
+        match trash_file(note) {
+            Ok(()) => trashed += 1,
+            Err(error) => eprintln!("无法把笔记移入回收站：{error}"),
         }
     }
 
@@ -2680,6 +2754,8 @@ mod tests {
         let thumbnail = root.join(".glossnote").join("thumbnails").join("doc1.jpg");
         fs::create_dir_all(thumbnail.parent().unwrap()).unwrap();
         fs::write(&thumbnail, b"jpg").unwrap();
+        let note = notes::note_path(&root, &row.id).unwrap();
+        fs::write(&note, b"# note").unwrap();
 
         let bin = dir.join("bin");
         fs::create_dir_all(&bin).unwrap();
@@ -2689,29 +2765,37 @@ mod tests {
         };
 
         let outcome = trash_document_files(&root, &row, &mut trash_file).unwrap();
-        assert_eq!(outcome.trashed, 2);
+        assert_eq!(outcome.trashed, 3);
         assert!(!outcome.missing);
         assert!(!pdf.exists());
         assert!(!sidecar.exists());
         assert!(!thumbnail.exists());
+        assert!(!note.exists());
         assert!(bin.join("doc1.pdf").exists());
         assert!(bin.join("doc1.json").exists());
+        assert!(bin.join("doc1.md").exists());
 
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn deleting_a_missing_pdf_only_clears_the_index() {
+    fn deleting_a_missing_pdf_clears_index_and_note() {
         let dir = temp_dir("delete-missing");
         let root = dir.join("library");
         ensure_dirs(&root).unwrap();
         let row = document("doc1", "books/doc1.pdf");
-        let mut trash_file =
-            |_path: &Path| -> Result<(), String> { panic!("缺失文件不应进入回收站") };
+        let note = notes::note_path(&root, &row.id).unwrap();
+        fs::write(&note, b"# note").unwrap();
+        let mut trashed = Vec::new();
+        let mut trash_file = |path: &Path| -> Result<(), String> {
+            trashed.push(path.to_path_buf());
+            Ok(())
+        };
 
         let outcome = trash_document_files(&root, &row, &mut trash_file).unwrap();
-        assert_eq!(outcome.trashed, 0);
+        assert_eq!(outcome.trashed, 1);
         assert!(outcome.missing);
+        assert_eq!(trashed, vec![note]);
 
         let _ = fs::remove_dir_all(&dir);
     }

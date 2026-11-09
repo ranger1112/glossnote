@@ -123,7 +123,63 @@ export interface SearchHit {
   quote: string;
   body: string;
   color: HighlightColor;
+  kind: AnnotationKind;
   tags: string[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface NoteHit {
+  docId: string;
+  docName: string;
+  docTitle: string;
+  snippet: string;
+  position: number;
+}
+
+export interface NoteFile {
+  text: string;
+  updatedAt: number;
+  revision: string;
+}
+
+export type NoteSaveResult =
+  | { status: 'saved'; note: NoteFile }
+  | { status: 'conflict'; current: NoteFile };
+
+/** 笔记引用解析结果；page 为 0 基，供阅读器直接跳转。 */
+export interface NoteAnnotationTarget {
+  docId: string;
+  page: number;
+  quote: string;
+  color: HighlightColor;
+  kind: AnnotationKind;
+}
+
+export interface NoteDocumentTarget {
+  title: string;
+  name: string;
+  pageCount: number;
+  kind: DocKind;
+}
+
+export interface NoteLinkTargets {
+  annotations: Record<string, NoteAnnotationTarget>;
+  documents: Record<string, NoteDocumentTarget>;
+}
+
+export interface McpSettingsView {
+  enabled: boolean;
+  port: number;
+  exposeText: boolean;
+  running: boolean;
+  actualPort: number | null;
+  error: string | null;
+  /** 未启用或 token 为空时为空串。 */
+  url: string;
+  /** 可直接粘贴到 MCP 客户端配置里的 JSON。 */
+  configJson: string;
+  tokenSet: boolean;
 }
 
 export interface ImportResult {

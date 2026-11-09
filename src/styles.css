@@ -4479,6 +4479,254 @@ button.color-dot:hover {
   }
 }
 
+/* =========================================================
+   Notes
+   ========================================================= */
+
+.notes-panel {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.notes-panel[hidden] {
+  display: none;
+}
+
+.note-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-strong);
+  font-size: 11px;
+}
+
+.note-mode {
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-full);
+}
+
+.note-mode button {
+  padding: 3px 9px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.note-mode button.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.note-status {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.note-status-saved {
+  color: var(--success);
+}
+
+.note-status-error,
+.note-status-conflict {
+  color: var(--danger);
+}
+
+.note-textarea {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  padding: 12px;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.75;
+  resize: none;
+}
+
+.note-textarea::placeholder {
+  color: var(--faint);
+}
+
+.note-preview {
+  flex: 1;
+  min-height: 0;
+  padding: 12px;
+  overflow: auto;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.note-conflict {
+  margin: 10px;
+  padding: 10px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
+  background: var(--danger-soft);
+  color: var(--ink);
+  font-size: 11.5px;
+}
+
+.note-conflict p {
+  margin: 0 0 8px;
+  line-height: 1.6;
+}
+
+.note-conflict > div {
+  display: flex;
+  gap: 6px;
+}
+
+.note-link-chip,
+.note-page-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 1px;
+  padding: 1px 6px;
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-full);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 0.92em;
+  line-height: 1.5;
+  vertical-align: baseline;
+}
+
+.note-link-chip:hover,
+.note-page-chip:hover {
+  background: var(--panel);
+}
+
+.note-link-chip .color-dot {
+  width: 7px;
+  height: 7px;
+}
+
+.note-focus-backdrop {
+  align-items: center;
+  justify-content: center;
+}
+
+.note-focus {
+  display: flex;
+  flex-direction: column;
+  width: min(960px, 92vw);
+  height: 86vh;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  box-shadow: var(--shadow-lg);
+}
+
+.note-focus .modal-head {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.note-toolbar-large {
+  border-bottom: 1px solid var(--line);
+}
+
+.note-textarea-large {
+  padding: 18px 22px;
+  font-size: 14px;
+}
+
+.note-preview-large {
+  padding: 18px 22px;
+  font-size: 14px;
+}
+
+/* =========================================================
+   MCP settings
+   ========================================================= */
+
+.mcp-settings .settings-section {
+  padding-bottom: 4px;
+}
+
+.mcp-port {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.mcp-port input {
+  width: 92px;
+}
+
+.mcp-status {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.mcp-status.running {
+  color: var(--success);
+}
+
+.mcp-status.error,
+.mcp-error {
+  color: var(--danger);
+}
+
+.mcp-url,
+.mcp-config {
+  width: 100%;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink-soft);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+
+.mcp-config {
+  min-height: 116px;
+  resize: vertical;
+}
+
+.mcp-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.switch input {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent);
+}
+
+.switch span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

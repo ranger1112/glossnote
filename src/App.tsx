@@ -15,6 +15,7 @@ import { CardEditor, type CardDraft } from './CardEditor';
 import { AiPanel } from './AiPanel';
 import { AiSettingsModal } from './AiSettingsModal';
 import { SettingsModal } from './SettingsModal';
+import { NotePanel, type NotePanelHandle } from './NotePanel';
 import { ShortcutList } from './ShortcutList';
 import { HistoryModal } from './HistoryModal';
 import { OutlinePanel } from './OutlinePanel';
@@ -225,6 +226,8 @@ interface SearchTarget {
   token: number;
 }
 
+type SideTab = 'annotations' | 'outline' | 'pages' | 'notes';
+
 interface Activation {
   id: string;
   name: string;
@@ -240,6 +243,7 @@ interface Activation {
   bookmarks?: Bookmark[];
   desktopMeta?: DocumentMeta;
   initialPage?: number;
+  sideTab?: SideTab;
 }
 
 const COLORS: Array<{ key: HighlightColor; label: string }> = [
@@ -406,7 +410,11 @@ export default function App() {
   }, []);
 
   const [doc, setDoc] = useState<OpenedDoc | null>(null);
-  const [sideTab, setSideTab] = useState<'annotations' | 'outline' | 'pages'>('annotations');
+  const [sideTab, setSideTab] = useState<SideTab>('annotations');
+  const notePanelRef = useRef<NotePanelHandle>(null);
+  const pendingAnnotationRef = useRef<{ docId: string; id: string; at: number } | null>(
+    null,
+  );
   const [outline, setOutline] = useState<OutlineEntry[]>([]);
   const [outlineLoading, setOutlineLoading] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -1259,7 +1267,7 @@ export default function App() {
     setFocusId(null);
     setAiPanel(null);
     setMessage('');
-    setSideTab('annotations');
+    setSideTab(input.sideTab ?? 'annotations');
     setOutline([]);
     if (pdf) {
       setOutlineLoading(true);
@@ -1430,9 +1438,23 @@ export default function App() {
   );
 
   const openById = useCallback(
-    async (docId: string, page?: number, notice?: string) => {
+    async (
+      docId: string,
+      page?: number,
+      notice?: string,
+      options?: { tab?: SideTab; annotationId?: string },
+    ) => {
       if (openingRef.current) return;
       openingRef.current = true;
+      const noteSaved = await (notePanelRef.current?.flush() ?? true);
+      if (!noteSaved) {
+        openingRef.current = false;
+        setMessage('笔记未保存，已取消切换文档。');
+        return;
+      }
+      pendingAnnotationRef.current = options?.annotationId
+        ? { docId, id: options.annotationId, at: Date.now() }
+        : null;
       setBusy(true);
       setMessage('正在打开文档…');
       try {
@@ -1459,6 +1481,7 @@ export default function App() {
             bookmarks: result.document.bookmarks,
             desktopMeta: result.document,
             initialPage: page ?? result.document.lastPage,
+            sideTab: options?.tab,
           });
         } else if (kind === 'epub') {
           const response = await fetch(assetUrl(result.document.path));
@@ -1475,6 +1498,7 @@ export default function App() {
             bookmarks: result.document.bookmarks,
             desktopMeta: result.document,
             initialPage: page ?? result.document.lastPage,
+            sideTab: options?.tab,
           });
         } else {
           const task = pdfjsLib.getDocument({
@@ -1494,11 +1518,13 @@ export default function App() {
             bookmarks: result.document.bookmarks,
             desktopMeta: result.document,
             initialPage: page ?? result.document.lastPage,
+            sideTab: options?.tab,
           });
         }
         // 导入成功后的提示放在打开完成之后，避免被「正在打开文档…」覆盖。
         setMessage(notice ?? '');
       } catch (error) {
+        pendingAnnotationRef.current = null;
         setMessage(`打开失败：${errorText(error)}`);
       } finally {
         openingRef.current = false;
@@ -1508,10 +1534,7 @@ export default function App() {
     [activate],
   );
 
-  const closeDoc = useCallback(() => {
-    if (closingRef.current) return;
-    closingRef.current = true;
-
+  const performClose = useCallback(() => {
     if (progressTimer.current !== null) {
       window.clearTimeout(progressTimer.current);
       progressTimer.current = null;
@@ -1566,6 +1589,23 @@ export default function App() {
       finish();
     }
   }, [resetHistory, resetSaveState]);
+
+  const closeDoc = useCallback(() => {
+    if (closingRef.current) return;
+    closingRef.current = true;
+    void (async () => {
+      const noteSaved = await (notePanelRef.current?.flush() ?? true);
+      if (
+        !noteSaved &&
+        !window.confirm('笔记尚未保存，确定放弃改动并关闭文档吗？')
+      ) {
+        closingRef.current = false;
+        return;
+      }
+      if (!noteSaved) notePanelRef.current?.discard();
+      performClose();
+    })();
+  }, [performClose]);
 
   const currentBookmark =
     doc?.bookmarks.find((bookmark) => bookmark.page === currentPage) ?? null;
@@ -1889,6 +1929,81 @@ export default function App() {
       }, 2400);
     },
     [],
+  );
+
+  useEffect(() => {
+    const pending = pendingAnnotationRef.current;
+    if (!pending || !doc || doc.id !== pending.docId) return;
+    const annotation = annotations.find((item) => item.id === pending.id);
+    if (!annotation) {
+      if (Date.now() - pending.at > 4000) {
+        pendingAnnotationRef.current = null;
+        setMessage('引用的标注不存在或已删除。');
+      }
+      return;
+    }
+    pendingAnnotationRef.current = null;
+    setSideTab('annotations');
+    jumpTo(annotation);
+    window.requestAnimationFrame(() => {
+      document
+        .querySelector<HTMLElement>(`[data-annotation-id="${annotation.id}"]`)
+        ?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    });
+  }, [doc, annotations, jumpTo]);
+
+  const handleNoteOpenDoc = useCallback(
+    (docId: string, page?: number) => {
+      if (docRef.current?.id === docId) {
+        if (page !== undefined) {
+          goToPage(Math.max(0, Math.min(page, (docRef.current?.pageCount ?? 1) - 1)));
+        }
+        return;
+      }
+      void openById(docId, page);
+    },
+    [goToPage, openById],
+  );
+
+  const handleNoteFocusAnnotation = useCallback(
+    (docId: string, annotationId: string) => {
+      if (docRef.current?.id === docId) {
+        const annotation = annotationsRef.current.find((item) => item.id === annotationId);
+        if (!annotation) {
+          setMessage('引用的标注不存在或已删除。');
+          return;
+        }
+        setSideTab('annotations');
+        jumpTo(annotation);
+        window.requestAnimationFrame(() => {
+          document
+            .querySelector<HTMLElement>(`[data-annotation-id="${annotationId}"]`)
+            ?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        });
+        return;
+      }
+      void openById(docId, undefined, undefined, {
+        tab: 'annotations',
+        annotationId,
+      });
+    },
+    [jumpTo, openById],
+  );
+
+  const handleNoteJumpPage = useCallback(
+    (page: number) => {
+      const count = docRef.current?.pageCount ?? 0;
+      if (count <= 0) return;
+      goToPage(Math.max(0, Math.min(page, count - 1)));
+    },
+    [goToPage],
+  );
+
+  const openNoteById = useCallback(
+    (docId: string) => {
+      void openById(docId, undefined, undefined, { tab: 'notes' });
+    },
+    [openById],
   );
 
   // 换书或关书时清空搜索缓存、结果与侧栏筛选。
@@ -2991,7 +3106,9 @@ export default function App() {
                   ? '标注'
                   : sideTab === 'outline'
                     ? '目录'
-                    : '页面'}
+                    : sideTab === 'pages'
+                      ? '页面'
+                      : '笔记'}
               </h2>
               {sideTab === 'annotations' && (
                 <span
@@ -3007,11 +3124,13 @@ export default function App() {
                     : `${filtered.length} / ${visible.length}`}
                 </span>
               )}
-              <PageJump
-                currentPage={currentPage}
-                pageCount={doc.pageCount}
-                onJump={goToPage}
-              />
+              {sideTab !== 'notes' && (
+                <PageJump
+                  currentPage={currentPage}
+                  pageCount={doc.pageCount}
+                  onJump={goToPage}
+                />
+              )}
               {doc.pdf && (
                 <button
                   type="button"
@@ -3070,6 +3189,15 @@ export default function App() {
                   页面
                 </button>
               )}
+              <button
+                type="button"
+                role="tab"
+                aria-selected={sideTab === 'notes'}
+                className={sideTab === 'notes' ? 'active' : ''}
+                onClick={() => setSideTab('notes')}
+              >
+                笔记
+              </button>
             </div>
 
             {/* 导入入口在侧栏头部，横幅必须对所有标签页可见，否则在目录/页面页触发后看不到进度与确认。 */}
@@ -3120,6 +3248,17 @@ export default function App() {
                 ) : null}
               </div>
             )}
+
+            <div className="notes-panel" hidden={sideTab !== 'notes'}>
+              <NotePanel
+                key={doc.id}
+                ref={notePanelRef}
+                docId={doc.id}
+                onOpenDoc={handleNoteOpenDoc}
+                onFocusAnnotation={handleNoteFocusAnnotation}
+                onJumpPage={handleNoteJumpPage}
+              />
+            </div>
 
             {sideTab === 'annotations' ? (
               <>
@@ -3289,7 +3428,7 @@ export default function App() {
                 onRemoveBookmark={removeBookmark}
                 onRenameBookmark={renameBookmark}
               />
-            ) : activePdf ? (
+            ) : sideTab === 'pages' && activePdf ? (
               <PageThumbnails
                 key={doc.id}
                 pdf={activePdf}
@@ -3311,7 +3450,12 @@ export default function App() {
         view === 'review' ? (
           <Review key={libraryKey} onOpenDoc={openById} onMessage={setMessage} />
         ) : (
-          <Library key={libraryKey} onOpen={openById} onMessage={setMessage} />
+          <Library
+            key={libraryKey}
+            onOpen={openById}
+            onOpenNote={openNoteById}
+            onMessage={setMessage}
+          />
         )
       ) : (
         <main className="workspace welcome">
@@ -3689,7 +3833,12 @@ function AnnotationCard({
   };
 
   return (
-    <article ref={articleRef} className="annotation-card" onClick={onJump}>
+    <article
+      ref={articleRef}
+      className="annotation-card"
+      data-annotation-id={annotation.id}
+      onClick={onJump}
+    >
       <header className="annotation-head">
         <span className="annotation-color">
           <button

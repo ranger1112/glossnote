@@ -158,7 +158,23 @@ async function mockLibrary(page: Page) {
                 quote: '标注的价值不在数量',
                 body: '',
                 color: 'yellow',
+                kind: 'highlight',
                 tags: ['论文'],
+                createdAt: 1,
+                updatedAt: 1,
+              },
+            ];
+          }
+          case 'search_notes': {
+            const query = String(args.query ?? '');
+            if (!query.includes('笔记')) return [];
+            return [
+              {
+                docId: 'doc-a',
+                docName: '深度工作',
+                docTitle: '深度工作',
+                snippet: '…笔记里的想法：专注需要边界…',
+                position: 0,
               },
             ];
           }
@@ -321,6 +337,10 @@ test('书库：正文与标注搜索结果分组显示', async ({ page }) => {
   await search.fill('标注');
   await expect(page.getByText('标注 · 1 条')).toBeVisible();
   await expect(page.getByText('标注的价值不在数量')).toBeVisible();
+
+  await search.fill('笔记');
+  await expect(page.getByText('笔记 · 1 条')).toBeVisible();
+  await expect(page.getByText('笔记里的想法：专注需要边界')).toBeVisible();
 });
 
 test('书库：保存并应用智能收藏夹', async ({ page }) => {

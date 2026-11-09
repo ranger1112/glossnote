@@ -51,6 +51,15 @@ VCVARS      = D:\BuildTools\VC\Auxiliary\Build\vcvars64.bat
 { "libraryDir": "D:\\GlossNote" }
 ```
 
+桌面冒烟需要隔离真实书库时，debug 构建支持把整个应用数据目录重定向到临时目录：
+
+```bash
+GLOSSNOTE_APP_DATA_DIR="C:/Users/you/AppData/Local/Temp/glossnote-smoke/appdata" \
+  src-tauri/target/debug/glossnote.exe
+```
+
+`settings.json` 与 `library.db` 都会落到该目录；release 构建不编译这个分支。MCP 冒烟可把 `settings.json` 的 `mcp.enabled` 设为 `true` 后启动，再用 `curl` 走 `/mcp/<token>` 的 `initialize`、`tools/list`、`tools/call`。
+
 ## Tauri 配置要点
 
 - `tauri = { features = ["protocol-asset"] }` 与 `security.assetProtocol.enable = true` 必须同时存在，否则 `cargo check` 会直接报 allowlist 不匹配。

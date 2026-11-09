@@ -32,10 +32,12 @@ import { buildEpubDocument, extractEpubCover } from './epub';
 import { makeImageCover, makeTextCover } from './covers';
 import { buildLocalHtmlSnapshot, buildWebSnapshot, readLocalHtml } from './webclip';
 import { isTauri, pickDocumentPath } from './platform';
+import { searchNotes } from './notes';
 import { IconSearch, IconStar, IconTrash, IconUpload } from './icons';
 import type {
   DocumentMeta,
   LibrarySort,
+  NoteHit,
   PageHit,
   PageIndexStatus,
   ScanReport,
@@ -51,6 +53,7 @@ import { UrlImportDialog } from './UrlImportDialog';
 
 interface LibraryProps {
   onOpen: (docId: string, page?: number, notice?: string) => void;
+  onOpenNote: (docId: string) => void;
   onMessage: (message: string) => void;
 }
 
@@ -115,7 +118,7 @@ async function inspectPdf(doc: DocumentMeta): Promise<Inspection> {
   }
 }
 
-export function Library({ onOpen, onMessage }: LibraryProps) {
+export function Library({ onOpen, onOpenNote, onMessage }: LibraryProps) {
   const desktop = isTauri();
   const [docs, setDocs] = useState<DocumentMeta[]>([]);
   const [loading, setLoading] = useState(true);
@@ -133,6 +136,7 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
   const [query, setQuery] = useState('');
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [pageHits, setPageHits] = useState<PageHit[]>([]);
+  const [noteHits, setNoteHits] = useState<NoteHit[]>([]);
   const [searching, setSearching] = useState(false);
   const [searchRevision, setSearchRevision] = useState(0);
   const [indexStatus, setIndexStatus] = useState<PageIndexStatus | null>(null);
@@ -419,6 +423,7 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
     if (!term) {
       setHits([]);
       setPageHits([]);
+      setNoteHits([]);
       setSearching(false);
       return;
     }
@@ -429,6 +434,7 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
       // 新查询开始前清掉上一轮结果：某个来源失败时，旧命中不能挂在新查询下面。
       setHits([]);
       setPageHits([]);
+      setNoteHits([]);
       const annotations = searchAnnotations(term)
         .then((value) => {
           if (!cancelled) setHits(value);
@@ -443,8 +449,15 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
         .catch((error) => {
           if (!cancelled) onMessage(`搜索失败：${errorText(error)}`);
         });
+      const notes = searchNotes(term)
+        .then((value) => {
+          if (!cancelled) setNoteHits(value);
+        })
+        .catch((error) => {
+          if (!cancelled) onMessage(`搜索笔记失败：${errorText(error)}`);
+        });
       // 标注命中先到先显示；正文扫描慢时不挡标注。
-      Promise.allSettled([annotations, pages]).finally(() => {
+      Promise.allSettled([annotations, pages, notes]).finally(() => {
         if (!cancelled) setSearching(false);
       });
     }, 240);
@@ -1110,11 +1123,16 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
 
           {searchingNow ? (
             <section className="search-results">
-              {searching && hits.length === 0 && pageHits.length === 0 ? (
+              {searching &&
+              hits.length === 0 &&
+              pageHits.length === 0 &&
+              noteHits.length === 0 ? (
                 <p className="library-empty">搜索中…</p>
-              ) : hits.length === 0 && pageHits.length === 0 ? (
+              ) : hits.length === 0 && pageHits.length === 0 && noteHits.length === 0 ? (
                 <div className="search-empty">
-                  <p className="library-empty">没有匹配「{query.trim()}」的正文或标注。</p>
+                  <p className="library-empty">
+                    没有匹配「{query.trim()}」的正文、标注或笔记。
+                  </p>
                   {indexStatus && indexStatus.indexedDocuments < indexStatus.documents && (
                     <p className="search-index-hint">
                       正文索引覆盖 {indexStatus.indexedDocuments}/{indexStatus.documents} 份文档。
@@ -1179,6 +1197,25 @@ export function Library({ onOpen, onMessage }: LibraryProps) {
                               ))}
                             </div>
                           )}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {noteHits.length > 0 && (
+                    <div className="search-group">
+                      <p className="search-count">笔记 · {noteHits.length} 条</p>
+                      {noteHits.map((hit) => (
+                        <button
+                          key={hit.docId}
+                          type="button"
+                          className="search-hit"
+                          onClick={() => onOpenNote(hit.docId)}
+                        >
+                          <header>
+                            <span className="search-doc">{hit.docTitle || hit.docName}</span>
+                            <span>笔记</span>
+                          </header>
+                          <blockquote>{hit.snippet}</blockquote>
                         </button>
                       ))}
                     </div>

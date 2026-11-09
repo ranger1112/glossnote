@@ -295,7 +295,21 @@ pub struct SearchHit {
     pub quote: String,
     pub body: String,
     pub color: String,
+    pub kind: String,
     pub tags: Vec<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// 书库搜索里的笔记命中；position 是命中在文件中的字节偏移。
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteHit {
+    pub doc_id: String,
+    pub doc_name: String,
+    pub doc_title: String,
+    pub snippet: String,
+    pub position: usize,
 }
 
 /// 全库正文搜索的一条命中；snippet 从原始页面文字里截取，不是索引词。

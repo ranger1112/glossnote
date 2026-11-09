@@ -26,6 +26,15 @@ encoding_rs = "0.8"
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 trash = "5"
+rmcp = { version = "3.9", features = ["transport-streamable-http-server"] }
+axum = "0.8"
+tokio = { version = "1", features = ["net", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+getrandom = "0.4"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tower = { version = "0.5", features = ["util"] }
 
 [profile.release]
 codegen-units = 1

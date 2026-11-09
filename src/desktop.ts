@@ -12,6 +12,11 @@ import type {
   DeleteReport,
   DocumentMeta,
   ImportResult,
+  McpSettingsView,
+  NoteFile,
+  NoteHit,
+  NoteLinkTargets,
+  NoteSaveResult,
   PageHit,
   PageIndexStatus,
   PageTextInput,
@@ -188,6 +193,49 @@ export function searchAnnotations(query: string): Promise<SearchHit[]> {
 /** 全库正文搜索；只覆盖已经缓存过页面文字的文档。 */
 export function searchPages(query: string): Promise<PageHit[]> {
   return invoke('search_pages', { query });
+}
+
+export function searchNotes(query: string): Promise<NoteHit[]> {
+  return invoke('search_notes', { query });
+}
+
+export function readDocumentNote(docId: string): Promise<NoteFile> {
+  return invoke('read_document_note', { docId });
+}
+
+export function saveDocumentNote(
+  docId: string,
+  text: string,
+  expectedRevision: string,
+): Promise<NoteSaveResult> {
+  return invoke('save_document_note', { docId, text, expectedRevision });
+}
+
+export function resolveNoteLinks(
+  annotationIds: string[],
+  docIds: string[],
+): Promise<NoteLinkTargets> {
+  return invoke('resolve_note_links', { annotationIds, docIds });
+}
+
+export function mcpStatus(): Promise<McpSettingsView> {
+  return invoke('mcp_status');
+}
+
+export function mcpSetEnabled(enabled: boolean): Promise<McpSettingsView> {
+  return invoke('mcp_set_enabled', { enabled });
+}
+
+export function mcpSetPort(port: number): Promise<McpSettingsView> {
+  return invoke('mcp_set_port', { port });
+}
+
+export function mcpSetExposeText(exposeText: boolean): Promise<McpSettingsView> {
+  return invoke('mcp_set_expose_text', { exposeText });
+}
+
+export function mcpResetToken(): Promise<McpSettingsView> {
+  return invoke('mcp_reset_token');
 }
 
 export function pageIndexStatus(): Promise<PageIndexStatus> {

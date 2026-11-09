@@ -562,19 +562,24 @@ pub fn update_meta(
 }
 
 fn row_to_annotation(row: &Row<'_>) -> rusqlite::Result<Annotation> {
-    let anchor_text: String = row.get(2)?;
-    let tags_text: String = row.get(6)?;
+    row_to_annotation_at(row, 0)
+}
+
+/// 允许在 SELECT 前多取一列（例如 doc_id），再从 offset 开始映射标注字段。
+fn row_to_annotation_at(row: &Row<'_>, offset: usize) -> rusqlite::Result<Annotation> {
+    let anchor_text: String = row.get(offset + 2)?;
+    let tags_text: String = row.get(offset + 6)?;
     Ok(Annotation {
-        id: row.get(0)?,
-        page: row.get::<_, i64>(1)? as u32,
+        id: row.get(offset)?,
+        page: row.get::<_, i64>(offset + 1)? as u32,
         anchor: serde_json::from_str(&anchor_text).unwrap_or(serde_json::Value::Null),
-        color: row.get(3)?,
-        kind: row.get(4)?,
-        body: row.get(5)?,
+        color: row.get(offset + 3)?,
+        kind: row.get(offset + 4)?,
+        body: row.get(offset + 5)?,
         tags: serde_json::from_str(&tags_text).unwrap_or_default(),
-        created_at: row.get(7)?,
-        updated_at: row.get(8)?,
-        deleted: row.get::<_, i64>(9)? != 0,
+        created_at: row.get(offset + 7)?,
+        updated_at: row.get(offset + 8)?,
+        deleted: row.get::<_, i64>(offset + 9)? != 0,
     })
 }
 
@@ -600,6 +605,39 @@ pub fn get_annotation(conn: &Connection, id: &str) -> Result<Option<Annotation>,
          FROM annotations WHERE id = ?1",
         params![id],
         row_to_annotation,
+    )
+    .optional()
+    .map_err(|error| format!("查询标注失败：{error}"))
+}
+
+pub fn get_annotation_in_doc(
+    conn: &Connection,
+    doc_id: &str,
+    id: &str,
+) -> Result<Option<Annotation>, String> {
+    conn.query_row(
+        "SELECT id, page, anchor, color, kind, body, tags, created_at, updated_at, deleted
+         FROM annotations WHERE doc_id = ?1 AND id = ?2 AND deleted = 0",
+        params![doc_id, id],
+        row_to_annotation,
+    )
+    .optional()
+    .map_err(|error| format!("查询标注失败：{error}"))
+}
+
+/// 笔记引用解析：返回标注所属文档与标注本身，删除的标注不返回。
+pub fn get_annotation_with_doc(
+    conn: &Connection,
+    id: &str,
+) -> Result<Option<(String, Annotation)>, String> {
+    conn.query_row(
+        "SELECT doc_id, id, page, anchor, color, kind, body, tags, created_at, updated_at, deleted
+         FROM annotations WHERE id = ?1 AND deleted = 0",
+        params![id],
+        |row| {
+            let doc_id: String = row.get(0)?;
+            Ok((doc_id, row_to_annotation_at(row, 1)?))
+        },
     )
     .optional()
     .map_err(|error| format!("查询标注失败：{error}"))
@@ -659,8 +697,17 @@ pub fn upsert_annotation(
 }
 
 pub fn search_annotations(conn: &Connection, query: &str) -> Result<Vec<SearchHit>, String> {
+    search_annotations_filtered(conn, query, None, 100)
+}
+
+pub fn search_annotations_filtered(
+    conn: &Connection,
+    query: &str,
+    doc_id: Option<&str>,
+    limit: usize,
+) -> Result<Vec<SearchHit>, String> {
     let term = query.trim();
-    if term.is_empty() {
+    if term.is_empty() || limit == 0 {
         return Ok(Vec::new());
     }
 
@@ -672,27 +719,30 @@ pub fn search_annotations(conn: &Connection, query: &str) -> Result<Vec<SearchHi
 
     let mut statement = conn
         .prepare(
-            "SELECT a.id, a.doc_id, d.name, a.page, a.anchor, a.body, a.color, a.tags
+            "SELECT a.id, a.doc_id, d.name, a.page, a.anchor, a.body, a.color, a.kind, a.tags,
+                    a.created_at, a.updated_at
              FROM annotations a
              JOIN documents d ON d.id = a.doc_id
-             WHERE a.deleted = 0 AND (
-               -- 只搜引文本身：整段 anchor JSON 里还有坐标和 pageHash，
-               -- 直接 LIKE 会让 start、pageHash 这类查询命中所有标注。
-               COALESCE(json_extract(a.anchor, '$.quote'), '') LIKE ?1 ESCAPE '\\'
-               OR a.body LIKE ?1 ESCAPE '\\'
-               OR a.tags LIKE ?1 ESCAPE '\\'
-               OR d.name LIKE ?1 ESCAPE '\\'
-               OR d.title LIKE ?1 ESCAPE '\\'
-             )
+             WHERE a.deleted = 0
+               AND (?2 IS NULL OR a.doc_id = ?2)
+               AND (
+                 -- 只搜引文本身：整段 anchor JSON 里还有坐标和 pageHash，
+                 -- 直接 LIKE 会让 start、pageHash 这类查询命中所有标注。
+                 COALESCE(json_extract(a.anchor, '$.quote'), '') LIKE ?1 ESCAPE '\\'
+                 OR a.body LIKE ?1 ESCAPE '\\'
+                 OR a.tags LIKE ?1 ESCAPE '\\'
+                 OR d.name LIKE ?1 ESCAPE '\\'
+                 OR d.title LIKE ?1 ESCAPE '\\'
+               )
              ORDER BY a.updated_at DESC
-             LIMIT 100",
+             LIMIT ?3",
         )
         .map_err(|error| format!("准备搜索失败：{error}"))?;
 
     let rows = statement
-        .query_map(params![pattern], |row| {
+        .query_map(params![pattern, doc_id, limit as i64], |row| {
             let anchor_text: String = row.get(4)?;
-            let tags_text: String = row.get(7)?;
+            let tags_text: String = row.get(8)?;
             let anchor: serde_json::Value =
                 serde_json::from_str(&anchor_text).unwrap_or(serde_json::Value::Null);
             Ok(SearchHit {
@@ -707,13 +757,26 @@ pub fn search_annotations(conn: &Connection, query: &str) -> Result<Vec<SearchHi
                     .to_string(),
                 body: row.get(5)?,
                 color: row.get(6)?,
+                kind: row.get(7)?,
                 tags: serde_json::from_str(&tags_text).unwrap_or_default(),
+                created_at: row.get(9)?,
+                updated_at: row.get(10)?,
             })
         })
         .map_err(|error| format!("搜索失败：{error}"))?;
 
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|error| format!("读取搜索结果失败：{error}"))
+}
+
+pub fn count_annotations(conn: &Connection) -> Result<usize, String> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM annotations WHERE deleted = 0",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|count| count.max(0) as usize)
+    .map_err(|error| format!("统计标注失败：{error}"))
 }
 
 pub fn is_text_indexed(conn: &Connection, doc_id: &str) -> Result<bool, String> {
@@ -800,6 +863,40 @@ pub fn load_page_texts(conn: &Connection, doc_id: &str) -> Result<Vec<PageTextIn
         .map_err(|error| format!("读取页面文字失败：{error}"))
 }
 
+/// 读取指定页范围（0 基、闭区间）的正文；MCP 分页读取用。
+pub fn page_texts_range(
+    conn: &Connection,
+    doc_id: &str,
+    start: u32,
+    end: u32,
+) -> Result<Vec<(u32, String)>, String> {
+    let mut statement = conn
+        .prepare(
+            "SELECT page, text FROM page_texts
+             WHERE doc_id = ?1 AND page >= ?2 AND page <= ?3
+             ORDER BY page ASC",
+        )
+        .map_err(|error| format!("准备页面文字查询失败：{error}"))?;
+    let rows = statement
+        .query_map(params![doc_id, start as i64, end as i64], |row| {
+            Ok((row.get::<_, i64>(0)? as u32, row.get(1)?))
+        })
+        .map_err(|error| format!("查询页面文字失败：{error}"))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error| format!("读取页面文字失败：{error}"))
+}
+
+/// 已缓存正文的最大页号；文档 page_count 为 0 时兜底。
+pub fn page_texts_max_page(conn: &Connection, doc_id: &str) -> Result<Option<u32>, String> {
+    conn.query_row(
+        "SELECT MAX(page) FROM page_texts WHERE doc_id = ?1",
+        params![doc_id],
+        |row| row.get::<_, Option<i64>>(0),
+    )
+    .map(|value| value.map(|page| page.max(0) as u32))
+    .map_err(|error| format!("查询页面文字范围失败：{error}"))
+}
+
 /// 页面文字缓存是否覆盖 [0, page_count) 的每一页；用于避免重复建立索引。
 pub fn page_texts_ready(conn: &Connection, doc_id: &str, page_count: u32) -> Result<bool, String> {
     if page_count == 0 {
@@ -857,8 +954,17 @@ pub fn save_page_texts(
 
 /// 全库正文搜索。命中来自 page_texts（已缓存正文的页面），片段从原文截取。
 pub fn search_pages(conn: &Connection, query: &str) -> Result<Vec<PageHit>, String> {
+    search_pages_filtered(conn, query, None, 100)
+}
+
+pub fn search_pages_filtered(
+    conn: &Connection,
+    query: &str,
+    doc_id: Option<&str>,
+    limit: usize,
+) -> Result<Vec<PageHit>, String> {
     let term = query.trim();
-    if term.is_empty() {
+    if term.is_empty() || limit == 0 {
         return Ok(Vec::new());
     }
 
@@ -872,12 +978,13 @@ pub fn search_pages(conn: &Connection, query: &str) -> Result<Vec<PageHit>, Stri
              JOIN page_texts p ON p.rowid = page_search.rowid
              JOIN documents d ON d.id = p.doc_id
              WHERE page_search MATCH ?1
+               AND (?2 IS NULL OR p.doc_id = ?2)
              ORDER BY bm25(page_search)
-             LIMIT 100",
+             LIMIT ?3",
         )
         .map_err(|error| format!("准备正文搜索失败：{error}"))?;
     let rows = statement
-        .query_map(params![expression], |row| {
+        .query_map(params![expression, doc_id, limit as i64], |row| {
             let text: String = row.get(3)?;
             Ok(PageHit {
                 doc_id: row.get(0)?,
@@ -1610,5 +1717,91 @@ mod tests {
                 "查询 {query} 不应命中任何标注"
             );
         }
+    }
+
+    #[test]
+    fn filtered_annotation_search_scopes_to_document_and_limit() {
+        let conn = seeded();
+        conn.execute(
+            "INSERT INTO documents
+               (id, name, title, author, page_count, rel_path, size, mtime, added_at)
+             VALUES ('d2', 'other.pdf', '', '', 1, 'books/other.pdf', 1, 1, 1)",
+            [],
+        )
+        .unwrap();
+        let annotation = Annotation {
+            id: "a2".to_string(),
+            page: 0,
+            anchor: serde_json::json!({ "quote": "标注也在另一篇" }),
+            color: "green".to_string(),
+            kind: "underline".to_string(),
+            body: String::new(),
+            tags: Vec::new(),
+            created_at: 2,
+            updated_at: 2,
+            deleted: false,
+        };
+        upsert_annotation(&conn, "d2", &annotation).unwrap();
+
+        let all = search_annotations_filtered(&conn, "标注", None, 100).unwrap();
+        assert_eq!(all.len(), 2);
+        let scoped = search_annotations_filtered(&conn, "标注", Some("d1"), 100).unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].doc_id, "d1");
+        assert_eq!(scoped[0].kind, "highlight");
+        assert!(
+            search_annotations_filtered(&conn, "标注", Some("missing"), 100)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            search_annotations_filtered(&conn, "标注", None, 1)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn annotation_lookup_exposes_doc_and_hides_tombstones() {
+        let conn = seeded();
+        let (doc_id, annotation) = get_annotation_with_doc(&conn, "a1").unwrap().unwrap();
+        assert_eq!(doc_id, "d1");
+        assert_eq!(annotation.id, "a1");
+        assert!(get_annotation_in_doc(&conn, "d2", "a1").unwrap().is_none());
+
+        let mut tombstone = annotation;
+        tombstone.deleted = true;
+        tombstone.updated_at = 2;
+        upsert_annotation(&conn, "d1", &tombstone).unwrap();
+        assert!(get_annotation_with_doc(&conn, "a1").unwrap().is_none());
+        assert!(get_annotation_in_doc(&conn, "d1", "a1").unwrap().is_none());
+        assert_eq!(count_annotations(&conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn page_text_range_and_max_page_are_bounded() {
+        let conn = seeded();
+        save_page_texts(
+            &conn,
+            "d1",
+            &[
+                PageTextInput {
+                    page: 0,
+                    text: "零".to_string(),
+                },
+                PageTextInput {
+                    page: 2,
+                    text: "二".to_string(),
+                },
+            ],
+        )
+        .unwrap();
+
+        let rows = page_texts_range(&conn, "d1", 0, 2).unwrap();
+        assert_eq!(rows, vec![(0, "零".to_string()), (2, "二".to_string())]);
+        assert!(page_texts_range(&conn, "d1", 3, 9).unwrap().is_empty());
+        assert_eq!(page_texts_max_page(&conn, "d1").unwrap(), Some(2));
+        assert_eq!(page_texts_max_page(&conn, "missing").unwrap(), None);
     }
 }

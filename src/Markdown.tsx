@@ -5,12 +5,21 @@ import { Fragment, type ReactNode } from 'react';
  * 行内代码、代码块、引用与分隔线。全部走 React 文本节点，不注入 HTML。
  */
 const INLINE =
-  /(\*\*[^*\n]+\*\*|__[^_\n]+__|`[^`\n]+`|\*[^*\n]+\*|_[^_\n]+_|~~[^~\n]+~~)/g;
+  /(\[\[[^\]\n]+\]\]|\*\*[^*\n]+\*\*|__[^_\n]+__|`[^`\n]+`|\*[^*\n]+\*|_[^_\n]+_|~~[^~\n]+~~)/g;
 
-function inline(text: string, keyPrefix: string): ReactNode[] {
+function inline(
+  text: string,
+  keyPrefix: string,
+  link?: (raw: string) => ReactNode | null,
+): ReactNode[] {
   return text.split(INLINE).map((part, index) => {
     if (!part) return null;
     const key = `${keyPrefix}-${index}`;
+
+    if (part.startsWith('[[') && part.endsWith(']]')) {
+      const node = link?.(part);
+      return node ? <Fragment key={key}>{node}</Fragment> : <Fragment key={key}>{part}</Fragment>;
+    }
 
     if (part.startsWith('**') && part.endsWith('**')) {
       return <strong key={key}>{part.slice(2, -2)}</strong>;
@@ -45,7 +54,10 @@ function isBlockStart(line: string): boolean {
   );
 }
 
-function blocks(text: string): ReactNode[] {
+function blocks(
+  text: string,
+  link?: (raw: string) => ReactNode | null,
+): ReactNode[] {
   const lines = text.replace(/\r\n/g, '\n').split('\n');
   const nodes: ReactNode[] = [];
   let index = 0;
@@ -78,7 +90,7 @@ function blocks(text: string): ReactNode[] {
     const heading = line.match(/^(#{1,4})\s+(.*)$/);
     if (heading) {
       const level = heading[1].length;
-      const content = inline(heading[2], `h${key}`);
+      const content = inline(heading[2], `h${key}`, link);
       if (level === 1) nodes.push(<h1 key={key}>{content}</h1>);
       else if (level === 2) nodes.push(<h2 key={key}>{content}</h2>);
       else if (level === 3) nodes.push(<h3 key={key}>{content}</h3>);
@@ -97,7 +109,7 @@ function blocks(text: string): ReactNode[] {
       nodes.push(
         <ul key={key}>
           {items.map((item, itemIndex) => (
-            <li key={itemIndex}>{inline(item, `${key}-${itemIndex}`)}</li>
+            <li key={itemIndex}>{inline(item, `${key}-${itemIndex}`, link)}</li>
           ))}
         </ul>,
       );
@@ -114,7 +126,7 @@ function blocks(text: string): ReactNode[] {
       nodes.push(
         <ol key={key}>
           {items.map((item, itemIndex) => (
-            <li key={itemIndex}>{inline(item, `${key}-${itemIndex}`)}</li>
+            <li key={itemIndex}>{inline(item, `${key}-${itemIndex}`, link)}</li>
           ))}
         </ol>,
       );
@@ -128,7 +140,9 @@ function blocks(text: string): ReactNode[] {
         quote.push(lines[index].replace(/^\s*>\s?/, ''));
         index += 1;
       }
-      nodes.push(<blockquote key={key}>{inline(quote.join(' '), `${key}-q`)}</blockquote>);
+      nodes.push(
+        <blockquote key={key}>{inline(quote.join(' '), `${key}-q`, link)}</blockquote>,
+      );
       key += 1;
       continue;
     }
@@ -151,7 +165,7 @@ function blocks(text: string): ReactNode[] {
         {paragraph.map((part, partIndex) => (
           <Fragment key={partIndex}>
             {partIndex > 0 && <br />}
-            {inline(part, `${key}-${partIndex}`)}
+            {inline(part, `${key}-${partIndex}`, link)}
           </Fragment>
         ))}
       </p>,
@@ -162,6 +176,12 @@ function blocks(text: string): ReactNode[] {
   return nodes;
 }
 
-export function Markdown({ text }: { text: string }) {
-  return <div className="md">{blocks(text)}</div>;
+export function Markdown({
+  text,
+  link,
+}: {
+  text: string;
+  link?: (raw: string) => ReactNode | null;
+}) {
+  return <div className="md">{blocks(text, link)}</div>;
 }

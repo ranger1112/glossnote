@@ -4,7 +4,9 @@ mod ai;
 mod db;
 mod fsrs;
 mod library;
+mod mcp;
 mod models;
+mod notes;
 mod pdf_export;
 mod search;
 mod settings;
@@ -14,12 +16,14 @@ mod webclip;
 use crate::{
     models::{
         AiAnswer, AiSettingsInput, AiSettingsView, Annotation, Bookmark, CardView, ChatTurn,
-        DeleteReport, Document, DocumentMetaPatch, ImportResult, PageHit, PageIndexStatus,
+        DeleteReport, Document, DocumentMetaPatch, ImportResult, NoteHit, PageHit, PageIndexStatus,
         PageTextInput, ScanReport, SearchHit, SidecarVersion, SmartCollection,
     },
     state::AppState,
 };
+use serde::Serialize;
 use std::{
+    collections::HashMap,
     fs,
     sync::{Mutex, RwLock},
 };
@@ -441,6 +445,170 @@ fn page_index_status(app: AppHandle) -> Result<PageIndexStatus, String> {
 }
 
 #[tauri::command(async)]
+fn search_notes(app: AppHandle, query: String) -> Result<Vec<NoteHit>, String> {
+    library::search_notes(&app, query)
+}
+
+#[tauri::command]
+async fn read_document_note(app: AppHandle, doc_id: String) -> Result<notes::NoteFile, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let root = state.root();
+        {
+            let conn = state
+                .db
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if db::find_by_id(&conn, &doc_id)?.is_none() {
+                return Err(format!("文档不存在：{doc_id}"));
+            }
+        }
+        notes::read_note(&root, &doc_id)
+    })
+    .await
+    .map_err(|error| format!("读取笔记任务失败：{error}"))?
+}
+
+#[tauri::command]
+async fn save_document_note(
+    app: AppHandle,
+    doc_id: String,
+    text: String,
+    expected_revision: String,
+) -> Result<notes::NoteSaveOutcome, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let root = state.root();
+        {
+            let conn = state
+                .db
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if db::find_by_id(&conn, &doc_id)?.is_none() {
+                return Err(format!("文档不存在：{doc_id}"));
+            }
+        }
+        let _guard = state
+            .note_write
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        notes::save_note(&root, &doc_id, &text, &expected_revision)
+    })
+    .await
+    .map_err(|error| format!("保存笔记任务失败：{error}"))?
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NoteAnnotationTarget {
+    doc_id: String,
+    /// 0 基，供阅读器直接跳页。
+    page: u32,
+    quote: String,
+    color: String,
+    kind: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NoteDocumentTarget {
+    title: String,
+    name: String,
+    page_count: u32,
+    kind: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NoteLinkTargets {
+    annotations: HashMap<String, NoteAnnotationTarget>,
+    documents: HashMap<String, NoteDocumentTarget>,
+}
+
+#[tauri::command(async)]
+fn resolve_note_links(
+    app: AppHandle,
+    annotation_ids: Vec<String>,
+    doc_ids: Vec<String>,
+) -> Result<NoteLinkTargets, String> {
+    let state = app.state::<AppState>();
+    let conn = state
+        .db
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let mut annotations = HashMap::new();
+    for id in annotation_ids.into_iter().take(200) {
+        if let Some((doc_id, annotation)) = db::get_annotation_with_doc(&conn, &id)? {
+            let quote = annotation
+                .anchor
+                .get("quote")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string();
+            annotations.insert(
+                id,
+                NoteAnnotationTarget {
+                    doc_id,
+                    page: annotation.page,
+                    quote,
+                    color: annotation.color,
+                    kind: annotation.kind,
+                },
+            );
+        }
+    }
+
+    let mut documents = HashMap::new();
+    for id in doc_ids.into_iter().take(200) {
+        if let Some(document) = db::find_by_id(&conn, &id)? {
+            documents.insert(
+                id,
+                NoteDocumentTarget {
+                    title: document.title,
+                    name: document.name,
+                    page_count: document.page_count,
+                    kind: document.kind,
+                },
+            );
+        }
+    }
+
+    Ok(NoteLinkTargets {
+        annotations,
+        documents,
+    })
+}
+
+#[tauri::command(async)]
+fn mcp_status(app: AppHandle) -> mcp::McpSettingsView {
+    mcp::status(&app)
+}
+
+#[tauri::command]
+async fn mcp_set_enabled(app: AppHandle, enabled: bool) -> Result<mcp::McpSettingsView, String> {
+    mcp::set_enabled(app, enabled).await
+}
+
+#[tauri::command]
+async fn mcp_set_port(app: AppHandle, port: u16) -> Result<mcp::McpSettingsView, String> {
+    mcp::set_port(app, port).await
+}
+
+#[tauri::command]
+async fn mcp_set_expose_text(
+    app: AppHandle,
+    expose_text: bool,
+) -> Result<mcp::McpSettingsView, String> {
+    mcp::set_expose_text(app, expose_text)
+}
+
+#[tauri::command]
+async fn mcp_reset_token(app: AppHandle) -> Result<mcp::McpSettingsView, String> {
+    mcp::reset_token(app).await
+}
+
+#[tauri::command(async)]
 fn save_bookmarks(
     app: AppHandle,
     doc_id: String,
@@ -524,14 +692,12 @@ fn main() {
             }
 
             let handle = app.handle().clone();
-            let app_data = handle
-                .path()
-                .app_data_dir()
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            let app_data = settings::app_data_dir(&handle)
+                .map_err(std::io::Error::other)?;
             fs::create_dir_all(&app_data).map_err(std::io::Error::other)?;
 
             // 先读设置（坏文件会被改名留档），再解析书库目录。
-            let (_, settings_backup) = settings::load_reporting(&handle);
+            let (settings, settings_backup) = settings::load_reporting(&handle);
             let (connection, db_backup, db_degraded) =
                 match db::open_recovering(&app_data.join("library.db")) {
                     Ok((conn, backup)) => (conn, backup, None),
@@ -570,11 +736,19 @@ fn main() {
                 ));
             }
 
+            let mcp_state = mcp::McpState::from_settings(&settings.mcp);
+            let mcp_enabled = settings.mcp.enabled;
             handle.manage(AppState {
                 db: Mutex::new(connection),
                 library_root: RwLock::new(library_root),
                 startup_notice: Mutex::new((!notice.is_empty()).then_some(notice)),
+                mcp: Mutex::new(mcp_state),
+                note_write: Mutex::new(()),
+                settings_write: Mutex::new(()),
             });
+            if mcp_enabled {
+                mcp::spawn_start(handle.clone());
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -630,6 +804,15 @@ fn main() {
             save_smart_collections,
             search_pages,
             page_index_status,
+            search_notes,
+            read_document_note,
+            save_document_note,
+            resolve_note_links,
+            mcp_status,
+            mcp_set_enabled,
+            mcp_set_port,
+            mcp_set_expose_text,
+            mcp_reset_token,
             save_bookmarks,
             list_sidecar_versions,
             restore_sidecar_version,

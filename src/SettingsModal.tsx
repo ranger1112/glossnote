@@ -1,5 +1,6 @@
 import type { AiSettingsView } from './types';
 import type { AvailableUpdate } from './updater';
+import { McpSettingsSection } from './McpSettingsSection';
 import { ShortcutList } from './ShortcutList';
 import { IconMoon, IconSun } from './icons';
 
@@ -248,6 +249,8 @@ export function SettingsModal({
               </div>
             </section>
           )}
+
+          {desktop && <McpSettingsSection />}
 
           {desktop && (
             <section className="settings-section">
