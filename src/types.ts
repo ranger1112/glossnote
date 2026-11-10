@@ -134,6 +134,7 @@ export interface NoteHit {
   docName: string;
   docTitle: string;
   snippet: string;
+  /** 命中在笔记文本中的 UTF-16 code unit 偏移，与 String#indexOf 一致。 */
   position: number;
 }
 

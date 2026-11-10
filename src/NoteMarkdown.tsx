@@ -11,6 +11,11 @@ interface NoteMarkdownProps {
   onJumpPage: (page: number) => void;
 }
 
+/** 只接受自有属性；`[[doc:constructor]]` 不能命中 Object.prototype。 */
+function targetOf<T>(map: Record<string, T>, id: string): T | undefined {
+  return Object.prototype.hasOwnProperty.call(map, id) ? map[id] : undefined;
+}
+
 export function NoteMarkdown({
   text,
   targets,
@@ -36,7 +41,7 @@ export function NoteMarkdown({
     }
 
     if (parsed.kind === 'doc') {
-      const target = targets.documents[parsed.id];
+      const target = targetOf(targets.documents, parsed.id);
       if (!target) return null;
       const label = target.title.trim() || target.name;
       return (
@@ -52,7 +57,7 @@ export function NoteMarkdown({
       );
     }
 
-    const target = targets.annotations[parsed.id];
+    const target = targetOf(targets.annotations, parsed.id);
     if (!target) return null;
     const quote =
       target.quote.length > 40 ? `${target.quote.slice(0, 40)}…` : target.quote;

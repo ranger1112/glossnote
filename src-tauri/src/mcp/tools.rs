@@ -95,6 +95,8 @@ pub struct ReadDocumentTextArgs {
     pub page_start: Option<u32>,
     pub page_end: Option<u32>,
     pub max_chars: Option<usize>,
+    /// 从 pageStart 页的第几个字符开始读；配合 nextCharOffset 继续读取长页。
+    pub char_offset: Option<u32>,
 }
 
 fn clamp_limit(value: Option<usize>) -> usize {
@@ -175,8 +177,8 @@ pub fn list_documents(app: &AppHandle, args: ListDocumentsArgs) -> Result<Docume
     let query = args.query.unwrap_or_default().trim().to_lowercase();
 
     with_connection(app, |conn| {
-        let documents = db::list_documents(conn)?;
-        let matched: Vec<_> = documents
+        let briefs = db::list_document_briefs(conn)?;
+        let matched: Vec<_> = briefs
             .into_iter()
             .filter(|document| {
                 if let Some(kind) = &kind {
@@ -193,12 +195,12 @@ pub fn list_documents(app: &AppHandle, args: ListDocumentsArgs) -> Result<Docume
             })
             .collect();
         let total = matched.len();
-        let items = matched
-            .iter()
-            .skip(offset)
-            .take(limit)
-            .map(mapping::document_summary)
-            .collect();
+        let mut items = Vec::new();
+        for brief in matched.iter().skip(offset).take(limit) {
+            if let Some(document) = db::find_by_id(conn, &brief.id)? {
+                items.push(mapping::document_summary(&document));
+            }
+        }
         Ok(DocumentList {
             items,
             total,
@@ -238,38 +240,36 @@ pub fn list_annotations(
     let limit = clamp_limit(args.limit);
     let kind = validate_annotation_kind(args.kind)?;
     let color = validate_color(args.color)?;
+    let page = args.page;
     with_connection(app, |conn| {
-        db::find_by_id(conn, &args.doc_id)?
-            .ok_or_else(|| format!("文档不存在：{}", args.doc_id))?;
-        let annotations = db::list_annotations(conn, &args.doc_id)?;
-        let matched: Vec<_> = annotations
-            .into_iter()
-            .filter(|annotation| !annotation.deleted)
-            .filter(|annotation| {
-                args.page
-                    .map(|page| annotation.page.saturating_add(1) == page)
-                    .unwrap_or(true)
-            })
-            .filter(|annotation| {
-                kind.as_ref()
-                    .map(|kind| &annotation.kind == kind)
-                    .unwrap_or(true)
-            })
-            .filter(|annotation| {
-                color
-                    .as_ref()
-                    .map(|color| &annotation.color == color)
-                    .unwrap_or(true)
-            })
-            .collect();
-        let total = matched.len();
-        let items = matched
-            .into_iter()
-            .take(limit)
-            .map(|annotation| mapping::annotation_view(&args.doc_id, &annotation))
-            .collect();
+        if !db::document_exists(conn, &args.doc_id)? {
+            return Err(format!("文档不存在：{}", args.doc_id));
+        }
+        let page = match page {
+            // 0 不是合法页码；保持旧的「无命中」行为。
+            Some(0) => {
+                return Ok(AnnotationList {
+                    items: Vec::new(),
+                    total: 0,
+                    limit,
+                })
+            }
+            Some(page) => Some(page - 1),
+            None => None,
+        };
+        let (annotations, total) = db::list_annotations_filtered(
+            conn,
+            &args.doc_id,
+            page,
+            kind.as_deref(),
+            color.as_deref(),
+            limit,
+        )?;
         Ok(AnnotationList {
-            items,
+            items: annotations
+                .iter()
+                .map(|annotation| mapping::annotation_view(&args.doc_id, annotation))
+                .collect(),
             total,
             limit,
         })
@@ -340,34 +340,47 @@ pub fn read_document_text(
         if rows.is_empty() {
             return Err(TEXT_NOT_INDEXED.to_string());
         }
+        ensure_page_coverage((end - start + 1) as usize, rows.len())?;
         let texts: HashMap<u32, String> = rows
             .into_iter()
             .map(|(page, text)| (page.saturating_add(1), text))
             .collect();
 
+        let first_offset = args.char_offset.unwrap_or(0) as usize;
         let mut pages = Vec::new();
         let mut used_chars = 0usize;
         let mut truncated = false;
         let mut next_page = None;
+        let mut next_char_offset = None;
 
         for page in start..=end {
             let remaining = READ_TEXT_TOTAL_CHARS.saturating_sub(used_chars);
             if remaining == 0 {
                 truncated = true;
                 next_page = Some(page);
+                next_char_offset = Some(0);
                 break;
             }
             let text = texts.get(&page).cloned().unwrap_or_default();
-            let (chunk, cut) = take_chars(&text, max_chars.min(remaining));
+            let skip = if page == start { first_offset } else { 0 };
+            let char_count = text.chars().count();
+            if skip > char_count {
+                return Err(format!(
+                    "charOffset 超出第 {page} 页字符数（共 {char_count} 字符）"
+                ));
+            }
+            let (chunk, cut, next_offset) = take_chars_from(&text, skip, max_chars.min(remaining));
             used_chars += chunk.chars().count();
             pages.push(PageText {
                 page,
+                offset: skip as u32,
                 text: chunk,
                 truncated: cut,
             });
             if cut {
                 truncated = true;
-                next_page = (page < end).then_some(page.saturating_add(1));
+                next_page = Some(page);
+                next_char_offset = Some(next_offset as u32);
                 break;
             }
         }
@@ -380,6 +393,7 @@ pub fn read_document_text(
             pages,
             truncated,
             next_page,
+            next_char_offset,
         })
     })
 }
@@ -411,7 +425,7 @@ pub fn library_resource(app: &AppHandle) -> Result<LibrarySummary, String> {
         .config
         .expose_text;
     with_connection(app, |conn| {
-        let documents = db::list_documents(conn)?;
+        let documents = db::list_document_briefs(conn)?;
         let annotations = db::count_annotations(conn)?;
         Ok(mapping::library_summary(
             &documents,
@@ -433,26 +447,35 @@ pub fn document_resource(app: &AppHandle, doc_id: &str) -> Result<DocumentDetail
 pub fn recent_resource_documents(
     app: &AppHandle,
     limit: usize,
-) -> Result<Vec<crate::models::DocumentRow>, String> {
+) -> Result<Vec<crate::models::DocumentBrief>, String> {
     with_connection(app, |conn| {
-        let mut documents = db::list_documents(conn)?;
+        let mut documents = db::list_document_briefs(conn)?;
         documents.truncate(limit);
         Ok(documents)
     })
 }
 
-fn take_chars(text: &str, limit: usize) -> (String, bool) {
-    if limit == 0 {
-        return (String::new(), !text.is_empty());
+fn ensure_page_coverage(expected: usize, found: usize) -> Result<(), String> {
+    if found < expected {
+        Err(format!(
+            "正文索引不完整：请求 {expected} 页，仅索引 {found} 页。请在 GlossNote 书库中重新建立正文索引后重试。"
+        ))
+    } else {
+        Ok(())
     }
+}
+
+/// 从第 `offset` 个字符开始取最多 `limit` 个字符；返回 (文本, 是否还有后续, 下一次偏移)。
+fn take_chars_from(text: &str, offset: usize, limit: usize) -> (String, bool, usize) {
     let mut out = String::new();
-    for (index, character) in text.chars().enumerate() {
+    for (index, character) in text.chars().skip(offset).enumerate() {
         if index >= limit {
-            return (out, true);
+            return (out, true, offset + index);
         }
         out.push(character);
     }
-    (out, false)
+    let used = out.chars().count();
+    (out, false, offset + used)
 }
 
 async fn run<T, F>(app: AppHandle, task: F) -> Result<Json<T>, CallToolResult>
@@ -532,7 +555,7 @@ impl GlossnoteServer {
     }
 
     #[tool(
-        description = "Read indexed page text in a bounded page range. Requires the user to enable text exposure in GlossNote settings."
+        description = "Read indexed page text in a bounded page range. Long pages are split by maxChars and can be continued with charOffset/nextCharOffset. Requires the user to enable text exposure in GlossNote settings."
     )]
     async fn read_document_text(
         &self,
@@ -668,15 +691,38 @@ mod tests {
 
     #[test]
     fn text_is_cut_by_characters_not_bytes() {
-        let (text, cut) = take_chars("你好世界", 2);
+        let (text, cut, next) = take_chars_from("你好世界", 0, 2);
         assert_eq!(text, "你好");
         assert!(cut);
-        let (text, cut) = take_chars("abc", 10);
+        assert_eq!(next, 2);
+
+        let (text, cut, next) = take_chars_from("abc", 0, 10);
         assert_eq!(text, "abc");
         assert!(!cut);
-        let (text, cut) = take_chars("", 0);
+        assert_eq!(next, 3);
+
+        let (text, cut, _) = take_chars_from("", 0, 0);
         assert_eq!(text, "");
         assert!(!cut);
+    }
+
+    #[test]
+    fn partial_page_cache_is_rejected() {
+        assert!(ensure_page_coverage(10, 5).unwrap_err().contains("不完整"));
+        assert!(ensure_page_coverage(10, 10).is_ok());
+    }
+
+    #[test]
+    fn text_can_resume_from_a_character_offset() {
+        let (text, cut, next) = take_chars_from("abcdef", 2, 2);
+        assert_eq!(text, "cd");
+        assert!(cut);
+        assert_eq!(next, 4);
+
+        let (text, cut, next) = take_chars_from("abcdef", 4, 10);
+        assert_eq!(text, "ef");
+        assert!(!cut);
+        assert_eq!(next, 6);
     }
 
     #[test]

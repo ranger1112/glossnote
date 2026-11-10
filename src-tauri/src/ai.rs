@@ -57,19 +57,23 @@ pub fn save_settings(app: &AppHandle, input: AiSettingsInput) -> Result<AiSettin
         return Err("API 地址不能为空".to_string());
     }
 
-    let mut app_settings = settings::load(app);
-    app_settings.ai.enabled = input.enabled;
-    app_settings.ai.provider = provider;
-    app_settings.ai.model = model.to_string();
-    app_settings.ai.base_url = base_url;
+    {
+        // 与 MCP / 书库设置共用同一把写锁，避免并发命令互相覆盖字段。
+        let _guard = settings::write_lock();
+        let mut app_settings = settings::load(app);
+        app_settings.ai.enabled = input.enabled;
+        app_settings.ai.provider = provider;
+        app_settings.ai.model = model.to_string();
+        app_settings.ai.base_url = base_url;
 
-    if input.clear_key {
-        app_settings.ai.api_key.clear();
-    } else if let Some(key) = input.api_key.filter(|value| !value.trim().is_empty()) {
-        app_settings.ai.api_key = key.trim().to_string();
+        if input.clear_key {
+            app_settings.ai.api_key.clear();
+        } else if let Some(key) = input.api_key.filter(|value| !value.trim().is_empty()) {
+            app_settings.ai.api_key = key.trim().to_string();
+        }
+
+        settings::save(app, &app_settings)?;
     }
-
-    settings::save(app, &app_settings)?;
     Ok(settings_view(app))
 }
 

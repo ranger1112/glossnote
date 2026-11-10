@@ -243,10 +243,7 @@ fn update_settings<T>(
     change: impl FnOnce(&mut settings::AppSettings) -> Result<T, String>,
 ) -> Result<(settings::AppSettings, T), String> {
     let state = app.state::<AppState>();
-    let _guard = state
-        .settings_write
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = settings::write_lock();
     let mut settings = settings::load(app);
     let value = change(&mut settings)?;
     settings.mcp.normalize();
@@ -259,10 +256,8 @@ fn update_settings<T>(
 }
 
 pub async fn set_enabled(app: AppHandle, enabled: bool) -> Result<McpSettingsView, String> {
-    let (runtime, generation) = take_runtime(&app).await;
-    if let Some(runtime) = runtime {
-        stop_runtime(runtime).await;
-    }
+    // 先持久化再动监听：写盘失败时旧服务继续运行，不会出现
+    // 「命令报错、端口已关、设置仍是旧的」这种三不管状态。
     let (settings, _) = update_settings(&app, |settings| {
         settings.mcp.enabled = enabled;
         if enabled && settings.mcp.token.is_empty() {
@@ -270,6 +265,10 @@ pub async fn set_enabled(app: AppHandle, enabled: bool) -> Result<McpSettingsVie
         }
         Ok(())
     })?;
+    let (runtime, generation) = take_runtime(&app).await;
+    if let Some(runtime) = runtime {
+        stop_runtime(runtime).await;
+    }
     if enabled {
         start_and_record(&app, McpConfig::from(&settings.mcp), generation).await;
     }
@@ -280,14 +279,14 @@ pub async fn set_port(app: AppHandle, port: u16) -> Result<McpSettingsView, Stri
     if !(1024..=65535).contains(&port) {
         return Err("MCP 端口需在 1024–65535 之间".to_string());
     }
-    let (runtime, generation) = take_runtime(&app).await;
-    if let Some(runtime) = runtime {
-        stop_runtime(runtime).await;
-    }
     let (settings, _) = update_settings(&app, |settings| {
         settings.mcp.port = port;
         Ok(())
     })?;
+    let (runtime, generation) = take_runtime(&app).await;
+    if let Some(runtime) = runtime {
+        stop_runtime(runtime).await;
+    }
     if settings.mcp.enabled {
         start_and_record(&app, McpConfig::from(&settings.mcp), generation).await;
     }
@@ -303,14 +302,14 @@ pub fn set_expose_text(app: AppHandle, expose_text: bool) -> Result<McpSettingsV
 }
 
 pub async fn reset_token(app: AppHandle) -> Result<McpSettingsView, String> {
-    let (runtime, generation) = take_runtime(&app).await;
-    if let Some(runtime) = runtime {
-        stop_runtime(runtime).await;
-    }
     let (settings, _) = update_settings(&app, |settings| {
         settings.mcp.token = generate_token()?;
         Ok(())
     })?;
+    let (runtime, generation) = take_runtime(&app).await;
+    if let Some(runtime) = runtime {
+        stop_runtime(runtime).await;
+    }
     if settings.mcp.enabled {
         start_and_record(&app, McpConfig::from(&settings.mcp), generation).await;
     }

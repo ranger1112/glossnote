@@ -94,7 +94,13 @@ pub fn save_note(
     expected_revision: &str,
 ) -> Result<NoteSaveOutcome, String> {
     let path = note_path(root, doc_id)?;
-    let current = read_note(root, doc_id)?;
+    let current = match read_note(root, doc_id) {
+        Ok(note) => note,
+        // 文件存在但超过 2 MB 或不是 UTF-8：客户端本来就没拿到 revision。
+        // 允许用当前可见内容覆盖或清空，否则这条笔记永远无法恢复。
+        Err(_) if expected_revision.is_empty() => NoteFile::empty(),
+        Err(error) => return Err(error),
+    };
     if current.revision != expected_revision {
         return Ok(NoteSaveOutcome::Conflict { current });
     }
@@ -169,10 +175,14 @@ pub fn scan_notes(root: &Path, query: &str, limit: usize) -> Result<Vec<NoteScan
 
         // 中文大小写不变，精确匹配总能拿到正确偏移；只有 Unicode 大小写
         // 改写导致偏移不可靠时，片段退回从文件开头截取。
-        let position = text.find(term).unwrap_or(0);
+        let byte_position = text.find(term);
+        // 对外统一用 UTF-16 code unit，与浏览器 indexOf 的语义一致。
+        let position = byte_position
+            .map(|offset| text[..offset].encode_utf16().count())
+            .unwrap_or(0);
         hits.push(NoteScanHit {
             doc_id: doc_id.to_string(),
-            snippet: snippet_around(&text, position),
+            snippet: snippet_around(&text, byte_position.unwrap_or(0)),
             position,
         });
         if hits.len() >= limit {
@@ -306,11 +316,59 @@ mod tests {
     }
 
     #[test]
+    fn replaces_unreadable_existing_note() {
+        let root = temp_dir("unreadable");
+        let path = note_path(&root, "doc1").unwrap();
+        fs::write(&path, [0xff, 0xfe, 0xfd]).unwrap();
+
+        let saved = save_note(&root, "doc1", "恢复内容", "").unwrap();
+        let NoteSaveOutcome::Saved { note } = saved else {
+            panic!("expected saved");
+        };
+        assert_eq!(note.text, "恢复内容");
+        assert_eq!(read_note(&root, "doc1").unwrap().text, "恢复内容");
+    }
+
+    #[test]
+    fn clears_oversized_existing_note() {
+        let root = temp_dir("oversized-clear");
+        let path = note_path(&root, "doc1").unwrap();
+        fs::write(&path, vec![b'x'; NOTE_MAX_BYTES as usize + 1]).unwrap();
+
+        let cleared = save_note(&root, "doc1", "  \n", "").unwrap();
+        let NoteSaveOutcome::Saved { note } = cleared else {
+            panic!("expected saved");
+        };
+        assert_eq!(note.revision, "");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn unreadable_note_with_stale_revision_stays_put() {
+        let root = temp_dir("unreadable-stale");
+        let path = note_path(&root, "doc1").unwrap();
+        fs::write(&path, [0xff, 0xfe, 0xfd]).unwrap();
+
+        assert!(save_note(&root, "doc1", "新内容", "stale").is_err());
+        assert!(path.exists());
+    }
+
+    #[test]
     fn rejects_invalid_doc_id() {
         let root = temp_dir("invalid");
         assert!(note_path(&root, "../escape").is_err());
         assert!(note_path(&root, "a/b").is_err());
         assert!(note_path(&root, "").is_err());
+    }
+
+    #[test]
+    fn note_hit_position_uses_utf16_code_units() {
+        let root = temp_dir("utf16");
+        save_note(&root, "doc1", "😀 hello", "").unwrap();
+
+        let hits = scan_notes(&root, "hello", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].position, 3);
     }
 
     #[test]

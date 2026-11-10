@@ -37,6 +37,16 @@ pub struct DocumentRow {
     pub annotation_count: usize,
 }
 
+/// 列表筛选用的轻量字段：不解析 tags/bookmarks，也不做标注计数。
+#[derive(Clone, Debug)]
+pub struct DocumentBrief {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub title: String,
+    pub author: String,
+}
+
 impl DocumentRow {
     pub fn to_document(&self, root: &Path) -> Document {
         let relative = self.rel_path.replace('/', std::path::MAIN_SEPARATOR_STR);
@@ -301,7 +311,7 @@ pub struct SearchHit {
     pub updated_at: i64,
 }
 
-/// 书库搜索里的笔记命中；position 是命中在文件中的字节偏移。
+/// 书库搜索里的笔记命中；position 是命中在文件中的 UTF-16 code unit 偏移。
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct NoteHit {

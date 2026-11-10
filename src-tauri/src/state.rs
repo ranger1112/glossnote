@@ -15,8 +15,6 @@ pub struct AppState {
     pub mcp: Mutex<McpState>,
     /// 笔记保存串行化，避免两个防抖请求同时通过 revision 检查。
     pub note_write: Mutex<()>,
-    /// settings.json 的 MCP 读改写串行化，避免并发命令互相覆盖。
-    pub settings_write: Mutex<()>,
 }
 
 impl AppState {

@@ -1,6 +1,6 @@
 use crate::models::{
-    Annotation, Bookmark, Card, CardRef, CardView, Chunk, DocumentRow, PageHit, PageIndexStatus,
-    PageTextInput, SearchHit,
+    Annotation, Bookmark, Card, CardRef, CardView, Chunk, DocumentBrief, DocumentRow, PageHit,
+    PageIndexStatus, PageTextInput, SearchHit,
 };
 use crate::search;
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -380,6 +380,68 @@ pub fn list_documents(conn: &Connection) -> Result<Vec<DocumentRow>, String> {
         .map_err(|error| format!("读取文档列表失败：{error}"))
 }
 
+/// 只取筛选需要的字段，避免为每一行执行标注计数和 JSON 解析。
+pub fn list_document_briefs(conn: &Connection) -> Result<Vec<DocumentBrief>, String> {
+    let mut statement = conn
+        .prepare(
+            "SELECT id, name, kind, title, author FROM documents
+             ORDER BY last_opened_at DESC, added_at DESC",
+        )
+        .map_err(|error| format!("准备文档摘要查询失败：{error}"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(DocumentBrief {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                kind: row.get(2)?,
+                title: row.get(3)?,
+                author: row.get(4)?,
+            })
+        })
+        .map_err(|error| format!("查询文档摘要失败：{error}"))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error| format!("读取文档摘要失败：{error}"))
+}
+
+pub fn document_exists(conn: &Connection, id: &str) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM documents WHERE id = ?1)",
+        params![id],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|value| value != 0)
+    .map_err(|error| format!("查询文档存在性失败：{error}"))
+}
+
+/// 笔记搜索命中后批量映射文档名；避免每条命中都走一次完整文档查询。
+pub fn document_names(
+    conn: &Connection,
+    ids: &[String],
+) -> Result<HashMap<String, (String, String)>, String> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let placeholders = vec!["?"; ids.len()].join(",");
+    let sql = format!("SELECT id, name, title FROM documents WHERE id IN ({placeholders})");
+    let mut statement = conn
+        .prepare(&sql)
+        .map_err(|error| format!("准备文档名查询失败：{error}"))?;
+    let rows = statement
+        .query_map(
+            rusqlite::params_from_iter(ids.iter().map(|id| id.as_str())),
+            |row| Ok((row.get::<_, String>(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|error| format!("查询文档名失败：{error}"))?;
+
+    let mut names = HashMap::new();
+    for row in rows {
+        let (id, name, title): (String, String, String) =
+            row.map_err(|error| format!("读取文档名失败：{error}"))?;
+        names.insert(id, (name, title));
+    }
+    Ok(names)
+}
+
 pub fn upsert_document(conn: &Connection, document: &DocumentRow) -> Result<(), String> {
     let tags = serde_json::to_string(&document.tags)
         .map_err(|error| format!("序列化文档标签失败：{error}"))?;
@@ -597,6 +659,48 @@ pub fn list_annotations(conn: &Connection, doc_id: &str) -> Result<Vec<Annotatio
 
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|error| format!("读取标注失败：{error}"))
+}
+
+/// 带过滤与分页的标注列表；page 为 0 基，kind/color 为 None 表示不筛选。
+pub fn list_annotations_filtered(
+    conn: &Connection,
+    doc_id: &str,
+    page: Option<u32>,
+    kind: Option<&str>,
+    color: Option<&str>,
+    limit: usize,
+) -> Result<(Vec<Annotation>, usize), String> {
+    const FILTER: &str = "doc_id = ?1 AND deleted = 0
+        AND (?2 IS NULL OR page = ?2)
+        AND (?3 IS NULL OR kind = ?3)
+        AND (?4 IS NULL OR color = ?4)";
+    let page = page.map(|value| value as i64);
+
+    let total: i64 = conn
+        .query_row(
+            &format!("SELECT COUNT(*) FROM annotations WHERE {FILTER}"),
+            params![doc_id, page, kind, color],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("统计标注失败：{error}"))?;
+
+    let mut statement = conn
+        .prepare(&format!(
+            "SELECT id, page, anchor, color, kind, body, tags, created_at, updated_at, deleted
+             FROM annotations WHERE {FILTER} ORDER BY page ASC, created_at ASC LIMIT ?5"
+        ))
+        .map_err(|error| format!("准备标注查询失败：{error}"))?;
+    let rows = statement
+        .query_map(
+            params![doc_id, page, kind, color, limit as i64],
+            row_to_annotation,
+        )
+        .map_err(|error| format!("查询标注失败：{error}"))?;
+
+    let annotations = rows
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error| format!("读取标注失败：{error}"))?;
+    Ok((annotations, total.max(0) as usize))
 }
 
 pub fn get_annotation(conn: &Connection, id: &str) -> Result<Option<Annotation>, String> {
@@ -1803,5 +1907,61 @@ mod tests {
         assert!(page_texts_range(&conn, "d1", 3, 9).unwrap().is_empty());
         assert_eq!(page_texts_max_page(&conn, "d1").unwrap(), Some(2));
         assert_eq!(page_texts_max_page(&conn, "missing").unwrap(), None);
+    }
+
+    #[test]
+    fn document_briefs_and_names_avoid_full_rows() {
+        let conn = seeded();
+        let briefs = list_document_briefs(&conn).unwrap();
+        assert_eq!(briefs.len(), 1);
+        assert_eq!(briefs[0].id, "d1");
+        assert_eq!(briefs[0].kind, "pdf");
+        assert!(document_exists(&conn, "d1").unwrap());
+        assert!(!document_exists(&conn, "missing").unwrap());
+
+        let names = document_names(&conn, &["d1".to_string(), "missing".to_string()]).unwrap();
+        assert_eq!(
+            names.get("d1").map(|(name, _)| name.as_str()),
+            Some("doc.pdf")
+        );
+        assert!(!names.contains_key("missing"));
+    }
+
+    #[test]
+    fn filtered_annotation_list_applies_filters_and_limit() {
+        let conn = seeded();
+        let second = Annotation {
+            id: "a2".to_string(),
+            page: 1,
+            anchor: serde_json::json!({ "quote": "第二页标注" }),
+            color: "green".to_string(),
+            kind: "underline".to_string(),
+            body: "正文".to_string(),
+            tags: Vec::new(),
+            created_at: 2,
+            updated_at: 2,
+            deleted: false,
+        };
+        upsert_annotation(&conn, "d1", &second).unwrap();
+
+        let mut tombstone = second.clone();
+        tombstone.id = "a3".to_string();
+        tombstone.deleted = true;
+        upsert_annotation(&conn, "d1", &tombstone).unwrap();
+
+        let (items, total) =
+            list_annotations_filtered(&conn, "d1", Some(0), Some("highlight"), Some("yellow"), 10)
+                .unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(items[0].id, "a1");
+
+        let (items, total) =
+            list_annotations_filtered(&conn, "d1", Some(1), Some("underline"), None, 10).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(items[0].id, "a2");
+
+        let (items, total) = list_annotations_filtered(&conn, "d1", None, None, None, 1).unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(items.len(), 1);
     }
 }

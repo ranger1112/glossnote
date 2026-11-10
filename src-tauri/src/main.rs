@@ -744,7 +744,6 @@ fn main() {
                 startup_notice: Mutex::new((!notice.is_empty()).then_some(notice)),
                 mcp: Mutex::new(mcp_state),
                 note_write: Mutex::new(()),
-                settings_write: Mutex::new(()),
             });
             if mcp_enabled {
                 mcp::spawn_start(handle.clone());

@@ -58,6 +58,13 @@ describe('NoteMarkdown', () => {
     expect(html).not.toContain('note-link-chip');
   });
 
+  it('does not resolve prototype names as link targets', () => {
+    const html = render('[[doc:constructor]] 与 [[annotation:__proto__]]');
+    expect(html).toContain('[[doc:constructor]]');
+    expect(html).toContain('[[annotation:__proto__]]');
+    expect(html).not.toContain('note-link-chip');
+  });
+
   it('does not link inside code spans', () => {
     const html = render('`[[page:3]]`');
     expect(html).toContain('[[page:3]]');

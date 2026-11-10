@@ -1444,7 +1444,7 @@ export default function App() {
       notice?: string,
       options?: { tab?: SideTab; annotationId?: string },
     ) => {
-      if (openingRef.current) return;
+      if (openingRef.current || closingRef.current) return;
       openingRef.current = true;
       const noteSaved = await (notePanelRef.current?.flush() ?? true);
       if (!noteSaved) {
@@ -1548,7 +1548,13 @@ export default function App() {
       zoomTimerRef.current = null;
     }
 
+    const closingId = docRef.current?.id;
     const finish = () => {
+      // 等待进度落盘期间如果已经打开了另一份文档，不能再把新文档清掉。
+      if (closingId && docRef.current?.id !== closingId) {
+        closingRef.current = false;
+        return;
+      }
       // 关闭文档后在途的书签保存不应再写回状态。
       bookmarkSaveSeq.current += 1;
       docRef.current?.dispose();
@@ -1934,22 +1940,35 @@ export default function App() {
   useEffect(() => {
     const pending = pendingAnnotationRef.current;
     if (!pending || !doc || doc.id !== pending.docId) return;
-    const annotation = annotations.find((item) => item.id === pending.id);
-    if (!annotation) {
-      if (Date.now() - pending.at > 4000) {
-        pendingAnnotationRef.current = null;
-        setMessage('引用的标注不存在或已删除。');
-      }
+    const annotation = annotations.find(
+      (item) => item.id === pending.id && !item.deleted,
+    );
+    if (annotation) {
+      pendingAnnotationRef.current = null;
+      setSideTab('annotations');
+      jumpTo(annotation);
+      window.requestAnimationFrame(() => {
+        document
+          .querySelector<HTMLElement>(`[data-annotation-id="${annotation.id}"]`)
+          ?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      });
       return;
     }
-    pendingAnnotationRef.current = null;
-    setSideTab('annotations');
-    jumpTo(annotation);
-    window.requestAnimationFrame(() => {
-      document
-        .querySelector<HTMLElement>(`[data-annotation-id="${annotation.id}"]`)
-        ?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-    });
+
+    // 文档/标注已经加载但目标不存在：4 秒后主动提示，不能只靠下一次状态变化。
+    const delay = Math.max(0, 4000 - (Date.now() - pending.at));
+    const timer = window.setTimeout(() => {
+      const current = pendingAnnotationRef.current;
+      if (!current || current.docId !== pending.docId || current.id !== pending.id) return;
+      if (
+        annotationsRef.current.some((item) => item.id === pending.id && !item.deleted)
+      ) {
+        return;
+      }
+      pendingAnnotationRef.current = null;
+      setMessage('引用的标注不存在或已删除。');
+    }, delay);
+    return () => window.clearTimeout(timer);
   }, [doc, annotations, jumpTo]);
 
   const handleNoteOpenDoc = useCallback(

@@ -4,9 +4,22 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex, MutexGuard,
+    },
 };
 use tauri::{AppHandle, Manager};
+
+/// 所有 settings.json 的读改写都必须持有这把锁；否则并发命令会把彼此
+/// 刚保存的字段覆盖回旧快照（尤其是 mcp.enabled / exposeText）。
+static SETTINGS_WRITE: Mutex<()> = Mutex::new(());
+
+pub(crate) fn write_lock() -> MutexGuard<'static, ()> {
+    SETTINGS_WRITE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -181,7 +194,9 @@ pub fn load(app: &AppHandle) -> AppSettings {
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// 同目录临时文件 + rename；Windows 上 rename 失败时先删目标再重试。
+/// 同目录临时文件 + rename；失败时保留旧文件，绝不先删除目标。
+/// Windows 的 rename 本身会覆盖已存在的文件，删除目标再重试只会在
+/// 临时文件被锁住时把唯一一份旧数据毁掉。
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -192,9 +207,9 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
     fs::write(&temp, bytes)?;
-    if fs::rename(&temp, path).is_err() {
-        let _ = fs::remove_file(path);
-        fs::rename(&temp, path)?;
+    if let Err(error) = fs::rename(&temp, path) {
+        let _ = fs::remove_file(&temp);
+        return Err(error);
     }
     Ok(())
 }
@@ -244,5 +259,38 @@ mod tests {
         settings.normalize();
         assert_eq!(settings.token.len(), 64);
         assert_eq!(settings.port, 9000);
+    }
+
+    #[test]
+    fn write_atomic_replaces_existing_content() {
+        let dir =
+            std::env::temp_dir().join(format!("glossnote-atomic-replace-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+
+        write_atomic(&path, b"old").unwrap();
+        write_atomic(&path, b"new").unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_atomic_keeps_old_file_when_rename_fails() {
+        let dir =
+            std::env::temp_dir().join(format!("glossnote-atomic-failure-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // 目标是一个目录，rename 必然失败；旧目标不能被删除。
+        let path = dir.join("note.md");
+        fs::create_dir_all(&path).unwrap();
+
+        assert!(write_atomic(&path, b"new").is_err());
+        assert!(path.is_dir());
+        // 临时文件应被清理，目录里只剩目标目录。
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

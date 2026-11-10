@@ -117,13 +117,15 @@ export const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function No
     };
   }, [docId]);
 
-  const startSave = useCallback(async (): Promise<boolean> => {
+  const startSave = useCallback(async (force = false): Promise<boolean> => {
     if (loadingRef.current) return true;
     if (conflictRef.current) return false;
     if (savingRef.current) return savingRef.current;
 
     const value = textRef.current;
-    if (value === savedTextRef.current) return true;
+    // force 用于「覆盖保存」和错误重试：即使文本与上次保存相同，也要写盘，
+    // 否则覆盖冲突或清空不可读文件会被误判为无事可做。
+    if (!force && value === savedTextRef.current) return true;
 
     const promise = (async (): Promise<boolean> => {
       setSaveState({ kind: 'saving' });
@@ -307,7 +309,7 @@ export const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function No
     revisionRef.current = saveState.current.revision;
     conflictRef.current = false;
     setSaveState({ kind: 'dirty' });
-    void startSave();
+    void startSave(true);
   };
 
   const conflictBanner =
@@ -330,7 +332,21 @@ export const NotePanel = forwardRef<NotePanelHandle, NotePanelProps>(function No
       <div className="note-conflict" role="alert">
         <p>{saveState.message}</p>
         <div>
-          <button type="button" className="primary" onClick={() => void startSave()}>
+          <button
+            type="button"
+            className="primary"
+            onClick={() => {
+              if (
+                !textRef.current.trim() &&
+                !window.confirm(
+                  '当前笔记为空。继续会用空内容覆盖无法读取的旧文件，确定吗？',
+                )
+              ) {
+                return;
+              }
+              void startSave(true);
+            }}
+          >
             重试保存
           </button>
         </div>

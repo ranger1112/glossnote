@@ -1,4 +1,4 @@
-use crate::models::{Annotation, Bookmark, DocumentRow, PageHit, SearchHit};
+use crate::models::{Annotation, Bookmark, DocumentBrief, DocumentRow, PageHit, SearchHit};
 use rmcp::schemars::{self, JsonSchema};
 use serde::Serialize;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -102,6 +102,8 @@ pub struct PageSearchList {
 #[serde(rename_all = "camelCase")]
 pub struct PageText {
     pub page: u32,
+    /// 本段文本在该页中的起始字符偏移。
+    pub offset: u32,
     pub text: String,
     pub truncated: bool,
 }
@@ -115,7 +117,9 @@ pub struct DocumentText {
     pub page_end: u32,
     pub pages: Vec<PageText>,
     pub truncated: bool,
+    /// 继续读取时的页码与页内字符偏移；未截断时为 null。
     pub next_page: Option<u32>,
+    pub next_char_offset: Option<u32>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -240,7 +244,7 @@ pub fn page_hit_view(hit: &PageHit) -> PageSearchView {
 }
 
 pub fn library_summary(
-    documents: &[DocumentRow],
+    documents: &[DocumentBrief],
     annotations: usize,
     expose_text: bool,
 ) -> LibrarySummary {

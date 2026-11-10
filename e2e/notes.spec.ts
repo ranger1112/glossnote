@@ -145,3 +145,37 @@ test('笔记：外部修改后保存显示冲突，可重新载入', async ({ pa
   await expect(page.locator('.note-conflict')).not.toBeVisible();
   await expect(page.locator('.note-textarea')).toHaveValue('外部修改的版本');
 });
+
+test('笔记：冲突下改回原文后覆盖保存仍会写盘', async ({ page }) => {
+  await page.goto('/');
+  const text = longText();
+  await openText(page, text);
+  await page.getByRole('tab', { name: '笔记' }).click();
+
+  const textarea = page.locator('.note-textarea');
+  await textarea.fill('本地第一版');
+  await expect(page.locator('.note-status')).toContainText('已保存', { timeout: 5_000 });
+
+  const key = await noteKey(page);
+  expect(key).not.toBe('');
+  await page.evaluate((storageKey) => {
+    localStorage.setItem(
+      storageKey,
+      JSON.stringify({ text: '外部修改的版本', updatedAt: Date.now(), revision: 'stale' }),
+    );
+  }, key);
+
+  await textarea.fill('本地第二版');
+  await expect(page.locator('.note-conflict')).toBeVisible({ timeout: 5_000 });
+  // 改回与上次保存相同的文本，再点覆盖保存：仍必须把原文写回磁盘/存储。
+  await textarea.fill('本地第一版');
+  await page.getByRole('button', { name: '覆盖保存' }).click();
+  await expect(page.locator('.note-conflict')).not.toBeVisible();
+  await expect(page.locator('.note-status')).toContainText('已保存', { timeout: 5_000 });
+
+  const stored = await page.evaluate((storageKey) => {
+    const raw = localStorage.getItem(storageKey);
+    return raw ? (JSON.parse(raw) as { text?: string }).text : null;
+  }, key);
+  expect(stored).toBe('本地第一版');
+});

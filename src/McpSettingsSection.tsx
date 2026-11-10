@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   mcpResetToken,
   mcpSetEnabled,
@@ -18,6 +18,9 @@ export function McpSettingsSection() {
   const [portDraft, setPortDraft] = useState('8765');
   const [copied, setCopied] = useState('');
   const [resetArmed, setResetArmed] = useState(false);
+  const [pollExhausted, setPollExhausted] = useState(false);
+  // 用户正在改端口时，后台状态轮询不能把输入框重置回旧值。
+  const portEditedRef = useRef(false);
 
   const apply = useCallback(async (task: () => Promise<McpSettingsView>) => {
     setBusy(true);
@@ -25,7 +28,8 @@ export function McpSettingsSection() {
     try {
       const next = await task();
       setView(next);
-      setPortDraft(String(next.port));
+      if (!portEditedRef.current) setPortDraft(String(next.port));
+      setPollExhausted(false);
     } catch (reason) {
       setError(errorText(reason));
     } finally {
@@ -39,6 +43,7 @@ export function McpSettingsSection() {
     try {
       const next = await mcpStatus();
       setView(next);
+      portEditedRef.current = false;
       setPortDraft(String(next.port));
     } catch (reason) {
       setError(errorText(reason));
@@ -60,17 +65,24 @@ export function McpSettingsSection() {
   const running = view?.running ?? false;
   const viewError = view?.error ?? null;
   useEffect(() => {
-    if (!enabled || running || viewError) return;
+    if (!enabled || running || viewError) {
+      setPollExhausted(false);
+      return;
+    }
     let attempts = 0;
     const timer = window.setInterval(() => {
       attempts += 1;
       void mcpStatus()
         .then((next) => {
           setView(next);
-          setPortDraft(String(next.port));
+          if (!portEditedRef.current) setPortDraft(String(next.port));
         })
         .catch(() => undefined);
-      if (attempts >= 10) window.clearInterval(timer);
+      // 启动通常在一秒内完成；30 秒仍未落定时给出可操作的提示，而不是永远“正在启动…”。
+      if (attempts >= 60) {
+        window.clearInterval(timer);
+        setPollExhausted(true);
+      }
     }, 500);
     return () => window.clearInterval(timer);
   }, [enabled, running, viewError]);
@@ -88,7 +100,9 @@ export function McpSettingsSection() {
     : running
       ? `运行中 · 127.0.0.1:${view?.actualPort ?? view?.port ?? ''}`
       : enabled
-        ? '正在启动…'
+        ? pollExhausted
+          ? '启动较慢，请重新打开设置刷新状态'
+          : '正在启动…'
         : '已关闭';
 
   const copyConfig = async () => {
@@ -137,12 +151,18 @@ export function McpSettingsSection() {
               max={65535}
               value={portDraft}
               disabled={busy}
-              onChange={(event) => setPortDraft(event.target.value)}
+              onChange={(event) => {
+                portEditedRef.current = true;
+                setPortDraft(event.target.value);
+              }}
             />
             <button
               type="button"
               disabled={busy || Number(portDraft) === view?.port}
-              onClick={() => void apply(() => mcpSetPort(Number(portDraft)))}
+              onClick={() => {
+                portEditedRef.current = false;
+                void apply(() => mcpSetPort(Number(portDraft)));
+              }}
             >
               应用
             </button>

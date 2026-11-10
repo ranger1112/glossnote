@@ -342,7 +342,8 @@ TXT、HTML、EPUB 都映射成统一的 unit 分页模型：阅读器、标注�
 - **笔记 UI**：侧栏「笔记」页签（PDF/TXT/HTML/EPUB 全格式）、编辑/预览、600ms 防抖、`Ctrl/Cmd+S`、专注编辑弹层、冲突「重新载入/覆盖保存」；切文档/关文档前 flush。
 - **引用**：`[[annotation:id]]`、`[[doc:id]]`、`[[doc:id#page=N]]`、`[[page:N]]`，1 基页码；跨文档标注经 `resolve_note_links` 解析，未知目标降级为普通文本。
 - **搜索与导出**：书库搜索新增「笔记」结果组；Markdown 导出在标注前插入「笔记」章节；MCP `get_notes` 读同一文件。
-- **测试与冒烟**：Rust 87 项、Vitest 54 项、Playwright 34 项；隔离沙箱真实应用用 `curl` 验证 initialize、8 个工具、2 个资源、正文开关、token 404 / Origin 403 / 超大 body 413、关闭后端口释放。`GLOSSNOTE_APP_DATA_DIR` 是 debug-only 的沙箱重定向，release 不编译。
+- **测试与冒烟**：Rust 97 项、Vitest 55 项、Playwright 35 项；隔离沙箱真实应用用 `curl` 验证 initialize、8 个工具、2 个资源、正文开关、token 404 / Origin 403 / 超大 body 413、关闭后端口释放。`GLOSSNOTE_APP_DATA_DIR` 是 debug-only 的沙箱重定向，release 不编译。
+- **发布后审查修复（未发版，2026-11-10）**：设置写入串行化；原子写入失败保留旧文件；笔记链接原型属性崩溃、不可读笔记恢复、冲突覆盖保存；MCP 部分索引检测与长页 `charOffset` 续读；文档/标注/笔记查询走轻量 SQL；关闭文档与打开新文档的竞态、标注缺失提示、MCP 端口轮询；`NoteHit.position` 统一为 UTF-16 偏移。
 - **真实客户端验收（T6，2026-11-09）**：本机 Claude Code 2.1.319 通过 `--mcp-config` 连接隔离沙箱；8 个工具全部调用成功，关闭 `exposeText` 后 `list_documents` 仍可用、`search_pages` / `read_document_text` 返回可操作错误。客户端仅对 schemars 的 `uint` / `uint32` format 打印忽略警告，不影响调用。
 - **后续**：deep link、笔记 FTS5、MCP 写入留到 P2。
 

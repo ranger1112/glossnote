@@ -70,11 +70,14 @@ pub fn set_root(app: &AppHandle, path: &str) -> Result<ScanReport, String> {
     fs::write(&probe, b"ok").map_err(|error| format!("书库目录不可写：{error}"))?;
     let _ = fs::remove_file(&probe);
 
-    let mut app_settings = settings::load(app);
-    app_settings.library_dir = Some(root.to_string_lossy().into_owned());
-    // 空文件夹属于旧书库；新书库的文件夹会从文档与 sidecar 重新并出来。
-    app_settings.folders.clear();
-    settings::save(app, &app_settings)?;
+    {
+        let _guard = settings::write_lock();
+        let mut app_settings = settings::load(app);
+        app_settings.library_dir = Some(root.to_string_lossy().into_owned());
+        // 空文件夹属于旧书库；新书库的文件夹会从文档与 sidecar 重新并出来。
+        app_settings.folders.clear();
+        settings::save(app, &app_settings)?;
+    }
 
     {
         let state = app.state::<AppState>();
@@ -1285,13 +1288,15 @@ pub fn search_notes(app: &AppHandle, query: String) -> Result<Vec<NoteHit>, Stri
         .db
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let doc_ids: Vec<String> = scans.iter().map(|scan| scan.doc_id.clone()).collect();
+    let names = db::document_names(&conn, &doc_ids)?;
     let mut hits = Vec::new();
     for scan in scans {
-        if let Some(document) = db::find_by_id(&conn, &scan.doc_id)? {
+        if let Some((name, title)) = names.get(&scan.doc_id) {
             hits.push(NoteHit {
                 doc_id: scan.doc_id,
-                doc_name: document.name,
-                doc_title: document.title,
+                doc_name: name.clone(),
+                doc_title: title.clone(),
                 snippet: scan.snippet,
                 position: scan.position,
             });
@@ -2072,6 +2077,7 @@ pub fn list_folders(app: &AppHandle) -> Vec<String> {
 /// 保存虚拟文件夹列表（允许空文件夹）；返回归一化后的列表。
 pub fn save_folders(app: &AppHandle, folders: Vec<String>) -> Result<Vec<String>, String> {
     let cleaned = clean_folders(folders)?;
+    let _guard = settings::write_lock();
     let mut app_settings = settings::load(app);
     app_settings.folders = cleaned;
     settings::save(app, &app_settings)?;
@@ -2139,6 +2145,7 @@ pub fn save_smart_collections(
     collections: Vec<SmartCollection>,
 ) -> Result<Vec<SmartCollection>, String> {
     let cleaned = clean_smart_collections(collections)?;
+    let _guard = settings::write_lock();
     let mut app_settings = settings::load(app);
     app_settings.collections = cleaned;
     settings::save(app, &app_settings)?;
