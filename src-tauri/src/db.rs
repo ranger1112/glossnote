@@ -365,6 +365,18 @@ pub fn find_by_id(conn: &Connection, id: &str) -> Result<Option<DocumentRow>, St
     .map_err(|error| format!("查询文档失败：{error}"))
 }
 
+/// 按相对路径查文档。用 NOCASE 兼容 Windows 的大小写不敏感路径，
+/// 避免导入时新建一条与旧行指向同一物理文件、但 rel_path 大小写不同的记录。
+pub fn find_by_rel_path(conn: &Connection, rel_path: &str) -> Result<Option<DocumentRow>, String> {
+    conn.query_row(
+        &format!("{DOCUMENT_SELECT} WHERE d.rel_path = ?1 COLLATE NOCASE"),
+        params![rel_path],
+        row_to_document,
+    )
+    .optional()
+    .map_err(|error| format!("查询文档路径失败：{error}"))
+}
+
 pub fn list_documents(conn: &Connection) -> Result<Vec<DocumentRow>, String> {
     let mut statement = conn
         .prepare(&format!(
@@ -770,7 +782,8 @@ pub fn upsert_annotation(
            body = excluded.body,
            tags = excluded.tags,
            updated_at = excluded.updated_at,
-           deleted = excluded.deleted",
+           deleted = excluded.deleted
+         WHERE excluded.updated_at >= annotations.updated_at",
         params![
             annotation.id,
             doc_id,
@@ -1963,5 +1976,31 @@ mod tests {
         let (items, total) = list_annotations_filtered(&conn, "d1", None, None, None, 1).unwrap();
         assert_eq!(total, 2);
         assert_eq!(items.len(), 1);
+    }
+
+    #[test]
+    fn stale_annotation_upsert_is_ignored() {
+        let conn = seeded();
+        let mut newer = get_annotation(&conn, "a1").unwrap().unwrap();
+        newer.body = "newer".to_string();
+        newer.updated_at = 20;
+        upsert_annotation(&conn, "d1", &newer).unwrap();
+
+        // 并发/乱序落盘：较旧的快照不能覆盖较新的状态。
+        let mut older = newer.clone();
+        older.body = "older".to_string();
+        older.updated_at = 10;
+        upsert_annotation(&conn, "d1", &older).unwrap();
+
+        let stored = get_annotation(&conn, "a1").unwrap().unwrap();
+        assert_eq!(stored.body, "newer");
+        assert_eq!(stored.updated_at, 20);
+
+        // 同一时间戳的重复写入仍要落盘，保证幂等保存不被误挡。
+        let mut same_time = newer.clone();
+        same_time.body = "same time".to_string();
+        upsert_annotation(&conn, "d1", &same_time).unwrap();
+        let stored = get_annotation(&conn, "a1").unwrap().unwrap();
+        assert_eq!(stored.body, "same time");
     }
 }

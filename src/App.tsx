@@ -2529,6 +2529,8 @@ export default function App() {
           endSave();
         }
 
+        // 保存期间可能已切到别的文档；旧文档的标注不能提交进新文档的列表。
+        if (docRef.current?.id !== active.id) return;
         commit([...annotationsRef.current, ...created]);
         setFilterColor(null);
         setFilterKind(null);

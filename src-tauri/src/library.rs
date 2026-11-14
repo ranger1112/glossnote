@@ -240,8 +240,8 @@ fn copy_atomic(source: &Path, destination: &Path) -> Result<(), String> {
     let temp = destination.with_extension(format!("pdf.tmp-{}", process::id()));
     fs::copy(source, &temp).map_err(|error| format!("复制 PDF 失败：{error}"))?;
     if let Err(error) = fs::rename(&temp, destination) {
-        let _ = fs::remove_file(destination);
-        fs::rename(&temp, destination).map_err(|_| format!("保存 PDF 失败：{error}"))?;
+        let _ = fs::remove_file(&temp);
+        return Err(format!("保存 PDF 失败：{error}"));
     }
     Ok(())
 }
@@ -625,8 +625,10 @@ fn write_sidecar_bytes(root: &Path, path: &Path, bytes: &[u8]) -> Result<(), Str
     fs::write(&temp, bytes).map_err(|error| format!("写入标注失败：{error}"))?;
 
     if let Err(error) = fs::rename(&temp, path) {
-        let _ = fs::remove_file(path);
-        fs::rename(&temp, path).map_err(|_| format!("保存标注失败：{error}"))?;
+        // 删除目标再重试会在重试也失败时毁掉唯一一份旧 sidecar。
+        // Windows 的 rename 本身就会替换已存在的目标，失败时保留旧文件即可。
+        let _ = fs::remove_file(&temp);
+        return Err(format!("保存标注失败：{error}"));
     }
     Ok(())
 }
@@ -710,15 +712,34 @@ pub fn import_document(app: &AppHandle, source: &str) -> Result<ImportResult, St
     let name = safe_name(original_name);
     let books = root.join("books");
     let destination = unique_dest(&books, &name, &id);
-    if !destination.exists() {
-        copy_atomic(&source, &destination)?;
-    }
-
     let relative = destination
         .strip_prefix(&root)
         .map_err(|_| "无法计算书库相对路径".to_string())?
         .to_string_lossy()
         .replace('\\', "/");
+
+    // rel_path 有唯一索引：目标路径可能被一条文件已缺失的旧行占用。
+    // 先清掉旧行，否则文件复制之后 upsert 会一直撞唯一约束。
+    {
+        let conn = state
+            .db
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(stale) = db::find_by_rel_path(&conn, &relative)? {
+            if stale.id != id {
+                let stale_path =
+                    root.join(stale.rel_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+                // 旧文件还在时说明是大小写敏感文件系统上的另一个文件，不能动它。
+                if !stale_path.exists() {
+                    db::remove_document(&conn, &stale.id, now)?;
+                }
+            }
+        }
+    }
+
+    if !destination.exists() {
+        copy_atomic(&source, &destination)?;
+    }
     let file_metadata =
         fs::metadata(&destination).map_err(|error| format!("读取书库文件失败：{error}"))?;
     let document_name = destination
@@ -907,18 +928,24 @@ pub fn scan(app: &AppHandle) -> Result<ScanReport, String> {
     let mut entries = Vec::new();
     let mut seen_paths = std::collections::HashSet::new();
     for entry in fs::read_dir(&books).map_err(|error| format!("读取书库失败：{error}"))? {
-        let entry = entry.map_err(|error| format!("读取书库条目失败：{error}"))?;
+        let Ok(entry) = entry else {
+            continue;
+        };
         let path = entry.path();
         if !path.is_file() || !is_supported_document(&path) {
             continue;
         }
-        let metadata = fs::metadata(&path).map_err(|error| format!("读取书库文件失败：{error}"))?;
         let relative = path
             .strip_prefix(&root)
             .map_err(|_| "无法计算书库相对路径".to_string())?
             .to_string_lossy()
             .replace('\\', "/");
+        // 先记下路径：单个文件读不到时不应把它当成「已缺失」并从书库隐藏。
         seen_paths.insert(relative.clone());
+        let Ok(metadata) = fs::metadata(&path) else {
+            eprintln!("跳过无法读取的文件：{}", path.display());
+            continue;
+        };
         entries.push((path, relative, metadata.len(), mtime_ms(&metadata)));
     }
     entries.sort_by(|left, right| left.0.cmp(&right.0));
@@ -942,7 +969,14 @@ pub fn scan(app: &AppHandle) -> Result<ScanReport, String> {
         // 路径、大小、修改时间都没变就沿用旧哈希，否则重新计算。
         let id = match &by_path {
             Some(row) if row.size == size && row.mtime == mtime => row.id.clone(),
-            _ => hash_file(&path)?,
+            _ => match hash_file(&path) {
+                Ok(id) => id,
+                Err(error) => {
+                    // 云盘占用、扫描期间被改名都不该让整座书库失去索引。
+                    eprintln!("跳过无法读取的文件 {}：{error}", path.display());
+                    continue;
+                }
+            },
         };
         resolved.push((path, relative, size, mtime, id, by_path));
     }
@@ -956,15 +990,23 @@ pub fn scan(app: &AppHandle) -> Result<ScanReport, String> {
     let mut duplicate_pdfs = 0;
 
     for (path, relative, size, mtime, id, by_path) in resolved {
+        if let Some(stale) = &by_path {
+            if stale.id != id {
+                // 同一轮扫描里，改名后的文件可能已经把这一行重绑到新路径；
+                // 只有旧行仍指向当前路径时才删除，避免误删刚索引的文档。
+                let still_here =
+                    db::find_by_id(&conn, &stale.id)?.is_some_and(|row| row.rel_path == relative);
+                if still_here {
+                    db::remove_document(&conn, &stale.id, now)?;
+                }
+            }
+        }
+
+        // 内容已由更早排序的同内容文件索引：旧行必须在跳过之前清理，
+        // 否则它会永远挂着旧内容留在库里。
         if !seen.insert(id.clone()) {
             duplicate_pdfs += 1;
             continue;
-        }
-
-        if let Some(stale) = &by_path {
-            if stale.id != id {
-                db::remove_document(&conn, &stale.id, now)?;
-            }
         }
 
         let prior = db::find_by_id(&conn, &id)?;
@@ -1183,8 +1225,8 @@ pub fn save_cover(
     let temp = path.with_extension(format!("jpg.tmp-{}-{}", process::id(), now_ms()));
     fs::write(&temp, &bytes).map_err(|error| format!("写入封面失败：{error}"))?;
     if let Err(error) = fs::rename(&temp, &path) {
-        let _ = fs::remove_file(&path);
-        fs::rename(&temp, &path).map_err(|_| format!("保存封面失败：{error}"))?;
+        let _ = fs::remove_file(&temp);
+        return Err(format!("保存封面失败：{error}"));
     }
 
     db::set_cover(&conn, doc_id, &relative, &source)?;
