@@ -67,7 +67,7 @@ test('TXT：分页阅读、划词高亮、页内查找与刷新复原', async ({
   await page.keyboard.press('Control+f');
   await page.locator('.find-bar input').fill('Anchoring');
   await expect(page.locator('.find-count')).toContainText('/', { timeout: 20_000 });
-  await expect(page.locator('.search-hit').first()).toBeVisible();
+  await expect(page.locator('.find-hit').first()).toBeVisible();
   await page.keyboard.press('Escape');
 
   // 刷新后重新打开同一份 TXT，标注仍在。

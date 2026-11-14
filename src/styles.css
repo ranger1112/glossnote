@@ -1757,7 +1757,7 @@ select {
   outline: 1px dashed rgba(220, 38, 38, 0.55);
 }
 
-.search-hit {
+.find-hit {
   position: absolute;
   border-radius: 2px;
   background: rgba(245, 158, 11, 0.22);

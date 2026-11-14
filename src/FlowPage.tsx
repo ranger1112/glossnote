@@ -284,7 +284,7 @@ export const FlowPage = memo(function FlowPage({
     const hits = searchRange ? rectsFromRange(searchRange, pageElement) : [];
     for (const rect of hits) {
       const element = document.createElement('div');
-      element.className = 'search-hit';
+      element.className = 'find-hit';
       element.style.left = `${rect.x * pageRect.width}px`;
       element.style.top = `${rect.y * pageRect.height}px`;
       element.style.width = `${rect.w * pageRect.width}px`;
