@@ -164,7 +164,8 @@ export function AiSettingsModal({
             autoComplete="off"
             onChange={(event) => {
               setApiKey(event.target.value);
-              setClearKey(false);
+              // 只有真正输入了新 Key 才取消「清除旧 Key」；输入后清空不算。
+              if (event.target.value) setClearKey(false);
             }}
           />
         </label>
