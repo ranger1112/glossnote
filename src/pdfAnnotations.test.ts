@@ -63,13 +63,13 @@ describe('PDF 自带标注', () => {
 
   it('用文字项几何找出被覆盖的字符区间', () => {
     const { text, starts } = joinPdfItems(items);
-    expect(text).toBe('AlphaBeta Gamma\n');
+    expect(text).toBe('Alpha BetaGamma\n');
 
     const lineOne: Box = { x1: 0, y1: 95, x2: 130, y2: 112 };
-    expect(textRangeForBoxes(items, starts, [lineOne], text)).toEqual({ start: 0, end: 9 });
+    expect(textRangeForBoxes(items, starts, [lineOne], text)).toEqual({ start: 0, end: 10 });
 
     const onlyBeta: Box = { x1: 75, y1: 95, x2: 125, y2: 112 };
-    expect(textRangeForBoxes(items, starts, [onlyBeta], text)).toEqual({ start: 5, end: 9 });
+    expect(textRangeForBoxes(items, starts, [onlyBeta], text)).toEqual({ start: 6, end: 10 });
 
     const lineTwo: Box = { x1: 0, y1: 68, x2: 80, y2: 82 };
     expect(textRangeForBoxes(items, starts, [lineTwo], text)).toEqual({ start: 10, end: 15 });

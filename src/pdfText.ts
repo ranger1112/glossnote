@@ -33,16 +33,21 @@ export function joinPdfItems(items: TextItemLike[]): { text: string; starts: num
   let previous: TextItemLike | null = null;
 
   items.forEach((item) => {
-    starts.push(text.length);
     if (item.str.length > 0) {
+      // 空格属于前一个 item 与当前 item 之间，必须在拼接当前 item 之前写入。
+      if (previous && needsSpace(previous, item)) {
+        text += ' ';
+      }
+      starts.push(text.length);
       text += item.str;
       if (item.hasEOL) {
         text += '\n';
-      } else if (previous && needsSpace(previous, item)) {
-        text += ' ';
       }
-    } else if (item.hasEOL) {
-      text += '\n';
+    } else {
+      starts.push(text.length);
+      if (item.hasEOL) {
+        text += '\n';
+      }
     }
 
     previous = item;
