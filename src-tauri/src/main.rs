@@ -709,7 +709,9 @@ fn main() {
                     ),
                 };
             let library_root = library::resolve_root(&handle).map_err(std::io::Error::other)?;
-            library::ensure_dirs(&library_root).map_err(std::io::Error::other)?;
+            // 书库目录可能位于离线的 NAS / 云盘。创建失败不能让整个应用
+            // 在 release 构建里静默退出；先启动界面，让用户能进设置改路径。
+            let library_error = library::ensure_dirs(&library_root).err();
 
             let mut notice = String::new();
             if let Some(error) = &db_degraded {
@@ -731,8 +733,16 @@ fn main() {
                     notice.push('\n');
                 }
                 notice.push_str(&format!(
-                    "设置文件无法解析，已备份为 {}，书库位置与 AI 配置回到默认值。",
+                    "设置文件无法读取或解析，已备份为 {}，书库位置与 AI 配置回到默认值。",
                     path.display()
+                ));
+            }
+            if let Some(error) = &library_error {
+                if !notice.is_empty() {
+                    notice.push('\n');
+                }
+                notice.push_str(&format!(
+                    "书库目录无法使用（{error}）。可以在「设置 → 书库位置」改到本机目录，或恢复该目录后重新扫描。"
                 ));
             }
 

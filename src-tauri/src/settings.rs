@@ -159,14 +159,34 @@ pub fn path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(app_data_dir(app)?.join("settings.json"))
 }
 
-/// 解析失败时把坏文件改名留档，再用默认值启动。
+/// 把无法使用的设置文件改名留档；rename 因占用失败时至少复制一份副本。
+fn backup_settings_file(path: &Path) -> Option<PathBuf> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    let backup = path.with_extension(format!("json.broken-{stamp}"));
+    if fs::rename(path, &backup).is_ok() {
+        return Some(backup);
+    }
+    fs::copy(path, &backup).ok().map(|_| backup)
+}
+
+/// 读取失败（编码非法、权限、云盘瞬时占用）与解析失败一样要留档：
 /// 直接回退默认值会让用户以为书库「空了」，而且下一次保存会覆盖掉原文件。
 pub fn load_reporting(app: &AppHandle) -> (AppSettings, Option<PathBuf>) {
     let Ok(path) = path(app) else {
         return (AppSettings::default(), None);
     };
-    let Ok(text) = fs::read_to_string(&path) else {
-        return (AppSettings::default(), None);
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return (AppSettings::default(), None);
+        }
+        Err(error) => {
+            eprintln!("读取设置文件失败：{error}");
+            return (AppSettings::default(), backup_settings_file(&path));
+        }
     };
     match serde_json::from_str::<AppSettings>(&text) {
         Ok(mut settings) => {
@@ -175,15 +195,7 @@ pub fn load_reporting(app: &AppHandle) -> (AppSettings, Option<PathBuf>) {
         }
         Err(error) => {
             eprintln!("设置文件无法解析：{error}");
-            let stamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_millis())
-                .unwrap_or(0);
-            let backup = path.with_extension(format!("json.broken-{stamp}"));
-            match fs::rename(&path, &backup) {
-                Ok(()) => (AppSettings::default(), Some(backup)),
-                Err(_) => (AppSettings::default(), None),
-            }
+            (AppSettings::default(), backup_settings_file(&path))
         }
     }
 }
