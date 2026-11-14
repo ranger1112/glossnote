@@ -174,7 +174,7 @@ page_search USING fts5(tokens, content='page_texts', content_rowid='rowid');
 
 已知边界：
 
-- 旋转页面按未旋转的原始 viewport 计算坐标。
+- 旋转页面按 pdf.js 显示后的 viewport 计算矩形；导出带标注 PDF 时会按页面 `/Rotate` 逆旋转回 PDF 用户空间。
 - 双栏 PDF 依赖文本层阅读顺序，不按视觉顺序。
 - 扫描件没有文本层：0.1 明确提示，不假装能高亮；OCR 在 0.4.0 之后。
 - 页面指纹是页级 FNV-1a，不是文档级；单页改动不会影响其他页。
