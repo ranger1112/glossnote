@@ -5,12 +5,12 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use reqwest::{
     header::{CONTENT_TYPE, LOCATION},
-    Client, Url,
+    Client, ClientBuilder, Url,
 };
 use serde::Serialize;
 use std::{
     collections::HashMap,
-    net::{IpAddr, ToSocketAddrs},
+    net::{IpAddr, SocketAddr, ToSocketAddrs},
     path::Path,
     time::Duration,
 };
@@ -37,12 +37,25 @@ pub struct DownloadedAsset {
     pub error: Option<String>,
 }
 
-fn client(timeout_secs: u64) -> Result<Client, String> {
+fn client_builder(timeout_secs: u64) -> ClientBuilder {
     Client::builder()
         .timeout(Duration::from_secs(timeout_secs))
         // 重定向手动跟随，每一跳都要重新做私网校验。
         .redirect(reqwest::redirect::Policy::none())
         .user_agent(USER_AGENT)
+}
+
+fn client(timeout_secs: u64) -> Result<Client, String> {
+    client_builder(timeout_secs)
+        .build()
+        .map_err(|error| format!("创建网络客户端失败：{error}"))
+}
+
+/// 把连接固定在校验过的地址上，避免校验与 reqwest 各自解析一次 DNS
+/// 造成 DNS rebinding（校验时是公网 IP，连接时变成内网 IP）。
+fn pinned_client(timeout_secs: u64, host: &str, addrs: &[SocketAddr]) -> Result<Client, String> {
+    client_builder(timeout_secs)
+        .resolve_to_addrs(host, addrs)
         .build()
         .map_err(|error| format!("创建网络客户端失败：{error}"))
 }
@@ -70,26 +83,48 @@ fn allow_private_urls() -> bool {
     cfg!(debug_assertions) && std::env::var_os("GLOSSNOTE_ALLOW_PRIVATE_URLS").is_some()
 }
 
+/// 非全局 IPv4 网段。std 的 is_private / is_documentation 没有覆盖
+/// CGNAT、基准测试、IETF 保留、240/4 等段，这里按 IANA 特殊用途地址表补齐。
+fn ipv4_is_non_global(v4: std::net::Ipv4Addr) -> bool {
+    let octets = v4.octets();
+    v4.is_private()
+        || v4.is_loopback()
+        || v4.is_link_local()
+        || v4.is_broadcast()
+        || v4.is_documentation()
+        || v4.is_unspecified()
+        || v4.is_multicast()
+        || octets[0] == 0
+        || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+        || (octets[0] == 198 && (octets[1] == 18 || octets[1] == 19))
+        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+        || (octets[0] == 192 && octets[1] == 88 && octets[2] == 99)
+        || octets[0] >= 240
+}
+
 fn blocked_ip(ip: IpAddr) -> bool {
     match ip {
-        IpAddr::V4(v4) => {
-            v4.is_private()
-                || v4.is_loopback()
-                || v4.is_link_local()
-                || v4.is_broadcast()
-                || v4.is_documentation()
-                || v4.is_unspecified()
-                || v4.is_multicast()
-        }
+        IpAddr::V4(v4) => ipv4_is_non_global(v4),
         IpAddr::V6(v6) => {
             if let Some(v4) = v6.to_ipv4_mapped() {
-                return blocked_ip(IpAddr::V4(v4));
+                return ipv4_is_non_global(v4);
             }
+            let segments = v6.segments();
             v6.is_loopback()
                 || v6.is_unspecified()
                 || v6.is_multicast()
                 || v6.is_unique_local()
                 || v6.is_unicast_link_local()
+                // NAT64 64:ff9b::/96 与本地 NAT64 64:ff9b:1::/48
+                || (segments[0] == 0x0064 && segments[1] == 0xff9b)
+                // 6to4 2002::/16 与 Teredo 2001::/32
+                || segments[0] == 0x2002
+                || (segments[0] == 0x2001 && segments[1] == 0)
+                // 100::/64 仅用于丢弃
+                || (segments[0] == 0x0100
+                    && segments[1] == 0
+                    && segments[2] == 0
+                    && segments[3] == 0)
         }
     }
 }
@@ -105,7 +140,8 @@ fn ensure_public_ip(ip: IpAddr) -> Result<(), String> {
     }
 }
 
-async fn validate_public_url(url: Url) -> Result<Url, String> {
+/// 返回校验后的 URL，以及域名对应的已校验地址（IP 字面量不需要固定）。
+async fn validate_public_url(url: Url) -> Result<(Url, Option<(String, Vec<SocketAddr>)>), String> {
     match url.scheme() {
         "http" | "https" => {}
         scheme => return Err(format!("只支持 http/https 链接（当前为 {scheme}）")),
@@ -121,7 +157,7 @@ async fn validate_public_url(url: Url) -> Result<Url, String> {
     let bare = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = bare.parse::<IpAddr>() {
         ensure_public_ip(ip)?;
-        return Ok(url);
+        return Ok((url, None));
     }
 
     let lower = host.to_ascii_lowercase();
@@ -140,26 +176,31 @@ async fn validate_public_url(url: Url) -> Result<Url, String> {
     .map_err(|error| format!("解析域名失败：{error}"))?
     .map_err(|error| format!("解析域名失败：{error}"))?;
 
-    let mut found = false;
+    let mut resolved = Vec::new();
     for address in addresses {
-        found = true;
         ensure_public_ip(address.ip())?;
+        resolved.push(address);
     }
-    if !found {
+    if resolved.is_empty() {
         return Err("域名没有可用地址".to_string());
     }
-    Ok(url)
+    Ok((url, Some((host, resolved))))
 }
 
 async fn get_following_redirects(
-    client: &Client,
+    timeout_secs: u64,
     start: Url,
 ) -> Result<(Url, reqwest::Response), String> {
     let mut current = start;
     for attempt in 0..=MAX_REDIRECTS {
-        current = validate_public_url(current).await?;
+        let (url, pin) = validate_public_url(current).await?;
+        // 每一跳都用校验过的地址建客户端，防止 DNS 在校验与连接之间被改写。
+        let client = match &pin {
+            Some((host, addrs)) => pinned_client(timeout_secs, host, addrs)?,
+            None => client(timeout_secs)?,
+        };
         let response = client
-            .get(current.clone())
+            .get(url.clone())
             .send()
             .await
             .map_err(|error| format!("请求失败：{error}"))?;
@@ -173,12 +214,12 @@ async fn get_following_redirects(
                 .get(LOCATION)
                 .and_then(|value| value.to_str().ok())
                 .ok_or_else(|| "重定向缺少 Location".to_string())?;
-            current = current
+            current = url
                 .join(location)
                 .map_err(|error| format!("重定向地址无效：{error}"))?;
             continue;
         }
-        return Ok((current, response));
+        return Ok((url, response));
     }
     Err("重定向次数过多".to_string())
 }
@@ -228,8 +269,7 @@ fn guess_image_mime(url: &Url) -> Option<&'static str> {
 
 pub async fn fetch_web_page(url: String) -> Result<FetchedWebPage, String> {
     let start = Url::parse(url.trim()).map_err(|error| format!("网址格式不正确：{error}"))?;
-    let client = client(20)?;
-    let (final_url, response) = get_following_redirects(&client, start).await?;
+    let (final_url, response) = get_following_redirects(20, start).await?;
     if !response.status().is_success() {
         return Err(format!("页面返回 HTTP {}", response.status()));
     }
@@ -258,9 +298,13 @@ pub async fn fetch_web_page(url: String) -> Result<FetchedWebPage, String> {
     })
 }
 
-async fn download_one(client: &Client, raw: &str, remaining: &mut usize) -> Result<String, String> {
+async fn download_one(
+    timeout_secs: u64,
+    raw: &str,
+    remaining: &mut usize,
+) -> Result<String, String> {
     let start = Url::parse(raw).map_err(|error| format!("图片地址无效：{error}"))?;
-    let (final_url, response) = get_following_redirects(client, start).await?;
+    let (final_url, response) = get_following_redirects(timeout_secs, start).await?;
     if !response.status().is_success() {
         return Err(format!("HTTP {}", response.status()));
     }
@@ -289,7 +333,6 @@ pub async fn download_web_assets(urls: Vec<String>) -> Result<Vec<DownloadedAsse
         return Err(format!("一次最多下载 {MAX_IMAGES} 张图片"));
     }
 
-    let client = client(15)?;
     let mut remaining = MAX_TOTAL_IMAGE_BYTES;
     let mut cache: HashMap<String, DownloadedAsset> = HashMap::new();
     let mut result = Vec::with_capacity(urls.len());
@@ -299,7 +342,7 @@ pub async fn download_web_assets(urls: Vec<String>) -> Result<Vec<DownloadedAsse
             result.push(asset.clone());
             continue;
         }
-        let asset = match download_one(&client, &url, &mut remaining).await {
+        let asset = match download_one(15, &url, &mut remaining).await {
             Ok(data_url) => DownloadedAsset {
                 url: url.clone(),
                 data_url: Some(data_url),
@@ -336,6 +379,24 @@ mod tests {
         }
         assert!(!blocked_ip("8.8.8.8".parse().unwrap()));
         assert!(!blocked_ip("2001:4860:4860::8888".parse().unwrap()));
+    }
+
+    #[test]
+    fn rejects_non_global_ranges() {
+        for ip in [
+            "100.64.0.1",
+            "100.100.100.200",
+            "0.1.2.3",
+            "198.18.0.1",
+            "192.0.0.1",
+            "240.0.0.1",
+            "64:ff9b::a00:1",
+            "2002:7f00:1::1",
+            "2001::1",
+            "100::1",
+        ] {
+            assert!(blocked_ip(ip.parse().unwrap()), "{ip} 应被拒绝");
+        }
     }
 
     #[test]
