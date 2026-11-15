@@ -56,7 +56,7 @@ export function AiSettingsModal({
       model,
       baseUrl,
       apiKey: apiKey.trim() || null,
-      clearKey,
+      clearKey: clearKey && !apiKey.trim(),
     });
     onSaved(view);
     setApiKey('');
@@ -163,8 +163,9 @@ export function AiSettingsModal({
             placeholder={initial.apiKeySet ? '输入新 Key 以替换，留空不修改' : '粘贴 API Key'}
             autoComplete="off"
             onChange={(event) => {
+              // 只更新输入值；是否清除旧 Key 由 clearKey 意图决定，
+              // 输入后再删除不能把「切换服务商需要清除旧 Key」取消掉。
               setApiKey(event.target.value);
-              setClearKey(false);
             }}
           />
         </label>

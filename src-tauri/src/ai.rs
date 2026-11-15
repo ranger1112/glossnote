@@ -117,6 +117,37 @@ fn http_error(status: reqwest::StatusCode, body: &str) -> String {
     format!("AI 请求失败（HTTP {status}）：{}", truncate(&detail, 300))
 }
 
+/// 增量解码 UTF-8：一个多字节字符可能跨两个网络 chunk，
+/// 逐块 from_utf8_lossy 会把它替换成 U+FFFD。
+fn decode_utf8(pending: &mut Vec<u8>, out: &mut String) {
+    loop {
+        match std::str::from_utf8(pending) {
+            Ok(text) => {
+                out.push_str(text);
+                pending.clear();
+                return;
+            }
+            Err(error) => {
+                let valid = error.valid_up_to();
+                if valid > 0 {
+                    let text = std::str::from_utf8(&pending[..valid])
+                        .expect("valid_up_to 保证前缀是合法 UTF-8");
+                    out.push_str(text);
+                    pending.drain(..valid);
+                }
+                match error.error_len() {
+                    Some(len) => {
+                        out.push('\u{FFFD}');
+                        pending.drain(..len);
+                    }
+                    // 末尾是不完整的字符，等下一个 chunk 再解码。
+                    None => return,
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AiStreamPayload {
@@ -280,6 +311,7 @@ async fn complete_stream(
     }
 
     let mut buffer = String::new();
+    let mut raw_bytes = Vec::new();
     let mut full = String::new();
     let mut pending = String::new();
     let mut last_emit = Instant::now();
@@ -289,7 +321,8 @@ async fn complete_stream(
         .await
         .map_err(|error| format!("读取流式回答失败：{error}"))?
     {
-        buffer.push_str(&String::from_utf8_lossy(&bytes));
+        raw_bytes.extend_from_slice(&bytes);
+        decode_utf8(&mut raw_bytes, &mut buffer);
 
         while let Some(index) = buffer.find('\n') {
             let line = buffer[..index].trim().to_string();
@@ -334,6 +367,25 @@ async fn complete_stream(
 #[cfg(test)]
 mod stream_tests {
     use super::*;
+
+    #[test]
+    fn decodes_utf8_split_across_chunks() {
+        let bytes = "你好".as_bytes();
+        let mut raw = Vec::new();
+        let mut text = String::new();
+
+        raw.extend_from_slice(&bytes[..1]);
+        decode_utf8(&mut raw, &mut text);
+        assert_eq!(text, "");
+
+        raw.extend_from_slice(&bytes[1..4]);
+        decode_utf8(&mut raw, &mut text);
+        assert_eq!(text, "你");
+
+        raw.extend_from_slice(&bytes[4..]);
+        decode_utf8(&mut raw, &mut text);
+        assert_eq!(text, "你好");
+    }
 
     #[test]
     fn parses_anthropic_delta() {

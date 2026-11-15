@@ -40,6 +40,7 @@ pub fn append_annotations(
         if width <= 0.0 || height <= 0.0 {
             continue;
         }
+        let rotation = page_rotation(&doc, page_id);
 
         for annotation in items {
             let Some(rects) = anchor_rects(annotation) else {
@@ -49,6 +50,12 @@ pub fn append_annotations(
                 continue;
             }
 
+            // 阅读器里的矩形按显示方向（已应用 /Rotate）归一化，
+            // 写回 PDF 用户空间前先逆旋转。
+            let rects: Vec<Rect> = rects
+                .into_iter()
+                .map(|rect| unrotate_rect(rect, rotation))
+                .collect();
             let color = color_rgb(&annotation.color);
             let (quad_points, bounds) = quad_points(&rects, x0, y1, width, height);
             let subtype = match annotation.kind.as_str() {
@@ -98,7 +105,7 @@ fn page_box(doc: &Document, page_id: ObjectId) -> Result<(f32, f32, f32, f32), S
     let value = inherited(doc, page_id, b"CropBox")
         .or_else(|| inherited(doc, page_id, b"MediaBox"))
         .ok_or_else(|| "页面缺少 CropBox / MediaBox".to_string())?;
-    let array = value
+    let array = resolve_object(doc, value)
         .as_array()
         .map_err(|_| "页面边界不是数组".to_string())?;
     if array.len() < 4 {
@@ -110,6 +117,52 @@ fn page_box(doc: &Document, page_id: ObjectId) -> Result<(f32, f32, f32, f32), S
         number(&array[2]),
         number(&array[3]),
     ))
+}
+
+/// PDF 的属性值可以直接写，也可以是对间接对象的引用；lopdf 不会自动解引用。
+fn resolve_object<'a>(doc: &'a Document, value: &'a Object) -> &'a Object {
+    match value {
+        Object::Reference(id) => doc.get_object(*id).unwrap_or(value),
+        _ => value,
+    }
+}
+
+/// /Rotate 是显示时的顺时针旋转角度；标注矩形按旋转后的页面归一化，
+/// 写回 PDF 用户空间前要先逆旋转。
+fn page_rotation(doc: &Document, page_id: ObjectId) -> i32 {
+    let Some(value) = inherited(doc, page_id, b"Rotate") else {
+        return 0;
+    };
+    let value = match resolve_object(doc, value) {
+        Object::Integer(value) => *value,
+        Object::Real(value) => *value as i64,
+        _ => 0,
+    };
+    ((value % 360 + 360) % 360) as i32
+}
+
+fn unrotate_rect(rect: Rect, rotation: i32) -> Rect {
+    match rotation {
+        90 => Rect {
+            x: rect.y,
+            y: 1.0 - rect.x - rect.w,
+            w: rect.h,
+            h: rect.w,
+        },
+        180 => Rect {
+            x: 1.0 - rect.x - rect.w,
+            y: 1.0 - rect.y - rect.h,
+            w: rect.w,
+            h: rect.h,
+        },
+        270 => Rect {
+            x: 1.0 - rect.y - rect.h,
+            y: rect.x,
+            w: rect.h,
+            h: rect.w,
+        },
+        _ => rect,
+    }
 }
 
 fn inherited<'a>(doc: &'a Document, mut id: ObjectId, key: &[u8]) -> Option<&'a Object> {
@@ -134,7 +187,7 @@ fn number(value: &Object) -> f32 {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 struct Rect {
     x: f32,
     y: f32,
@@ -289,8 +342,8 @@ fn write_pdf(doc: &mut Document, output: &Path) -> Result<(), String> {
     drop(file);
 
     if let Err(error) = fs::rename(&temp, output) {
-        let _ = fs::remove_file(output);
-        fs::rename(&temp, output).map_err(|_| format!("保存导出 PDF 失败：{error}"))?;
+        let _ = fs::remove_file(&temp);
+        return Err(format!("保存导出 PDF 失败：{error}"));
     }
     Ok(())
 }
@@ -410,5 +463,43 @@ mod tests {
         fs::write(&path, include_bytes!("../../public/sample.pdf")).unwrap();
         assert!(append_annotations(&path, &path, &[]).is_err());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unrotates_normalized_rects() {
+        let rect = Rect {
+            x: 0.25,
+            y: 0.5,
+            w: 0.125,
+            h: 0.25,
+        };
+        assert_eq!(unrotate_rect(rect, 0), rect);
+        assert_eq!(
+            unrotate_rect(rect, 90),
+            Rect {
+                x: 0.5,
+                y: 0.625,
+                w: 0.25,
+                h: 0.125,
+            }
+        );
+        assert_eq!(
+            unrotate_rect(rect, 180),
+            Rect {
+                x: 0.625,
+                y: 0.25,
+                w: 0.125,
+                h: 0.25,
+            }
+        );
+        assert_eq!(
+            unrotate_rect(rect, 270),
+            Rect {
+                x: 0.25,
+                y: 0.25,
+                w: 0.25,
+                h: 0.125,
+            }
+        );
     }
 }

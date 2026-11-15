@@ -53,6 +53,15 @@ pub fn ensure_dirs(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// 扫描与导入匹配 rel_path 时共用的键；Windows 路径大小写不敏感。
+fn rel_path_key(path: &str) -> String {
+    if cfg!(windows) {
+        path.to_lowercase()
+    } else {
+        path.to_string()
+    }
+}
+
 /// 切换书库目录：校验可写、写设置、清空旧索引，再扫描新目录。
 pub fn set_root(app: &AppHandle, path: &str) -> Result<ScanReport, String> {
     let trimmed = path.trim();
@@ -233,6 +242,22 @@ fn unique_dest(books: &Path, name: &str, hash: &str) -> PathBuf {
     books.join(format!("{stem}-{hash}.{extension}"))
 }
 
+/// 目标 rel_path 若被旧索引占用（文件缺失或内容已变），在 upsert 前清掉。
+/// 调用方用事务包住清理与写入，复制或写入失败都不会丢掉旧行。
+fn clear_stale_rows_at(
+    conn: &rusqlite::Connection,
+    relative: &str,
+    new_id: &str,
+    now: i64,
+) -> Result<(), String> {
+    for stale in db::find_by_rel_path(conn, relative)? {
+        if stale.id != new_id {
+            db::remove_document(conn, &stale.id, now)?;
+        }
+    }
+    Ok(())
+}
+
 fn copy_atomic(source: &Path, destination: &Path) -> Result<(), String> {
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent).map_err(|error| format!("创建目录失败：{error}"))?;
@@ -240,8 +265,8 @@ fn copy_atomic(source: &Path, destination: &Path) -> Result<(), String> {
     let temp = destination.with_extension(format!("pdf.tmp-{}", process::id()));
     fs::copy(source, &temp).map_err(|error| format!("复制 PDF 失败：{error}"))?;
     if let Err(error) = fs::rename(&temp, destination) {
-        let _ = fs::remove_file(destination);
-        fs::rename(&temp, destination).map_err(|_| format!("保存 PDF 失败：{error}"))?;
+        let _ = fs::remove_file(&temp);
+        return Err(format!("保存 PDF 失败：{error}"));
     }
     Ok(())
 }
@@ -625,8 +650,10 @@ fn write_sidecar_bytes(root: &Path, path: &Path, bytes: &[u8]) -> Result<(), Str
     fs::write(&temp, bytes).map_err(|error| format!("写入标注失败：{error}"))?;
 
     if let Err(error) = fs::rename(&temp, path) {
-        let _ = fs::remove_file(path);
-        fs::rename(&temp, path).map_err(|_| format!("保存标注失败：{error}"))?;
+        // 删除目标再重试会在重试也失败时毁掉唯一一份旧 sidecar。
+        // Windows 的 rename 本身就会替换已存在的目标，失败时保留旧文件即可。
+        let _ = fs::remove_file(&temp);
+        return Err(format!("保存标注失败：{error}"));
     }
     Ok(())
 }
@@ -710,15 +737,15 @@ pub fn import_document(app: &AppHandle, source: &str) -> Result<ImportResult, St
     let name = safe_name(original_name);
     let books = root.join("books");
     let destination = unique_dest(&books, &name, &id);
-    if !destination.exists() {
-        copy_atomic(&source, &destination)?;
-    }
-
     let relative = destination
         .strip_prefix(&root)
         .map_err(|_| "无法计算书库相对路径".to_string())?
         .to_string_lossy()
         .replace('\\', "/");
+
+    if !destination.exists() {
+        copy_atomic(&source, &destination)?;
+    }
     let file_metadata =
         fs::metadata(&destination).map_err(|error| format!("读取书库文件失败：{error}"))?;
     let document_name = destination
@@ -758,7 +785,16 @@ pub fn import_document(app: &AppHandle, source: &str) -> Result<ImportResult, St
         .db
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    db::upsert_document(&conn, &row)?;
+    // 复制已经成功；清理旧行与写入新行放在同一事务里，避免 rel_path 唯一约束
+    // 冲突，也避免清理后 upsert 失败留下无索引的文件。
+    let transaction = conn
+        .unchecked_transaction()
+        .map_err(|error| format!("开始导入事务失败：{error}"))?;
+    clear_stale_rows_at(&transaction, &row.rel_path, &id, now)?;
+    db::upsert_document(&transaction, &row)?;
+    transaction
+        .commit()
+        .map_err(|error| format!("提交导入事务失败：{error}"))?;
 
     let annotations = merge_document(&conn, &root, &mut row, files, ignored)?;
     let document = db::find_by_id(&conn, &id)?.unwrap_or(row);
@@ -883,7 +919,14 @@ fn import_html_snapshot_into(
     };
 
     let (files, ignored) = load_sidecars_for(root, &id)?;
-    db::upsert_document(conn, &row)?;
+    let transaction = conn
+        .unchecked_transaction()
+        .map_err(|error| format!("开始导入事务失败：{error}"))?;
+    clear_stale_rows_at(&transaction, &row.rel_path, &id, now)?;
+    db::upsert_document(&transaction, &row)?;
+    transaction
+        .commit()
+        .map_err(|error| format!("提交导入事务失败：{error}"))?;
     let annotations = merge_document(conn, root, &mut row, files, ignored)?;
     let document = db::find_by_id(conn, &id)?.unwrap_or(row);
     Ok(ImportResult {
@@ -907,18 +950,24 @@ pub fn scan(app: &AppHandle) -> Result<ScanReport, String> {
     let mut entries = Vec::new();
     let mut seen_paths = std::collections::HashSet::new();
     for entry in fs::read_dir(&books).map_err(|error| format!("读取书库失败：{error}"))? {
-        let entry = entry.map_err(|error| format!("读取书库条目失败：{error}"))?;
+        let Ok(entry) = entry else {
+            continue;
+        };
         let path = entry.path();
         if !path.is_file() || !is_supported_document(&path) {
             continue;
         }
-        let metadata = fs::metadata(&path).map_err(|error| format!("读取书库文件失败：{error}"))?;
         let relative = path
             .strip_prefix(&root)
             .map_err(|_| "无法计算书库相对路径".to_string())?
             .to_string_lossy()
             .replace('\\', "/");
-        seen_paths.insert(relative.clone());
+        // 先记下路径：单个文件读不到时不应把它当成「已缺失」并从书库隐藏。
+        seen_paths.insert(rel_path_key(&relative));
+        let Ok(metadata) = fs::metadata(&path) else {
+            eprintln!("跳过无法读取的文件：{}", path.display());
+            continue;
+        };
         entries.push((path, relative, metadata.len(), mtime_ms(&metadata)));
     }
     entries.sort_by(|left, right| left.0.cmp(&right.0));
@@ -932,20 +981,32 @@ pub fn scan(app: &AppHandle) -> Result<ScanReport, String> {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         db::list_documents(&conn)?
             .into_iter()
-            .map(|row| (row.rel_path.clone(), row))
+            .map(|row| (rel_path_key(&row.rel_path), row))
             .collect()
     };
 
     let mut resolved = Vec::with_capacity(entries.len());
     for (path, relative, size, mtime) in entries {
-        let by_path = known.get(&relative).cloned();
+        let by_path = known.get(&rel_path_key(&relative)).cloned();
         // 路径、大小、修改时间都没变就沿用旧哈希，否则重新计算。
         let id = match &by_path {
             Some(row) if row.size == size && row.mtime == mtime => row.id.clone(),
-            _ => hash_file(&path)?,
+            _ => match hash_file(&path) {
+                Ok(id) => id,
+                Err(error) => {
+                    // 云盘占用、扫描期间被改名都不该让整座书库失去索引。
+                    eprintln!("跳过无法读取的文件 {}：{error}", path.display());
+                    continue;
+                }
+            },
         };
         resolved.push((path, relative, size, mtime, id, by_path));
     }
+
+    // 这一轮里仍然存在的内容 id：改名后的文件会在后续条目里重绑旧行，
+    // 不能提前把它当成「被替换」删掉。
+    let resolved_ids: std::collections::HashSet<String> =
+        resolved.iter().map(|entry| entry.4.clone()).collect();
 
     let conn = state
         .db
@@ -956,15 +1017,23 @@ pub fn scan(app: &AppHandle) -> Result<ScanReport, String> {
     let mut duplicate_pdfs = 0;
 
     for (path, relative, size, mtime, id, by_path) in resolved {
+        if let Some(stale) = &by_path {
+            if stale.id != id {
+                // 同一轮扫描里，改名后的文件可能已经把这一行重绑到新路径；
+                // 只有旧行仍指向当前路径、且旧内容没有出现在本轮其他路径时才删除。
+                let still_here = db::find_by_id(&conn, &stale.id)?
+                    .is_some_and(|row| rel_path_key(&row.rel_path) == rel_path_key(&relative));
+                if still_here && !resolved_ids.contains(&stale.id) {
+                    db::remove_document(&conn, &stale.id, now)?;
+                }
+            }
+        }
+
+        // 内容已由更早排序的同内容文件索引：旧行必须在跳过之前清理，
+        // 否则它会永远挂着旧内容留在库里。
         if !seen.insert(id.clone()) {
             duplicate_pdfs += 1;
             continue;
-        }
-
-        if let Some(stale) = &by_path {
-            if stale.id != id {
-                db::remove_document(&conn, &stale.id, now)?;
-            }
         }
 
         let prior = db::find_by_id(&conn, &id)?;
@@ -1047,7 +1116,7 @@ pub fn scan(app: &AppHandle) -> Result<ScanReport, String> {
     // 文件被删除或还没同步下来的文档：索引保留，但不再显示成幽灵卡片。
     let missing_documents = db::list_documents(&conn)?
         .iter()
-        .filter(|row| !seen_paths.contains(&row.rel_path))
+        .filter(|row| !seen_paths.contains(&rel_path_key(&row.rel_path)))
         .count();
     Ok(ScanReport {
         root: root.to_string_lossy().into_owned(),
@@ -1183,8 +1252,8 @@ pub fn save_cover(
     let temp = path.with_extension(format!("jpg.tmp-{}-{}", process::id(), now_ms()));
     fs::write(&temp, &bytes).map_err(|error| format!("写入封面失败：{error}"))?;
     if let Err(error) = fs::rename(&temp, &path) {
-        let _ = fs::remove_file(&path);
-        fs::rename(&temp, &path).map_err(|_| format!("保存封面失败：{error}"))?;
+        let _ = fs::remove_file(&temp);
+        return Err(format!("保存封面失败：{error}"));
     }
 
     db::set_cover(&conn, doc_id, &relative, &source)?;
@@ -1555,10 +1624,13 @@ pub fn delete_annotation(app: &AppHandle, doc_id: &str, id: &str) -> Result<(), 
         return Ok(());
     };
     annotation.deleted = true;
-    annotation.updated_at = now_ms();
-    db::upsert_annotation(&conn, doc_id, &annotation)?;
+    // 用户主动删除必须赢过当前行，即使本机时钟比已存时间戳慢。
+    annotation.updated_at = now_ms().max(annotation.updated_at + 1);
+    let applied = db::upsert_annotation(&conn, doc_id, &annotation)?;
     // 卡片不跟着删：保留内容，只标记来源失效。
-    db::orphan_cards_for_annotation(&conn, id, annotation.updated_at)?;
+    if applied {
+        db::orphan_cards_for_annotation(&conn, id, annotation.updated_at)?;
+    }
     write_sidecar(&conn, &root, doc_id)
 }
 
@@ -3379,6 +3451,46 @@ mod tests {
             source_url: String::new(),
         };
         assert!(import_html_snapshot_into(&conn, &root, oversized).is_err());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reimports_snapshot_over_a_stale_missing_row() {
+        let dir = temp_dir("html-stale-row");
+        let root = dir.join("library");
+        ensure_dirs(&root).unwrap();
+        let conn = db::open(&dir.join("test.db")).unwrap();
+        let input = |html: &str| HtmlSnapshotInput {
+            name: "文章".to_string(),
+            html: html.to_string(),
+            title: String::new(),
+            author: String::new(),
+            source_url: String::new(),
+        };
+
+        let first = import_html_snapshot_into(
+            &conn,
+            &root,
+            input("<html><body><p>first</p></body></html>"),
+        )
+        .unwrap();
+        // 文件被外部删除、索引行还在：模拟下一次扫描前的状态。
+        fs::remove_file(&first.document.path).unwrap();
+
+        let second = import_html_snapshot_into(
+            &conn,
+            &root,
+            input("<html><body><p>second</p></body></html>"),
+        )
+        .unwrap();
+
+        assert_ne!(second.document.id, first.document.id);
+        assert!(db::find_by_id(&conn, &first.document.id).unwrap().is_none());
+        assert!(db::find_by_id(&conn, &second.document.id)
+            .unwrap()
+            .is_some());
+        assert!(Path::new(&second.document.path).is_file());
 
         let _ = fs::remove_dir_all(&dir);
     }

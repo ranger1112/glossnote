@@ -444,7 +444,7 @@ test('页内查找：Ctrl+F 搜索并定位命中', async ({ page }) => {
   await input.fill('Anchoring');
 
   await expect(page.locator('.find-count')).toContainText('/', { timeout: 20_000 });
-  await expect(page.locator('.search-hit').first()).toBeVisible();
+  await expect(page.locator('.find-hit').first()).toBeVisible();
 
   const firstCount = (await page.locator('.find-count').textContent()) ?? '';
   await page.locator('.find-bar button[title="下一个"]').click();

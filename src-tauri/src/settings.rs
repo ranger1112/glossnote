@@ -15,6 +15,22 @@ use tauri::{AppHandle, Manager};
 /// 刚保存的字段覆盖回旧快照（尤其是 mcp.enabled / exposeText）。
 static SETTINGS_WRITE: Mutex<()> = Mutex::new(());
 
+/// 最近一次读取设置文件失败的原因。读失败时不清空文件，也不允许保存覆盖它。
+static SETTINGS_READ_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
+fn set_read_error(error: Option<String>) {
+    if let Ok(mut slot) = SETTINGS_READ_ERROR.lock() {
+        *slot = error;
+    }
+}
+
+pub fn read_error() -> Option<String> {
+    SETTINGS_READ_ERROR
+        .lock()
+        .ok()
+        .and_then(|slot| slot.clone())
+}
+
 pub(crate) fn write_lock() -> MutexGuard<'static, ()> {
     SETTINGS_WRITE
         .lock()
@@ -159,31 +175,58 @@ pub fn path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(app_data_dir(app)?.join("settings.json"))
 }
 
-/// 解析失败时把坏文件改名留档，再用默认值启动。
+/// 把无法使用的设置文件改名留档；rename 因占用失败时至少复制一份副本。
+fn backup_settings_file(path: &Path) -> Option<PathBuf> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    let backup = path.with_extension(format!("json.broken-{stamp}"));
+    if fs::rename(path, &backup).is_ok() {
+        return Some(backup);
+    }
+    fs::copy(path, &backup).ok().map(|_| backup)
+}
+
+/// 读取失败（编码非法、权限、云盘瞬时占用）与解析失败一样要留档：
 /// 直接回退默认值会让用户以为书库「空了」，而且下一次保存会覆盖掉原文件。
 pub fn load_reporting(app: &AppHandle) -> (AppSettings, Option<PathBuf>) {
     let Ok(path) = path(app) else {
         return (AppSettings::default(), None);
     };
-    let Ok(text) = fs::read_to_string(&path) else {
-        return (AppSettings::default(), None);
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => {
+            set_read_error(None);
+            text
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            set_read_error(None);
+            return (AppSettings::default(), None);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+            // 非 UTF-8：内容不可用，留档后按默认值启动。
+            eprintln!("设置文件编码无效：{error}");
+            set_read_error(None);
+            return (AppSettings::default(), backup_settings_file(&path));
+        }
+        Err(error) => {
+            // 权限、占用等瞬时错误：不要动文件，并让保存拒绝覆盖它。
+            let message = format!("读取设置文件失败：{error}");
+            eprintln!("{message}");
+            set_read_error(Some(message));
+            return (AppSettings::default(), None);
+        }
     };
     match serde_json::from_str::<AppSettings>(&text) {
         Ok(mut settings) => {
+            set_read_error(None);
             settings.normalize();
             (settings, None)
         }
         Err(error) => {
             eprintln!("设置文件无法解析：{error}");
-            let stamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_millis())
-                .unwrap_or(0);
-            let backup = path.with_extension(format!("json.broken-{stamp}"));
-            match fs::rename(&path, &backup) {
-                Ok(()) => (AppSettings::default(), Some(backup)),
-                Err(_) => (AppSettings::default(), None),
-            }
+            set_read_error(None);
+            (AppSettings::default(), backup_settings_file(&path))
         }
     }
 }
@@ -215,6 +258,11 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 pub fn save(app: &AppHandle, settings: &AppSettings) -> Result<(), String> {
+    if let Some(error) = read_error() {
+        return Err(format!(
+            "{error}。为避免覆盖原文件，本次不保存设置；请检查文件权限或占用后重启应用。"
+        ));
+    }
     let path = path(app)?;
     let bytes =
         serde_json::to_vec_pretty(settings).map_err(|error| format!("序列化设置失败：{error}"))?;
