@@ -15,6 +15,22 @@ use tauri::{AppHandle, Manager};
 /// 刚保存的字段覆盖回旧快照（尤其是 mcp.enabled / exposeText）。
 static SETTINGS_WRITE: Mutex<()> = Mutex::new(());
 
+/// 最近一次读取设置文件失败的原因。读失败时不清空文件，也不允许保存覆盖它。
+static SETTINGS_READ_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
+fn set_read_error(error: Option<String>) {
+    if let Ok(mut slot) = SETTINGS_READ_ERROR.lock() {
+        *slot = error;
+    }
+}
+
+pub fn read_error() -> Option<String> {
+    SETTINGS_READ_ERROR
+        .lock()
+        .ok()
+        .and_then(|slot| slot.clone())
+}
+
 pub(crate) fn write_lock() -> MutexGuard<'static, ()> {
     SETTINGS_WRITE
         .lock()
@@ -179,22 +195,37 @@ pub fn load_reporting(app: &AppHandle) -> (AppSettings, Option<PathBuf>) {
         return (AppSettings::default(), None);
     };
     let text = match fs::read_to_string(&path) {
-        Ok(text) => text,
+        Ok(text) => {
+            set_read_error(None);
+            text
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            set_read_error(None);
             return (AppSettings::default(), None);
         }
-        Err(error) => {
-            eprintln!("读取设置文件失败：{error}");
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+            // 非 UTF-8：内容不可用，留档后按默认值启动。
+            eprintln!("设置文件编码无效：{error}");
+            set_read_error(None);
             return (AppSettings::default(), backup_settings_file(&path));
+        }
+        Err(error) => {
+            // 权限、占用等瞬时错误：不要动文件，并让保存拒绝覆盖它。
+            let message = format!("读取设置文件失败：{error}");
+            eprintln!("{message}");
+            set_read_error(Some(message));
+            return (AppSettings::default(), None);
         }
     };
     match serde_json::from_str::<AppSettings>(&text) {
         Ok(mut settings) => {
+            set_read_error(None);
             settings.normalize();
             (settings, None)
         }
         Err(error) => {
             eprintln!("设置文件无法解析：{error}");
+            set_read_error(None);
             (AppSettings::default(), backup_settings_file(&path))
         }
     }
@@ -227,6 +258,11 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 pub fn save(app: &AppHandle, settings: &AppSettings) -> Result<(), String> {
+    if let Some(error) = read_error() {
+        return Err(format!(
+            "{error}。为避免覆盖原文件，本次不保存设置；请检查文件权限或占用后重启应用。"
+        ));
+    }
     let path = path(app)?;
     let bytes =
         serde_json::to_vec_pretty(settings).map_err(|error| format!("序列化设置失败：{error}"))?;

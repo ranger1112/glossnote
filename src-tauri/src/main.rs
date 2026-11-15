@@ -745,6 +745,14 @@ fn main() {
                     "书库目录无法使用（{error}）。可以在「设置 → 书库位置」改到本机目录，或恢复该目录后重新扫描。"
                 ));
             }
+            if let Some(error) = settings::read_error() {
+                if !notice.is_empty() {
+                    notice.push('\n');
+                }
+                notice.push_str(&format!(
+                    "{error}。为避免覆盖原文件，本次会话不会保存设置；请检查文件权限或占用后重启。"
+                ));
+            }
 
             let mcp_state = mcp::McpState::from_settings(&settings.mcp);
             let mcp_enabled = settings.mcp.enabled;
