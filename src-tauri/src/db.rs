@@ -234,14 +234,15 @@ fn migrate(conn: &Connection) -> Result<(), String> {
 /// 索引版本：
 /// - 0：没有 FTS 索引，page_texts 可能已有行；
 /// - 1：索引只有二元组，单字查询回退 LIKE；
-/// - 2：单字 + 二元组，单字查询也走 FTS。
+/// - 2：单字 + 二元组，单字查询也走 FTS；
+/// - 3：PDF 文本拼接修正后，旧 page_texts / chunks 的偏移与新文本不兼容。
 ///
 /// 升级时先按内容表整体重建索引，再按新分词改写 tokens——否则回填的 UPDATE
 /// 触发器会对不存在的索引行执行 'delete'，FTS5 会直接报「database disk image
 /// is malformed」，上层再把 library.db 当成坏库备份重建，阅读进度等本机状态就丢了。
 /// 用 user_version 记住迁移已完成，避免每次启动都重建整本索引。
 fn upgrade_page_search(conn: &Connection) -> Result<(), String> {
-    const INDEX_VERSION: i64 = 2;
+    const INDEX_VERSION: i64 = 3;
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(|error| format!("读取索引版本失败：{error}"))?;
@@ -249,12 +250,23 @@ fn upgrade_page_search(conn: &Connection) -> Result<(), String> {
         return Ok(());
     }
 
-    conn.execute(
-        "INSERT INTO page_search(page_search) VALUES ('rebuild')",
-        [],
-    )
-    .map_err(|error| format!("重建正文搜索索引失败：{error}"))?;
-    reindex_page_tokens(conn)?;
+    if version < 2 {
+        conn.execute(
+            "INSERT INTO page_search(page_search) VALUES ('rebuild')",
+            [],
+        )
+        .map_err(|error| format!("重建正文搜索索引失败：{error}"))?;
+        reindex_page_tokens(conn)?;
+    }
+
+    // 文本拼接规则变了：清空逐页缓存与 AI 分段索引，强制按新偏移重建。
+    // 先修好 FTS 索引再删，避免 DELETE 触发器对不一致的索引执行删除。
+    conn.execute("DELETE FROM page_texts", [])
+        .map_err(|error| format!("清理页面文字缓存失败：{error}"))?;
+    conn.execute("DELETE FROM chunks", [])
+        .map_err(|error| format!("清理全文索引失败：{error}"))?;
+    conn.execute("UPDATE documents SET text_indexed_at = 0", [])
+        .map_err(|error| format!("重置全文索引状态失败：{error}"))?;
     conn.pragma_update(None, "user_version", INDEX_VERSION)
         .map_err(|error| format!("更新索引版本失败：{error}"))?;
     Ok(())
@@ -365,16 +377,21 @@ pub fn find_by_id(conn: &Connection, id: &str) -> Result<Option<DocumentRow>, St
     .map_err(|error| format!("查询文档失败：{error}"))
 }
 
-/// 按相对路径查文档。用 NOCASE 兼容 Windows 的大小写不敏感路径，
-/// 避免导入时新建一条与旧行指向同一物理文件、但 rel_path 大小写不同的记录。
-pub fn find_by_rel_path(conn: &Connection, rel_path: &str) -> Result<Option<DocumentRow>, String> {
-    conn.query_row(
-        &format!("{DOCUMENT_SELECT} WHERE d.rel_path = ?1 COLLATE NOCASE"),
-        params![rel_path],
-        row_to_document,
-    )
-    .optional()
-    .map_err(|error| format!("查询文档路径失败：{error}"))
+/// 按相对路径查文档。Windows 路径大小写不敏感，用 Unicode 小写比较，
+/// 并返回全部匹配行——调用方负责清理重复或过期的索引。
+pub fn find_by_rel_path(conn: &Connection, rel_path: &str) -> Result<Vec<DocumentRow>, String> {
+    let case_insensitive = cfg!(windows);
+    let wanted = rel_path.to_lowercase();
+    Ok(list_documents(conn)?
+        .into_iter()
+        .filter(|row| {
+            if case_insensitive {
+                row.rel_path.to_lowercase() == wanted
+            } else {
+                row.rel_path == rel_path
+            }
+        })
+        .collect())
 }
 
 pub fn list_documents(conn: &Connection) -> Result<Vec<DocumentRow>, String> {
@@ -763,14 +780,15 @@ pub fn upsert_annotation(
     conn: &Connection,
     doc_id: &str,
     annotation: &Annotation,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let anchor = serde_json::to_string(&annotation.anchor)
         .map_err(|error| format!("序列化锚点失败：{error}"))?;
     let tags = serde_json::to_string(&annotation.tags)
         .map_err(|error| format!("序列化标签失败：{error}"))?;
 
-    conn.execute(
-        "INSERT INTO annotations
+    let applied = conn
+        .execute(
+            "INSERT INTO annotations
            (id, doc_id, page, anchor, color, kind, body, tags, created_at, updated_at, deleted)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
          ON CONFLICT(id) DO UPDATE SET
@@ -784,24 +802,25 @@ pub fn upsert_annotation(
            updated_at = excluded.updated_at,
            deleted = excluded.deleted
          WHERE excluded.updated_at >= annotations.updated_at",
-        params![
-            annotation.id,
-            doc_id,
-            annotation.page as i64,
-            anchor,
-            annotation.color,
-            annotation.kind,
-            annotation.body,
-            tags,
-            annotation.created_at,
-            annotation.updated_at,
-            annotation.deleted as i64,
-        ],
-    )
-    .map_err(|error| format!("写入标注失败：{error}"))?;
+            params![
+                annotation.id,
+                doc_id,
+                annotation.page as i64,
+                anchor,
+                annotation.color,
+                annotation.kind,
+                annotation.body,
+                tags,
+                annotation.created_at,
+                annotation.updated_at,
+                annotation.deleted as i64,
+            ],
+        )
+        .map_err(|error| format!("写入标注失败：{error}"))?
+        > 0;
 
-    // 撤销删除会把 deleted = 0 的同一条标注写回来；来源卡片要跟着恢复可用。
-    if !annotation.deleted {
+    // 只有标注写入真正生效时才恢复卡片：被守卫拦下的旧快照不能把失效卡片激活。
+    if applied && !annotation.deleted {
         conn.execute(
             "UPDATE cards SET status = 'active', updated_at = ?2
              WHERE source_annotation_id = ?1 AND status = 'orphaned' AND deleted = 0",
@@ -810,7 +829,7 @@ pub fn upsert_annotation(
         .map_err(|error| format!("恢复卡片状态失败：{error}"))?;
     }
 
-    Ok(())
+    Ok(applied)
 }
 
 pub fn search_annotations(conn: &Connection, query: &str) -> Result<Vec<SearchHit>, String> {
@@ -1701,6 +1720,17 @@ mod tests {
 
         // 修复前：回填的 UPDATE 触发器对空索引执行 delete，报 SQLITE_CORRUPT。
         migrate(&conn).unwrap();
+        // 0.6.2 起旧文本缓存会因拼接规则变化被清空，随后按新规则重建。
+        assert!(load_page_texts(&conn, "d1").unwrap().is_empty());
+        save_page_texts(
+            &conn,
+            "d1",
+            &[PageTextInput {
+                page: 0,
+                text: "旧缓存正文".to_string(),
+            }],
+        )
+        .unwrap();
         assert_eq!(search_pages(&conn, "旧缓存").unwrap().len(), 1);
         // 单字查询也要在迁移后立即可用。
         assert_eq!(search_pages(&conn, "缓").unwrap().len(), 1);
@@ -1718,8 +1748,18 @@ mod tests {
         .unwrap();
         conn.pragma_update(None, "user_version", 1).unwrap();
 
-        // 旧索引下单字查询命中不了；迁移后重写 tokens 才能走 FTS。
         migrate(&conn).unwrap();
+        // 旧缓存不再沿用，重新写入后单字与短语都应命中。
+        assert!(load_page_texts(&conn, "d1").unwrap().is_empty());
+        save_page_texts(
+            &conn,
+            "d1",
+            &[PageTextInput {
+                page: 0,
+                text: "认知科学".to_string(),
+            }],
+        )
+        .unwrap();
         assert_eq!(search_pages(&conn, "科").unwrap().len(), 1);
         assert_eq!(search_pages(&conn, "认知科学").unwrap().len(), 1);
         assert_eq!(search_pages(&conn, "认知").unwrap().len(), 1);
@@ -1742,7 +1782,42 @@ mod tests {
 
         // 空文本页不会触发回填；索引也必须先重建，否则 DELETE 触发器的 delete 会报损坏。
         migrate(&conn).unwrap();
+        assert!(load_page_texts(&conn, "d1").unwrap().is_empty());
         remove_document(&conn, "d1", 2).unwrap();
+    }
+
+    #[test]
+    fn upgrade_clears_stale_text_caches() {
+        let conn = seeded();
+        save_page_texts(
+            &conn,
+            "d1",
+            &[PageTextInput {
+                page: 0,
+                text: "旧拼接文本".to_string(),
+            }],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO chunks (id, doc_id, page, text) VALUES ('c1', 'd1', 0, '旧拼接文本')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE documents SET text_indexed_at = 1 WHERE id = 'd1'",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 2).unwrap();
+
+        migrate(&conn).unwrap();
+
+        assert!(load_page_texts(&conn, "d1").unwrap().is_empty());
+        assert!(!is_text_indexed(&conn, "d1").unwrap());
+        let chunks: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(chunks, 0);
     }
 
     #[test]
@@ -1984,13 +2059,13 @@ mod tests {
         let mut newer = get_annotation(&conn, "a1").unwrap().unwrap();
         newer.body = "newer".to_string();
         newer.updated_at = 20;
-        upsert_annotation(&conn, "d1", &newer).unwrap();
+        assert!(upsert_annotation(&conn, "d1", &newer).unwrap());
 
         // 并发/乱序落盘：较旧的快照不能覆盖较新的状态。
         let mut older = newer.clone();
         older.body = "older".to_string();
         older.updated_at = 10;
-        upsert_annotation(&conn, "d1", &older).unwrap();
+        assert!(!upsert_annotation(&conn, "d1", &older).unwrap());
 
         let stored = get_annotation(&conn, "a1").unwrap().unwrap();
         assert_eq!(stored.body, "newer");
@@ -1999,8 +2074,42 @@ mod tests {
         // 同一时间戳的重复写入仍要落盘，保证幂等保存不被误挡。
         let mut same_time = newer.clone();
         same_time.body = "same time".to_string();
-        upsert_annotation(&conn, "d1", &same_time).unwrap();
+        assert!(upsert_annotation(&conn, "d1", &same_time).unwrap());
         let stored = get_annotation(&conn, "a1").unwrap().unwrap();
         assert_eq!(stored.body, "same time");
+    }
+
+    #[test]
+    fn rejected_stale_upsert_does_not_reactivate_card() {
+        let conn = seeded();
+        conn.execute(
+            "INSERT INTO cards
+               (id, title, body, source_annotation_id, source_doc_id, source_page, links,
+                status, created_at, updated_at)
+             VALUES ('c1', '卡片', '', 'a1', 'd1', 0, '[]', 'orphaned', 1, 1)",
+            [],
+        )
+        .unwrap();
+
+        // 先让标注进入删除态，再把卡片置为失效。
+        let mut deleted = get_annotation(&conn, "a1").unwrap().unwrap();
+        deleted.deleted = true;
+        deleted.updated_at = 20;
+        assert!(upsert_annotation(&conn, "d1", &deleted).unwrap());
+        conn.execute("UPDATE cards SET status = 'orphaned' WHERE id = 'c1'", [])
+            .unwrap();
+
+        // 延迟到达的旧编辑被守卫拦下，卡片不能被重新激活。
+        let mut older = deleted.clone();
+        older.deleted = false;
+        older.updated_at = 10;
+        assert!(!upsert_annotation(&conn, "d1", &older).unwrap());
+
+        let status: String = conn
+            .query_row("SELECT status FROM cards WHERE id = 'c1'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(status, "orphaned");
     }
 }
