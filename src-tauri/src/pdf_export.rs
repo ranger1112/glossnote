@@ -105,7 +105,7 @@ fn page_box(doc: &Document, page_id: ObjectId) -> Result<(f32, f32, f32, f32), S
     let value = inherited(doc, page_id, b"CropBox")
         .or_else(|| inherited(doc, page_id, b"MediaBox"))
         .ok_or_else(|| "页面缺少 CropBox / MediaBox".to_string())?;
-    let array = value
+    let array = resolve_object(doc, value)
         .as_array()
         .map_err(|_| "页面边界不是数组".to_string())?;
     if array.len() < 4 {
@@ -119,12 +119,23 @@ fn page_box(doc: &Document, page_id: ObjectId) -> Result<(f32, f32, f32, f32), S
     ))
 }
 
+/// PDF 的属性值可以直接写，也可以是对间接对象的引用；lopdf 不会自动解引用。
+fn resolve_object<'a>(doc: &'a Document, value: &'a Object) -> &'a Object {
+    match value {
+        Object::Reference(id) => doc.get_object(*id).unwrap_or(value),
+        _ => value,
+    }
+}
+
 /// /Rotate 是显示时的顺时针旋转角度；标注矩形按旋转后的页面归一化，
 /// 写回 PDF 用户空间前要先逆旋转。
 fn page_rotation(doc: &Document, page_id: ObjectId) -> i32 {
-    let value = match inherited(doc, page_id, b"Rotate") {
-        Some(Object::Integer(value)) => *value,
-        Some(Object::Real(value)) => *value as i64,
+    let Some(value) = inherited(doc, page_id, b"Rotate") else {
+        return 0;
+    };
+    let value = match resolve_object(doc, value) {
+        Object::Integer(value) => *value,
+        Object::Real(value) => *value as i64,
         _ => 0,
     };
     ((value % 360 + 360) % 360) as i32
