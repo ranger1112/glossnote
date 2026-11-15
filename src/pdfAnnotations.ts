@@ -352,12 +352,12 @@ export async function buildImportedAnnotations(
   return { drafts, skipped };
 }
 
-/** 把导入草稿补成完整标注；时间戳保持同一批次的顺序。 */
+/** 把导入草稿补成完整标注；同一批次共用一个时间戳，绝不写入未来时间。 */
 export function draftsToAnnotations(
   drafts: ImportedDraft[],
   now = Date.now(),
 ): Annotation[] {
-  return drafts.map((draft, index) => ({
+  return drafts.map((draft) => ({
     id: crypto.randomUUID(),
     page: draft.page,
     anchor: draft.anchor,
@@ -365,7 +365,7 @@ export function draftsToAnnotations(
     kind: draft.kind,
     body: draft.body,
     tags: draft.tags,
-    createdAt: now + index,
-    updatedAt: now + index,
+    createdAt: now,
+    updatedAt: now,
   }));
 }

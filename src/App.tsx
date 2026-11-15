@@ -194,6 +194,11 @@ function persistScanEnhanceDocs(docs: Record<string, boolean>): void {
   }
 }
 
+/** 同一毫秒内的连续编辑也要严格递增，否则会被 SQLite 的 updated_at 守卫丢弃。 */
+function nextUpdatedAt(previous: number): number {
+  return Math.max(Date.now(), previous + 1);
+}
+
 function sourceHost(url: string): string {
   try {
     return new URL(url).hostname;
@@ -1123,13 +1128,12 @@ export default function App() {
   const applyHistory = useCallback(
     (target: Annotation[]) => {
       const before = annotationsRef.current;
-      const now = Date.now();
       const targetIds = new Set(target.map((item) => item.id));
       const changed: Annotation[] = [];
 
       const next = target.map((item) => {
         if (before.includes(item)) return item;
-        const updated = { ...item, updatedAt: now };
+        const updated = { ...item, updatedAt: nextUpdatedAt(item.updatedAt) };
         changed.push(updated);
         return updated;
       });
@@ -1137,7 +1141,7 @@ export default function App() {
       // 快照里没有、当前却存在的记录：撤销「添加」时要补一条墓碑。
       for (const item of before) {
         if (targetIds.has(item.id)) continue;
-        changed.push({ ...item, deleted: true, updatedAt: now });
+        changed.push({ ...item, deleted: true, updatedAt: nextUpdatedAt(item.updatedAt) });
       }
 
       annotationsRef.current = next;
@@ -1790,7 +1794,7 @@ export default function App() {
       const existing = annotationsRef.current.find((annotation) => annotation.id === id);
       if (!existing || existing.color === color) return;
 
-      const updated: Annotation = { ...existing, color, updatedAt: Date.now() };
+      const updated: Annotation = { ...existing, color, updatedAt: nextUpdatedAt(existing.updatedAt) };
       commit(
         annotationsRef.current.map((annotation) =>
           annotation.id === id ? updated : annotation,
@@ -1806,7 +1810,7 @@ export default function App() {
       const existing = annotationsRef.current.find((annotation) => annotation.id === id);
       if (!existing) return;
 
-      const updated: Annotation = { ...existing, body, updatedAt: Date.now() };
+      const updated: Annotation = { ...existing, body, updatedAt: nextUpdatedAt(existing.updatedAt) };
       commit(annotationsRef.current.map((annotation) => (annotation.id === id ? updated : annotation)));
       if (isTauri()) void persistAnnotation(docId, updated);
     },
@@ -1818,7 +1822,7 @@ export default function App() {
       const existing = annotationsRef.current.find((annotation) => annotation.id === id);
       if (!existing) return;
 
-      const updated: Annotation = { ...existing, tags, updatedAt: Date.now() };
+      const updated: Annotation = { ...existing, tags, updatedAt: nextUpdatedAt(existing.updatedAt) };
       commit(annotationsRef.current.map((annotation) => (annotation.id === id ? updated : annotation)));
       if (isTauri()) void persistAnnotation(docId, updated);
     },
@@ -1830,7 +1834,11 @@ export default function App() {
       const existing = annotationsRef.current.find((annotation) => annotation.id === id);
       if (!existing) return;
 
-      const updated: Annotation = { ...existing, deleted: true, updatedAt: Date.now() };
+      const updated: Annotation = {
+        ...existing,
+        deleted: true,
+        updatedAt: nextUpdatedAt(existing.updatedAt),
+      };
       commit(annotationsRef.current.map((annotation) => (annotation.id === id ? updated : annotation)));
       setCards((current) =>
         current.map((view) =>
@@ -2531,7 +2539,12 @@ export default function App() {
 
         // 保存期间可能已切到别的文档；旧文档的标注不能提交进新文档的列表。
         if (docRef.current?.id !== active.id) return;
-        commit([...annotationsRef.current, ...created]);
+        // 离开再回到同一文档时，重载的列表可能已经包含这批标注，按 id 去重。
+        const knownIds = new Set(annotationsRef.current.map((item) => item.id));
+        const fresh = created.filter((item) => !knownIds.has(item.id));
+        if (fresh.length > 0) {
+          commit([...annotationsRef.current, ...fresh]);
+        }
         setFilterColor(null);
         setFilterKind(null);
         setFilterSource('all');
