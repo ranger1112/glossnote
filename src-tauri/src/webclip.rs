@@ -10,7 +10,7 @@ use reqwest::{
 use serde::Serialize;
 use std::{
     collections::HashMap,
-    net::{IpAddr, SocketAddr, ToSocketAddrs},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs},
     path::Path,
     time::Duration,
 };
@@ -42,6 +42,8 @@ fn client_builder(timeout_secs: u64) -> ClientBuilder {
         .timeout(Duration::from_secs(timeout_secs))
         // 重定向手动跟随，每一跳都要重新做私网校验。
         .redirect(reqwest::redirect::Policy::none())
+        // SSRF 校验依赖自己解析并固定地址；系统代理会由代理解析，绕过校验。
+        .no_proxy()
         .user_agent(USER_AGENT)
 }
 
@@ -85,7 +87,7 @@ fn allow_private_urls() -> bool {
 
 /// 非全局 IPv4 网段。std 的 is_private / is_documentation 没有覆盖
 /// CGNAT、基准测试、IETF 保留、240/4 等段，这里按 IANA 特殊用途地址表补齐。
-fn ipv4_is_non_global(v4: std::net::Ipv4Addr) -> bool {
+fn ipv4_is_non_global(v4: Ipv4Addr) -> bool {
     let octets = v4.octets();
     v4.is_private()
         || v4.is_loopback()
@@ -102,30 +104,58 @@ fn ipv4_is_non_global(v4: std::net::Ipv4Addr) -> bool {
         || octets[0] >= 240
 }
 
+/// 非全局 IPv6 网段。NAT64 / 6to4 里的内嵌 IPv4 要单独判断，
+/// 否则会把 DNS64 / 6to4 网络上的公网地址整段误杀。
+fn ipv6_is_non_global(v6: Ipv6Addr) -> bool {
+    if let Some(v4) = v6.to_ipv4_mapped() {
+        return ipv4_is_non_global(v4);
+    }
+    let segments = v6.segments();
+    let octets = v6.octets();
+    let embed_v4 = |bytes: [u8; 4]| Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]);
+
+    if v6.is_loopback()
+        || v6.is_unspecified()
+        || v6.is_multicast()
+        || v6.is_unique_local()
+        || v6.is_unicast_link_local()
+    {
+        return true;
+    }
+    // fec0::/10 站点本地（已废弃，但部分旧网络仍可路由）。
+    if (segments[0] & 0xffc0) == 0xfec0 {
+        return true;
+    }
+    // NAT64 64:ff9b::/96：按内嵌 IPv4 判断；64:ff9b:1::/48 是本地使用，保守拦截。
+    if segments[0] == 0x0064 && segments[1] == 0xff9b {
+        if segments[2] != 0 {
+            return true;
+        }
+        return ipv4_is_non_global(embed_v4([octets[12], octets[13], octets[14], octets[15]]));
+    }
+    // 6to4 2002::/16：内嵌 IPv4 在接下来的 32 位。
+    if segments[0] == 0x2002 {
+        return ipv4_is_non_global(embed_v4([octets[2], octets[3], octets[4], octets[5]]));
+    }
+    // Teredo 2001::/32：客户端 IPv4 经过异或混淆，保守拦截。
+    if segments[0] == 0x2001 && segments[1] == 0 {
+        return true;
+    }
+    // 100::/64 仅用于丢弃。
+    if segments[0] == 0x0100 && segments[1] == 0 && segments[2] == 0 && segments[3] == 0 {
+        return true;
+    }
+    // IPv4 兼容 ::/96（已废弃）：内嵌 IPv4。
+    if segments[0..6].iter().all(|segment| *segment == 0) {
+        return ipv4_is_non_global(embed_v4([octets[12], octets[13], octets[14], octets[15]]));
+    }
+    false
+}
+
 fn blocked_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => ipv4_is_non_global(v4),
-        IpAddr::V6(v6) => {
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                return ipv4_is_non_global(v4);
-            }
-            let segments = v6.segments();
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast()
-                || v6.is_unique_local()
-                || v6.is_unicast_link_local()
-                // NAT64 64:ff9b::/96 与本地 NAT64 64:ff9b:1::/48
-                || (segments[0] == 0x0064 && segments[1] == 0xff9b)
-                // 6to4 2002::/16 与 Teredo 2001::/32
-                || segments[0] == 0x2002
-                || (segments[0] == 0x2001 && segments[1] == 0)
-                // 100::/64 仅用于丢弃
-                || (segments[0] == 0x0100
-                    && segments[1] == 0
-                    && segments[2] == 0
-                    && segments[3] == 0)
-        }
+        IpAddr::V6(v6) => ipv6_is_non_global(v6),
     }
 }
 
@@ -390,12 +420,23 @@ mod tests {
             "198.18.0.1",
             "192.0.0.1",
             "240.0.0.1",
+            "fec0::1",
+            "::7f00:1",
             "64:ff9b::a00:1",
+            "64:ff9b:1::1",
             "2002:7f00:1::1",
+            "2002:a00:1::1",
             "2001::1",
             "100::1",
         ] {
             assert!(blocked_ip(ip.parse().unwrap()), "{ip} 应被拒绝");
+        }
+    }
+
+    #[test]
+    fn allows_public_nat64_and_6to4_addresses() {
+        for ip in ["64:ff9b::808:808", "2002:808:808::1"] {
+            assert!(!blocked_ip(ip.parse().unwrap()), "{ip} 不应被拒绝");
         }
     }
 
